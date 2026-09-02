@@ -96,14 +96,40 @@ would show one host path twice and translate one host ID into two Desktop IDs.
 
 **Blocked by:** 2. Desktop Authoritative Add and ID Bridge.
 
-**Status:** ready
+**Status:** done
 
-- [ ] 4.1 Add Desktop remote edit/remove paths that wait for Headless commit and consume authoritative snapshot.
-- [ ] 4.2 Add two-direction integration cases: Desktop mutation updates Mobile-style client; Mobile-style mutation updates Desktop projection.
-- [ ] 4.3 Verify same-path retry stays idempotent, edit keeps host ID, and edit path collision returns error without broadcast.
-- [ ] 4.4 Verify stale and duplicate snapshot versions cannot roll Desktop or Mobile backward.
-- [ ] 4.5 Verify selection changes remain per-client and project removal does not delete host directory or change unrelated active sessions.
-- [ ] 4.6 Extend existing Mobile tests for Headless capability, edit acknowledgement, and externally-originated `project.list`; modify production code only if test demonstrates mismatch.
+- [x] 4.1 Add Desktop remote edit/remove paths that wait for Headless commit and consume authoritative snapshot.
+- [x] 4.2 Add two-direction integration cases: Desktop mutation updates Mobile-style client; Mobile-style mutation updates Desktop projection.
+- [x] 4.3 Verify same-path retry stays idempotent, edit keeps host ID, and edit path collision returns error without broadcast.
+- [x] 4.4 Verify stale and duplicate snapshot versions cannot roll Desktop or Mobile backward.
+- [x] 4.5 Verify selection changes remain per-client and project removal does not delete host directory or change unrelated active sessions.
+- [x] 4.6 Extend existing Mobile tests for Headless capability, edit acknowledgement, and externally-originated `project.list`; modify production code only if test demonstrates mismatch.
+
+One production change 4.6 forced, and it deviates from the design text. Design
+decision "Full versioned snapshots over existing resource subscription" says new
+clients subscribe with `baseline: true`, and Headless only answered a baseline
+subscribe. Mobile subscribes without `baseline` and waits for the `project.list`
+the Desktop host has always answered a `projects` subscribe with, so against the
+upgraded Headless it would have shown an empty catalog until some other
+controller mutated it. Headless now answers every `projects` subscribe with the
+current catalog, which is also what keeps already-shipped Mobile builds working
+(5.2). The mismatch is pinned by an Agent test, not a Mobile one: only the host
+side can demonstrate it.
+
+Two things the ticket text does not name. An edit that moves a record to another
+runtime target is not a catalog edit — it takes the record off that host — so it
+keeps the controller-local path and drops the host project id with it; the host
+keeps its own catalog membership, which is not this controller's to remove. And
+a mutation on a projection whose host is unreachable now fails instead of
+falling back to a local write: the record exists only because the host listed
+it, so a local edit or removal would diverge silently and be undone by the next
+snapshot.
+
+4.5's "unrelated active sessions" is covered where that scoping lives rather
+than duplicated here: `remove_device_and_scope_clear_subscriptions`
+(codux-runtime-core) proves one project's removal leaves another project's
+subscribers, and `project_close_cleans_workspace_cache_for_root_and_worktrees`
+covers the controller-side cleanup, which removal shares unchanged.
 
 ## 5. Compatibility and Release Gate
 
@@ -111,7 +137,7 @@ would show one host path twice and translate one host ID into two Desktop IDs.
 
 **Blocked by:** 3. Legacy Desktop Projection Migration; 4. Bidirectional Live Edit and Remove.
 
-**Status:** blocked
+**Status:** ready
 
 - [ ] 5.1 Verify new clients fall back to current one-shot/local behavior when host does not advertise project subscriptions.
 - [ ] 5.2 Verify old clients can still call one-shot `project.list/add/remove` against upgraded Headless and ignore additive messages safely.

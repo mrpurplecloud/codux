@@ -279,6 +279,82 @@ impl RuntimeService {
         host_info_shares_projects(&controller.host_info().ok()?).then_some(controller)
     }
 
+    /// The controller of the host that owns a projection's catalog, for a
+    /// mutation that must commit there first.
+    ///
+    /// Only a projection reaches this: the record exists because the host
+    /// listed it, so there is no correct local answer while the host is
+    /// unreachable — a local edit or removal would diverge silently and be
+    /// undone by the next snapshot. Say so instead.
+    pub(crate) fn required_remote_project_catalog_host(
+        &self,
+        device_id: &str,
+    ) -> Result<Arc<crate::remote::RemoteController>, String> {
+        self.remote_project_catalog_host(device_id)
+            .ok_or_else(|| format!("Remote host {device_id} is unavailable."))
+    }
+
+    /// Rename or re-path a project in a host's catalog, then adopt the catalog
+    /// the host committed. The host owns name and path; the badge and
+    /// environment the user typed stay this desktop's own.
+    pub(crate) fn edit_remote_project(
+        &self,
+        device_id: &str,
+        host_project_id: &str,
+        controller: &crate::remote::RemoteController,
+        request: ProjectUpdateRequest,
+    ) -> Result<ProjectListSnapshot, String> {
+        controller.project_edit(host_project_id, &request.name, &request.path)?;
+        self.adopt_committed_catalog(device_id, controller)?;
+        let store = ProjectStore::new(self.support_dir.clone());
+        store.apply_local_project_metadata(
+            &request.project_id,
+            request.badge_text.as_deref(),
+            request.badge_symbol.as_deref(),
+            request.badge_color_hex.as_deref(),
+            request.environment_variables,
+        )?;
+        store.select_project(&request.project_id)?;
+        let _ = self.mark_project_active_with_watch(&request.project_id);
+        self.sync_pet_project_memberships();
+        Ok(store.list_snapshot())
+    }
+
+    /// Drop a project from a host's catalog. The authoritative snapshot is what
+    /// removes the local projection, so a rejected removal changes nothing.
+    /// Returns the projection the reconciliation selected next.
+    pub(crate) fn remove_remote_project(
+        &self,
+        device_id: &str,
+        host_project_id: &str,
+        controller: &crate::remote::RemoteController,
+    ) -> Result<Option<String>, String> {
+        controller.project_remove(host_project_id)?;
+        self.adopt_committed_catalog(device_id, controller)?;
+        Ok(ProjectStore::new(self.support_dir.clone())
+            .list_snapshot()
+            .selected_project_id)
+    }
+
+    /// Reconcile the catalog a host just committed. Asked for directly rather
+    /// than waited for: the same snapshot also arrives as a push, and the
+    /// version guard drops whichever of the two lands second.
+    fn adopt_committed_catalog(
+        &self,
+        device_id: &str,
+        controller: &crate::remote::RemoteController,
+    ) -> Result<(), String> {
+        let snapshot = controller.project_list()?;
+        let epoch = self
+            .remote_controllers
+            .connection_epoch(device_id)
+            .ok_or_else(|| {
+                format!("Remote host {device_id} disconnected before its committed catalog arrived.")
+            })?;
+        self.apply_remote_project_snapshot(device_id, epoch, &snapshot, controller)?;
+        Ok(())
+    }
+
     /// Register a project in a host's catalog, then adopt the catalog the host
     /// committed. Nothing is written locally until the host says yes.
     pub(crate) fn create_remote_project(
@@ -288,12 +364,7 @@ impl RuntimeService {
         request: ProjectCreateRequest,
     ) -> Result<ProjectListSnapshot, String> {
         let host_project_id = controller.project_add(&request.name, &request.path)?;
-        let snapshot = controller.project_list()?;
-        let epoch = self
-            .remote_controllers
-            .connection_epoch(device_id)
-            .ok_or_else(|| format!("Remote host {device_id} disconnected during project add."))?;
-        self.apply_remote_project_snapshot(device_id, epoch, &snapshot, controller)?;
+        self.adopt_committed_catalog(device_id, controller)?;
         let store = ProjectStore::new(self.support_dir.clone());
         // Read the projection id back rather than deriving it: an add that the
         // host deduplicated onto an existing entry lands on whatever desktop id

@@ -981,6 +981,39 @@ impl RemoteController {
             .ok_or_else(|| "project.updated reply is missing projectId.".to_string())
     }
 
+    /// Rename or re-path a project in the host's catalog. The host keeps the
+    /// project's id, so `host_project_id` is what comes back on success.
+    pub fn project_edit(
+        &self,
+        host_project_id: &str,
+        name: &str,
+        path: &str,
+    ) -> Result<String, String> {
+        self.request(
+            REMOTE_PROJECT_UPDATED,
+            REMOTE_PROJECT_EDIT,
+            json!({ "projectId": host_project_id, "name": name, "path": path }),
+        )
+        .map(|reply| {
+            reply
+                .get("projectId")
+                .and_then(Value::as_str)
+                .unwrap_or(host_project_id)
+                .to_string()
+        })
+    }
+
+    /// Drop a project from the host's catalog. Membership only — the host keeps
+    /// the directory.
+    pub fn project_remove(&self, host_project_id: &str) -> Result<(), String> {
+        self.request(
+            REMOTE_PROJECT_UPDATED,
+            REMOTE_PROJECT_REMOVE,
+            json!({ "projectId": host_project_id }),
+        )
+        .map(|_| ())
+    }
+
     /// Drain the catalog snapshots the host pushed since the last call.
     pub fn drain_pushed_project_lists(&self) -> Vec<Value> {
         self.drain_pushed(|kind| kind == REMOTE_PROJECT_LIST)

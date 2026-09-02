@@ -187,6 +187,12 @@ impl ProjectStore {
         let project_path = normalized_project_path(&request.path, runtime_target.is_hosted())?;
         let project_name =
             normalized_project_name(&request.name, &project_path, runtime_target.is_hosted());
+        // Moving a record to another runtime target ends its projection of the
+        // host it came from, so it must stop carrying that host's project id:
+        // the id belongs to a catalog this record no longer answers to.
+        let projected_device = self
+            .remote_catalog_projection(&request.project_id)
+            .map(|(device_id, _)| device_id);
         let mut raw = self.raw_snapshot();
         {
             let projects = ensure_array(&mut raw, "projects")?;
@@ -195,6 +201,9 @@ impl ProjectStore {
             let Some(project) = projects.get_mut(index).and_then(Value::as_object_mut) else {
                 return Err("Project record is invalid.".to_string());
             };
+            if projected_device.as_deref() != runtime_target.remote_device_id() {
+                project.remove("hostProjectId");
+            }
             project.insert("name".to_string(), Value::String(project_name.clone()));
             project.insert("path".to_string(), Value::String(project_path.clone()));
             project.insert(
@@ -267,14 +276,6 @@ impl ProjectStore {
                 .collect::<Vec<_>>(),
         );
         self.save_raw_snapshot(&raw)?;
-        Ok(self.list_snapshot())
-    }
-
-    pub fn close_project_snapshot(
-        &self,
-        project_id: String,
-    ) -> Result<ProjectListSnapshot, String> {
-        self.close_project(&project_id)?;
         Ok(self.list_snapshot())
     }
 

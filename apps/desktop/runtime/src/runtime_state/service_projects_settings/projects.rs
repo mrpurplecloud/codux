@@ -55,6 +55,19 @@ impl RuntimeService {
         &self,
         request: ProjectUpdateRequest,
     ) -> Result<ProjectListSnapshot, String> {
+        // A projection of a host's catalog is the host's to rename or re-path:
+        // it commits there first, and the snapshot it publishes is what moves
+        // the shared fields here and on every other connected controller. An
+        // edit that moves the record to another runtime target is not a catalog
+        // edit at all — it takes the record off this host, and the local path
+        // below drops the host id with it.
+        if let Some((device_id, host_project_id)) = ProjectStore::new(self.support_dir.clone())
+            .remote_catalog_projection(&request.project_id)
+            && request.runtime_target.remote_device_id() == Some(device_id.as_str())
+        {
+            let controller = self.required_remote_project_catalog_host(&device_id)?;
+            return self.edit_remote_project(&device_id, &host_project_id, &controller, request);
+        }
         let snapshot =
             ProjectStore::new(self.support_dir.clone()).update_project_from_request(request)?;
         if let Some(project_id) = snapshot.selected_project_id.as_deref() {
@@ -75,20 +88,8 @@ impl RuntimeService {
         &self,
         request: ProjectCloseRequest,
     ) -> Result<ProjectListSnapshot, String> {
-        let project_id = request.project_id.clone();
-        let workspace_ids = self.project_workspace_ids_for_root(&project_id);
-        let snapshot =
-            ProjectStore::new(self.support_dir.clone()).close_project_snapshot(project_id.clone())?;
-        self.remote_host.remove_project_state(&project_id);
-        self.cleanup_project_workspace_data(&workspace_ids);
-        self.project_activity.remove_project(&project_id);
-        if let Some(next_project_id) = snapshot.selected_project_id.as_deref() {
-            let _ = self.mark_project_active_with_watch(next_project_id);
-        } else {
-            self.stop_active_project_watches();
-        }
-        self.sync_pet_project_memberships();
-        Ok(snapshot)
+        self.close_project(&request.project_id)?;
+        Ok(self.project_list())
     }
 
     pub fn project_select_worktree(
@@ -162,7 +163,17 @@ impl RuntimeService {
 
     pub fn close_project(&self, project_id: &str) -> Result<Option<String>, String> {
         let workspace_ids = self.project_workspace_ids_for_root(project_id);
-        let next_project_id = ProjectStore::new(self.support_dir.clone()).close_project(project_id)?;
+        // Removing a projection removes catalog membership, which only the host
+        // can do; the snapshot it publishes prunes this projection and every
+        // other controller's. The host's directory and sessions are untouched.
+        let store = ProjectStore::new(self.support_dir.clone());
+        let next_project_id = match store.remote_catalog_projection(project_id) {
+            Some((device_id, host_project_id)) => {
+                let controller = self.required_remote_project_catalog_host(&device_id)?;
+                self.remove_remote_project(&device_id, &host_project_id, &controller)?
+            }
+            None => store.close_project(project_id)?,
+        };
         self.remote_host.remove_project_state(project_id);
         self.cleanup_project_workspace_data(&workspace_ids);
         self.project_activity.remove_project(project_id);

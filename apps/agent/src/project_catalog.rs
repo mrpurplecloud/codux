@@ -67,9 +67,7 @@ impl ProjectCatalogService {
         device_id: Option<&str>,
     ) -> ProjectCatalogOutcome {
         match kind {
-            REMOTE_RESOURCE_SUBSCRIBE if is_projects_resource(payload) => {
-                self.subscribe(payload, device_id)
-            }
+            REMOTE_RESOURCE_SUBSCRIBE if is_projects_resource(payload) => self.subscribe(device_id),
             REMOTE_RESOURCE_UNSUBSCRIBE if is_projects_resource(payload) => {
                 if let Some(device_id) = clean_device_id(device_id) {
                     self.subscriptions
@@ -128,19 +126,18 @@ impl ProjectCatalogService {
         }
     }
 
-    fn subscribe(&self, payload: &Value, device_id: Option<&str>) -> ProjectCatalogOutcome {
+    fn subscribe(&self, device_id: Option<&str>) -> ProjectCatalogOutcome {
         let Some(device_id) = clean_device_id(device_id) else {
             return error("Device id is required.");
         };
         self.subscriptions
             .subscribe(REMOTE_RESOURCE_PROJECTS, None, None, device_id);
-        if !payload
-            .get("baseline")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            return ProjectCatalogOutcome::default();
-        }
+        // Always answer with the current catalog, whether or not the subscriber
+        // asked for a baseline. The desktop host has always replied to a
+        // `projects` subscribe with its list, and the mobile client subscribes
+        // without `baseline` and waits for exactly that reply; a baseline gate
+        // here would leave it with an empty project list until someone else
+        // mutated the catalog.
         match self.snapshot_payload() {
             Ok(payload) => reply(REMOTE_PROJECT_LIST, payload),
             Err(message) => error(&message),
@@ -408,6 +405,35 @@ mod tests {
             std::path::Path::new(&project).exists(),
             "removal drops catalog membership, not the directory"
         );
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_subscribe_without_baseline_still_receives_the_catalog() {
+        // The mobile client subscribes to `projects` without asking for a
+        // baseline and waits for the `project.list` the desktop host has always
+        // answered with. Gating the reply on `baseline` would leave it showing
+        // an empty catalog until some other controller mutated it.
+        let dir = temp_dir("subscribe-no-baseline");
+        let service = service(&dir);
+        let project = project_dir(&dir, "repo");
+        service.handle(
+            REMOTE_PROJECT_ADD,
+            &json!({ "path": project, "name": "Repo" }),
+            Some("device-a"),
+        );
+
+        let subscribed = service.handle(
+            REMOTE_RESOURCE_SUBSCRIBE,
+            &json!({ "resource": REMOTE_RESOURCE_PROJECTS }),
+            Some("device-b"),
+        );
+
+        let payload = &reply_of(&subscribed, REMOTE_PROJECT_LIST)
+            .expect("a subscribe answers with the current catalog")
+            .payload;
+        assert_eq!(project_paths(payload), vec![project]);
 
         std::fs::remove_dir_all(dir).ok();
     }

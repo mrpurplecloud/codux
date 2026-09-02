@@ -38,6 +38,17 @@ impl FakeHostCatalog {
         })
     }
 
+    /// A mutation raised on another client — the phone in the reported bug:
+    /// it commits on the host, which then fans the committed catalog out.
+    fn mutate_elsewhere(
+        &mut self,
+        mutate: impl FnOnce(&mut Vec<crate::project_store::RemoteCatalogProject>),
+    ) {
+        mutate(&mut self.projects);
+        self.version += 1;
+        self.publish();
+    }
+
     /// Publish the committed catalog to every subscriber, like the headless
     /// host's source-inclusive fan-out.
     fn publish(&self) {
@@ -79,6 +90,18 @@ impl codux_remote_transport::RemoteTransport for FakeHostTransport {
                 message["requestId"] = request_id.clone();
             }
             (self.route)(&serde_json::to_vec(&message).unwrap());
+        };
+        // Every committed mutation answers its source and then fans the
+        // committed snapshot out to every subscriber and to the source itself,
+        // exactly like the headless host.
+        let commit = |action: &str, host_project_id: &str, catalog: &FakeHostCatalog| {
+            route(
+                codux_protocol::REMOTE_PROJECT_UPDATED,
+                json!({ "action": action, "projectId": host_project_id }),
+                request_id.as_ref(),
+            );
+            catalog.publish();
+            route(codux_protocol::REMOTE_PROJECT_LIST, catalog.snapshot(), None);
         };
         match envelope.get("type").and_then(serde_json::Value::as_str) {
             Some(codux_protocol::REMOTE_HOST_INFO) => {
@@ -124,16 +147,9 @@ impl codux_remote_transport::RemoteTransport for FakeHostTransport {
                     );
                     return true;
                 }
-                let path = payload
-                    .get("path")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                let name = payload
-                    .get("name")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
+                let path = payload_field(&payload, "path");
+                let name = payload_field(&payload, "name");
+                // Idempotent by path, and a repeat never renames the entry.
                 let host_project_id = match catalog
                     .projects
                     .iter()
@@ -151,15 +167,48 @@ impl codux_remote_transport::RemoteTransport for FakeHostTransport {
                         host_project_id
                     }
                 };
-                route(
-                    codux_protocol::REMOTE_PROJECT_UPDATED,
-                    json!({ "action": "add", "projectId": host_project_id }),
-                    request_id.as_ref(),
-                );
-                // Committed snapshot fans out to every subscriber and to the
-                // mutation source, exactly like the headless host.
-                catalog.publish();
-                route(codux_protocol::REMOTE_PROJECT_LIST, catalog.snapshot(), None);
+                commit("add", &host_project_id, &catalog);
+            }
+            Some(codux_protocol::REMOTE_PROJECT_EDIT) => {
+                let host_project_id = payload_field(&payload, "projectId");
+                let path = payload_field(&payload, "path");
+                let name = payload_field(&payload, "name");
+                if catalog.projects.iter().any(|project| {
+                    project.path == path && project.host_project_id != host_project_id
+                }) {
+                    route(
+                        codux_protocol::REMOTE_ERROR,
+                        json!({ "message": "Another project already uses this path." }),
+                        request_id.as_ref(),
+                    );
+                    return true;
+                }
+                let Some(index) = catalog
+                    .projects
+                    .iter()
+                    .position(|project| project.host_project_id == host_project_id)
+                else {
+                    route(
+                        codux_protocol::REMOTE_ERROR,
+                        json!({ "message": "Project not found." }),
+                        request_id.as_ref(),
+                    );
+                    return true;
+                };
+                // The entry keeps its id through a rename or a re-path.
+                catalog.projects[index] = catalog_project(&host_project_id, &name, &path);
+                catalog.version += 1;
+                commit("edit", &host_project_id, &catalog);
+            }
+            Some(codux_protocol::REMOTE_PROJECT_REMOVE) => {
+                let host_project_id = payload_field(&payload, "projectId");
+                // Removal is idempotent on the host, and never touches the
+                // directory the entry pointed at.
+                catalog
+                    .projects
+                    .retain(|project| project.host_project_id != host_project_id);
+                catalog.version += 1;
+                commit("remove", &host_project_id, &catalog);
             }
             // Answer the project-scoped domains so the caller does not sit out
             // its request timeout; the assertions read the envelope, not this.
@@ -175,6 +224,14 @@ impl codux_remote_transport::RemoteTransport for FakeHostTransport {
     }
 
     async fn shutdown(&self) {}
+}
+
+fn payload_field(payload: &serde_json::Value, key: &str) -> String {
+    payload
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn catalog_project(
@@ -508,6 +565,337 @@ fn desktop_added_project_reaches_the_other_subscribed_device() {
     drop(other);
     drop(service);
     fs::remove_dir_all(other_support_dir).ok();
+    fs::remove_dir_all(support_dir).ok();
+}
+
+/// A desktop already projecting one catalog entry, `p-host-1`. Returned as
+/// (service, its support dir, the host catalog, the desktop id of `p-host-1`).
+fn one_projection(label: &str) -> (RuntimeService, PathBuf, Arc<Mutex<FakeHostCatalog>>, String) {
+    let (service, support_dir, catalog) = remote_project_service(label, empty_state());
+    catalog
+        .lock()
+        .unwrap()
+        .projects
+        .push(catalog_project("p-host-1", "Alpha", "/srv/alpha"));
+    wait_for_projects(&service, 1);
+    let project_id = service.project_list().projects.remove(0).id;
+    (service, support_dir, catalog, project_id)
+}
+
+/// Two desktops on one host, each already projecting `p-host-1`. Returned as
+/// (mutating service, its support dir, observing service, its support dir).
+fn two_controllers_on_one_project(
+    label: &str,
+) -> (RuntimeService, PathBuf, RuntimeService, PathBuf) {
+    let (service, support_dir, catalog) = remote_project_service(label, empty_state());
+    catalog
+        .lock()
+        .unwrap()
+        .projects
+        .push(catalog_project("p-host-1", "Alpha", "/srv/alpha"));
+    let (other, other_support_dir) = remote_project_service_on(
+        &format!("{label}-other"),
+        empty_state(),
+        codux_protocol::REMOTE_APP_AGENT,
+        Arc::clone(&catalog),
+    );
+    wait_for_projects(&service, 1);
+    wait_for_projects(&other, 1);
+    (service, support_dir, other, other_support_dir)
+}
+
+fn edit_request(project_id: &str, name: &str, path: &str) -> ProjectUpdateRequest {
+    ProjectUpdateRequest {
+        project_id: project_id.to_string(),
+        name: name.to_string(),
+        path: path.to_string(),
+        badge_text: None,
+        badge_symbol: None,
+        badge_color_hex: None,
+        environment_variables: Default::default(),
+        runtime_target: ProjectRuntimeTarget::Remote {
+            device_id: "device-1".to_string(),
+        },
+    }
+}
+
+#[test]
+fn desktop_edit_commits_on_the_host_and_reaches_the_other_device() {
+    let (service, support_dir, other, other_support_dir) =
+        two_controllers_on_one_project("remote-project-edit");
+    let project_id = service.project_list().projects.remove(0).id;
+
+    let snapshot = service
+        .project_update(edit_request(&project_id, "Renamed", "/srv/renamed"))
+        .expect("remote edit");
+
+    // The desktop id and the host id both survive a rename, so layouts,
+    // selection, and every project-scoped request keep working.
+    assert_eq!(snapshot.projects.len(), 1);
+    assert_eq!(snapshot.projects[0].id, project_id);
+    assert_eq!(snapshot.projects[0].name, "Renamed");
+    assert_eq!(snapshot.projects[0].path, "/srv/renamed");
+    assert_eq!(
+        host_project_id_of(&support_dir, &project_id).as_deref(),
+        Some("p-host-1")
+    );
+
+    wait_until(&other, "the renamed projection", || {
+        other.project_list().projects[0].name == "Renamed"
+    });
+    let seen = other.project_list().projects.remove(0);
+    assert_eq!(seen.path, "/srv/renamed");
+
+    drop(other);
+    drop(service);
+    fs::remove_dir_all(other_support_dir).ok();
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn desktop_remove_commits_on_the_host_and_reaches_the_other_device() {
+    let (service, support_dir, other, other_support_dir) =
+        two_controllers_on_one_project("remote-project-remove");
+    let project_id = service.project_list().projects.remove(0).id;
+
+    let snapshot = service
+        .project_close(crate::project_store::ProjectCloseRequest {
+            project_id: project_id.clone(),
+        })
+        .expect("remote remove");
+
+    assert!(snapshot.projects.is_empty());
+    wait_for_projects(&other, 0);
+
+    drop(other);
+    drop(service);
+    fs::remove_dir_all(other_support_dir).ok();
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn a_mutation_from_another_client_reaches_the_desktop_projection() {
+    let (service, support_dir, catalog, project_id) =
+        one_projection("remote-project-inbound-mutation");
+
+    // The phone renames the project…
+    catalog.lock().unwrap().mutate_elsewhere(|projects| {
+        projects[0] = catalog_project("p-host-1", "Renamed", "/srv/renamed");
+    });
+    wait_until(&service, "the renamed projection", || {
+        service.project_list().projects[0].name == "Renamed"
+    });
+    let renamed = service.project_list().projects.remove(0);
+    // …onto the same desktop record, so nothing local is orphaned.
+    assert_eq!(renamed.id, project_id);
+    assert_eq!(renamed.path, "/srv/renamed");
+
+    // …and then removes it.
+    catalog
+        .lock()
+        .unwrap()
+        .mutate_elsewhere(|projects| projects.clear());
+    wait_for_projects(&service, 0);
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn an_edit_onto_a_path_another_entry_owns_changes_nothing() {
+    let (service, support_dir, catalog, project_id) =
+        one_projection("remote-project-edit-rejected");
+    catalog
+        .lock()
+        .unwrap()
+        .mutate_elsewhere(|projects| projects.push(catalog_project("p-host-2", "Beta", "/srv/beta")));
+    wait_for_projects(&service, 2);
+
+    let error = service
+        .project_update(edit_request(&project_id, "Alpha", "/srv/beta"))
+        .expect_err("the host owns this path already");
+
+    assert_eq!(error, "Another project already uses this path.");
+    let projects = service.project_list().projects;
+    let alpha = projects
+        .iter()
+        .find(|project| project.id == project_id)
+        .expect("the projection survives a rejected edit");
+    assert_eq!(alpha.name, "Alpha");
+    assert_eq!(alpha.path, "/srv/alpha");
+    assert_eq!(
+        catalog.lock().unwrap().projects,
+        [
+            catalog_project("p-host-1", "Alpha", "/srv/alpha"),
+            catalog_project("p-host-2", "Beta", "/srv/beta"),
+        ]
+    );
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn retargeting_a_projection_leaves_the_catalog_and_takes_the_host_id_with_it() {
+    let (service, support_dir, catalog, project_id) = one_projection("remote-project-retarget");
+    let local_path = support_dir.join("alpha");
+    fs::create_dir_all(&local_path).expect("local project dir");
+
+    // Moving the record to another runtime target is not a catalog edit: the
+    // record stops projecting this host, so it must stop carrying its id too.
+    service
+        .project_update(ProjectUpdateRequest {
+            project_id: project_id.clone(),
+            name: "Alpha".to_string(),
+            path: local_path.display().to_string(),
+            badge_text: None,
+            badge_symbol: None,
+            badge_color_hex: None,
+            environment_variables: Default::default(),
+            runtime_target: ProjectRuntimeTarget::Local,
+        })
+        .expect("retarget to local");
+
+    assert!(host_project_id_of(&support_dir, &project_id).is_none());
+    assert_eq!(
+        catalog.lock().unwrap().projects,
+        [catalog_project("p-host-1", "Alpha", "/srv/alpha")],
+        "the host's catalog membership is not this desktop's to drop"
+    );
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn re_adding_a_committed_path_keeps_one_projection() {
+    let (service, support_dir, catalog, project_id) = one_projection("remote-project-add-retry");
+
+    let snapshot = service
+        .project_create(ProjectCreateRequest {
+            name: "Alpha again".to_string(),
+            path: "/srv/alpha".to_string(),
+            badge_text: None,
+            badge_symbol: None,
+            badge_color_hex: None,
+            environment_variables: Default::default(),
+            runtime_target: ProjectRuntimeTarget::Remote {
+                device_id: "device-1".to_string(),
+            },
+        })
+        .expect("repeated remote add");
+
+    // The host deduplicated by path and did not rename its entry, so the retry
+    // lands back on the projection that already existed.
+    assert_eq!(snapshot.projects.len(), 1);
+    assert_eq!(snapshot.projects[0].id, project_id);
+    assert_eq!(snapshot.projects[0].name, "Alpha");
+    assert_eq!(catalog.lock().unwrap().projects.len(), 1);
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn a_duplicate_snapshot_version_cannot_empty_the_projection() {
+    let (service, support_dir, catalog) =
+        remote_project_service("remote-project-duplicate", empty_state());
+    {
+        let mut host = catalog.lock().unwrap();
+        host.projects
+            .push(catalog_project("p-host-1", "Alpha", "/srv/alpha"));
+        host.version = 7;
+    }
+    wait_for_projects(&service, 1);
+
+    let controller = service
+        .remote_controller_for_device("device-1")
+        .expect("live controller");
+    // Same version as the applied snapshot: a re-delivery, not a new catalog.
+    controller.route_test_message(
+        &serde_json::to_vec(&json!({
+            "type": codux_protocol::REMOTE_PROJECT_LIST,
+            "payload": { "projects": [], "worktrees": [], "version": 7 }
+        }))
+        .unwrap(),
+    );
+    service.drain_remote_events();
+
+    assert_eq!(service.project_list().projects.len(), 1);
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn each_controller_keeps_its_own_selection_through_a_shared_removal() {
+    let (service, support_dir, catalog) =
+        remote_project_service("remote-project-selection", empty_state());
+    {
+        let mut host = catalog.lock().unwrap();
+        host.projects
+            .push(catalog_project("p-host-1", "Alpha", "/srv/alpha"));
+        host.projects
+            .push(catalog_project("p-host-2", "Beta", "/srv/beta"));
+    }
+    let (other, other_support_dir) = remote_project_service_on(
+        "remote-project-selection-other",
+        empty_state(),
+        codux_protocol::REMOTE_APP_AGENT,
+        Arc::clone(&catalog),
+    );
+    wait_for_projects(&service, 2);
+    wait_for_projects(&other, 2);
+
+    let alpha = crate::project_store::remote_projection_id("device-1", "p-host-1");
+    let beta_on_other = crate::project_store::remote_projection_id("device-1", "p-host-2");
+    service.select_project(&alpha).expect("select alpha");
+    other
+        .select_project(&beta_on_other)
+        .expect("select beta elsewhere");
+
+    service
+        .project_close(crate::project_store::ProjectCloseRequest {
+            project_id: alpha.clone(),
+        })
+        .expect("remove alpha");
+
+    wait_for_projects(&other, 1);
+    // The other controller loses the removed entry and keeps its own selection.
+    assert_eq!(
+        other.project_list().selected_project_id.as_deref(),
+        Some(beta_on_other.as_str())
+    );
+    // Membership only: the host still serves the path it kept.
+    assert_eq!(
+        catalog.lock().unwrap().projects,
+        [catalog_project("p-host-2", "Beta", "/srv/beta")]
+    );
+
+    drop(other);
+    drop(service);
+    fs::remove_dir_all(other_support_dir).ok();
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn a_projection_is_not_removed_locally_when_its_host_stops_sharing() {
+    let (service, support_dir, catalog, project_id) =
+        one_projection("remote-project-remove-offline");
+    catalog.lock().unwrap().shares_catalog = false;
+
+    let error = service
+        .project_close(crate::project_store::ProjectCloseRequest {
+            project_id: project_id.clone(),
+        })
+        .expect_err("the catalog owner cannot commit the removal");
+
+    assert_eq!(error, "Remote host device-1 is unavailable.");
+    // A local-only removal would be undone by the next snapshot anyway.
+    assert_eq!(service.project_list().projects.len(), 1);
+    assert_eq!(catalog.lock().unwrap().projects.len(), 1);
+
+    drop(service);
     fs::remove_dir_all(support_dir).ok();
 }
 

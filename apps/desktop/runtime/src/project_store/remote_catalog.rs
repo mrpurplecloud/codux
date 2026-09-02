@@ -234,6 +234,19 @@ impl ProjectStore {
         self.save_raw_snapshot(&raw)
     }
 
+    /// The `(device id, host project id)` this record projects, if it is a
+    /// projection of a host catalog at all. Local, WSL, and not-yet-migrated
+    /// legacy remote records answer `None`, which is what keeps their mutations
+    /// on the controller-local path.
+    pub fn remote_catalog_projection(&self, project_id: &str) -> Option<(String, String)> {
+        let project = self
+            .projects_snapshot()
+            .into_iter()
+            .find(|project| project.id == project_id)?;
+        let device_id = project.runtime_target.remote_device_id()?.to_string();
+        Some((device_id, project.host_project_id?))
+    }
+
     /// Every `(desktop id, host project id)` pair this desktop holds for
     /// `device_id`. The remote transport uses it to translate project-scoped ids
     /// in both directions.
