@@ -2,6 +2,8 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import '../i18n.dart';
+import '../services/camera_support.dart';
+import '../services/log_service.dart';
 import '../theme/app_theme.dart';
 
 class ScannerScreen extends StatefulWidget {
@@ -11,12 +13,16 @@ class ScannerScreen extends StatefulWidget {
     required this.onDetected,
     required this.onClose,
     this.scannerBuilder,
+    this.cameraSupport,
   });
 
   final double bottomInset;
   final ValueChanged<String> onDetected;
   final VoidCallback onClose;
   final WidgetBuilder? scannerBuilder;
+
+  /// Injection seam for tests; production uses a fresh [CameraSupport].
+  final CameraSupport? cameraSupport;
 
   @override
   State<ScannerScreen> createState() => _ScannerScreenState();
@@ -25,12 +31,23 @@ class ScannerScreen extends StatefulWidget {
 class _ScannerScreenState extends State<ScannerScreen>
     with WidgetsBindingObserver {
   late final MobileScannerController _controller;
+  late final CameraSupport _cameraSupport =
+      widget.cameraSupport ?? CameraSupport();
   final _pairingTokenController = TextEditingController();
+  // null while the hardware probe is in flight.
+  CameraAvailability? _availability;
   bool _startPending = false;
   bool _handledPayload = false;
   bool _recognized = false;
   bool _showManualConnect = false;
   String? _importError;
+
+  /// A stubbed scanner (tests) stands in for a working camera.
+  bool get _cameraUsable =>
+      widget.scannerBuilder != null ||
+      _availability == CameraAvailability.available;
+
+  bool get _probing => widget.scannerBuilder == null && _availability == null;
 
   @override
   void initState() {
@@ -44,25 +61,58 @@ class _ScannerScreenState extends State<ScannerScreen>
     // starve the analysis stream the way a forced max resolution did before.
     // autoZoom stays off (it zoomed the centred QR out of frame); the photo
     // import button is the guaranteed fallback when the live scan still misses.
+    // The controller itself touches no hardware — `analyzeImage` decodes a
+    // picked photo through ML Kit alone, so it stays useful without a camera.
     _controller = MobileScannerController(
       autoStart: false,
       formats: const [BarcodeFormat.qrCode],
       detectionSpeed: DetectionSpeed.noDuplicates,
       cameraResolution: const Size(1280, 720),
     );
+    if (widget.scannerBuilder != null) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _startScanner();
+      if (mounted) _probeCamera();
     });
+  }
+
+  /// Resolve camera availability before anything reaches CameraX: on a device
+  /// without a camera the native start kills the process, so a Dart-side guard
+  /// is the only thing that can prevent it.
+  Future<void> _probeCamera() async {
+    final availability = await _cameraSupport.resolve();
+    if (!mounted) return;
+    setState(() => _availability = availability);
+    if (availability == CameraAvailability.available) await _startScanner();
+  }
+
+  Future<void> _retryCamera() async {
+    await _cameraSupport.clearCrashBlock();
+    if (!mounted) return;
+    setState(() => _availability = null);
+    await _probeCamera();
   }
 
   Future<void> _startScanner() async {
     if (widget.scannerBuilder != null) return;
+    if (_availability != CameraAvailability.available) return;
     if (_startPending || _handledPayload || _controller.value.isRunning) {
       return;
     }
     _startPending = true;
-    await _controller.start();
-    _startPending = false;
+    // Written before the start and cleared after it returns, so a start that
+    // never returns marks the camera as unsafe for the next launch.
+    await _cameraSupport.markStartAttempt();
+    try {
+      await _controller.start();
+    } catch (error) {
+      CoduxLog.warn('[codux-flutter-camera] scanner start failed: $error');
+      if (mounted) {
+        setState(() => _availability = CameraAvailability.missingHardware);
+      }
+    } finally {
+      await _cameraSupport.markStartSettled();
+      _startPending = false;
+    }
   }
 
   Future<void> _stopScanner() async {
@@ -159,29 +209,40 @@ class _ScannerScreenState extends State<ScannerScreen>
   Widget build(BuildContext context) {
     final accent = Theme.of(context).colorScheme.secondary;
     final prefs = AppPreferences.of(context);
+    // While probing, keep the scanning copy: the probe resolves within a frame
+    // or two on a device that has a camera, and flashing "no camera" first
+    // would be a lie on every normal phone.
+    final showsCamera = _cameraUsable || _probing;
     return Positioned.fill(
       child: ColoredBox(
         color: Colors.black,
         child: Stack(
           children: [
-            widget.scannerBuilder?.call(context) ??
-                MobileScanner(
-                  controller: _controller,
-                  useAppLifecycleState: false,
-                  onDetect: (capture) {
-                    final value = capture.barcodes.firstOrNull?.rawValue;
-                    _handleDetected(value);
-                  },
-                ),
+            if (_cameraUsable)
+              widget.scannerBuilder?.call(context) ??
+                  MobileScanner(
+                    controller: _controller,
+                    useAppLifecycleState: false,
+                    onDetect: (capture) {
+                      final value = capture.barcodes.firstOrNull?.rawValue;
+                      _handleDetected(value);
+                    },
+                  ),
             Center(
-              child: Container(
-                width: 240,
-                height: 240,
-                decoration: BoxDecoration(
-                  border: Border.all(color: accent, width: 2),
-                  borderRadius: BorderRadius.circular(AppRadius.lg),
-                ),
-              ),
+              child: showsCamera
+                  ? Container(
+                      width: 240,
+                      height: 240,
+                      decoration: BoxDecoration(
+                        border: Border.all(color: accent, width: 2),
+                        borderRadius: BorderRadius.circular(AppRadius.lg),
+                      ),
+                    )
+                  : Icon(
+                      Icons.no_photography_outlined,
+                      size: 72,
+                      color: AppColors.textMuted,
+                    ),
             ),
             Positioned(
               left: 18,
@@ -190,7 +251,10 @@ class _ScannerScreenState extends State<ScannerScreen>
               child: Column(
                 children: [
                   Text(
-                    prefs.t('pair.scanTitle'),
+                    prefs.t(
+                      showsCamera ? 'pair.scanTitle' : 'pair.noCameraTitle',
+                    ),
+                    textAlign: TextAlign.center,
                     style: const TextStyle(
                       color: Colors.white,
                       fontSize: AppTextSize.title,
@@ -199,7 +263,10 @@ class _ScannerScreenState extends State<ScannerScreen>
                   ),
                   const SizedBox(height: AppSpacing.s),
                   Text(
-                    prefs.t('pair.scanHint'),
+                    prefs.t(
+                      showsCamera ? 'pair.scanHint' : 'pair.noCameraHint',
+                    ),
+                    textAlign: TextAlign.center,
                     style: const TextStyle(
                       color: Color(0xFFCBD5E1),
                       fontSize: 14,
@@ -230,6 +297,13 @@ class _ScannerScreenState extends State<ScannerScreen>
                         label: prefs.t('pair.manualConnect'),
                         onTap: _openManualConnect,
                       ),
+                      // Offered only when a past native failure — not absent
+                      // hardware — is what turned the camera off.
+                      if (_availability == CameraAvailability.blockedAfterCrash)
+                        _ScannerAction(
+                          label: prefs.t('pair.retryCamera'),
+                          onTap: _retryCamera,
+                        ),
                       _ScannerAction(
                         label: prefs.t('pair.close'),
                         onTap: () {
