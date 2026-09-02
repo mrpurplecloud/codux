@@ -136,37 +136,47 @@ impl ProjectStore {
             &runtime_target,
         )?;
         let mut raw = self.raw_snapshot();
-        if let Some(projects) = raw.get_mut("projects").and_then(Value::as_array_mut)
-            && let Some(project) = projects.iter_mut().find_map(|value| {
-                let project = value.as_object_mut()?;
-                (project.get("id").and_then(Value::as_str) == Some(project_id.as_str()))
-                    .then_some(project)
-            })
-        {
-            project.insert(
-                "badgeText".to_string(),
-                optional_string_value(request.badge_text.as_deref()),
-            );
-            project.insert(
-                "badgeSymbol".to_string(),
-                optional_string_value(request.badge_symbol.as_deref()),
-            );
-            project.insert(
-                "badgeColorHex".to_string(),
-                optional_string_value(request.badge_color_hex.as_deref()),
-            );
+        if let Some(project) = project_record_mut(&mut raw, &project_id) {
             project.insert(
                 "runtimeTarget".to_string(),
                 runtime_target_value(&runtime_target)?,
             );
-            project.insert(
-                "environmentVariables".to_string(),
-                environment_variables_value(request.environment_variables)?,
-            );
             project.remove("hostDeviceId");
+            insert_local_project_metadata(
+                project,
+                request.badge_text.as_deref(),
+                request.badge_symbol.as_deref(),
+                request.badge_color_hex.as_deref(),
+                request.environment_variables,
+            )?;
             self.save_raw_snapshot(&raw)?;
         }
         Ok(self.list_snapshot())
+    }
+
+    /// Write the controller-only fields of an existing project. Used after a
+    /// remote add, where the host owns name and path but the badge and
+    /// environment the user typed are this desktop's alone.
+    pub fn apply_local_project_metadata(
+        &self,
+        project_id: &str,
+        badge_text: Option<&str>,
+        badge_symbol: Option<&str>,
+        badge_color_hex: Option<&str>,
+        environment_variables: BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        let mut raw = self.raw_snapshot();
+        let Some(project) = project_record_mut(&mut raw, project_id) else {
+            return Err("Project not found.".to_string());
+        };
+        insert_local_project_metadata(
+            project,
+            badge_text,
+            badge_symbol,
+            badge_color_hex,
+            environment_variables,
+        )?;
+        self.save_raw_snapshot(&raw)
     }
 
     pub fn update_project_from_request(
@@ -483,7 +493,7 @@ impl ProjectStore {
     }
 }
 
-fn normalized_runtime_target(
+pub(super) fn normalized_runtime_target(
     runtime_target: ProjectRuntimeTarget,
 ) -> Result<ProjectRuntimeTarget, String> {
     match runtime_target {
@@ -507,6 +517,42 @@ fn normalized_runtime_target(
             })
         }
     }
+}
+
+fn project_record_mut<'a>(
+    raw: &'a mut Map<String, Value>,
+    project_id: &str,
+) -> Option<&'a mut Map<String, Value>> {
+    raw.get_mut("projects")
+        .and_then(Value::as_array_mut)?
+        .iter_mut()
+        .find_map(|value| {
+            let project = value.as_object_mut()?;
+            (project.get("id").and_then(Value::as_str) == Some(project_id)).then_some(project)
+        })
+}
+
+fn insert_local_project_metadata(
+    project: &mut Map<String, Value>,
+    badge_text: Option<&str>,
+    badge_symbol: Option<&str>,
+    badge_color_hex: Option<&str>,
+    environment_variables: BTreeMap<String, String>,
+) -> Result<(), String> {
+    project.insert("badgeText".to_string(), optional_string_value(badge_text));
+    project.insert(
+        "badgeSymbol".to_string(),
+        optional_string_value(badge_symbol),
+    );
+    project.insert(
+        "badgeColorHex".to_string(),
+        optional_string_value(badge_color_hex),
+    );
+    project.insert(
+        "environmentVariables".to_string(),
+        environment_variables_value(environment_variables)?,
+    );
+    Ok(())
 }
 
 fn runtime_target_value(runtime_target: &ProjectRuntimeTarget) -> Result<Value, String> {

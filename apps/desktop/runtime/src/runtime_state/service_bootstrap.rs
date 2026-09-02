@@ -156,6 +156,7 @@ impl RuntimeService {
             power_manager: shared_power_manager(),
             remote_host,
             remote_controllers: Arc::new(crate::remote::RemoteControllerManager::new(support_dir)),
+            remote_project_sync: Arc::new(Mutex::new(HashMap::new())),
             wsl_runtimes: Arc::new(wsl_runtimes),
             host_browser_proxy: Arc::new(crate::host_browser::HostBrowserProxy::new()),
         }

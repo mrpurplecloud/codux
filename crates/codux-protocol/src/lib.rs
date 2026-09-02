@@ -23,6 +23,11 @@ pub const REMOTE_RESOURCE_GIT_STATUS: &str = "git.status";
 pub const REMOTE_RESOURCE_AI_STATS: &str = "ai.stats";
 pub const REMOTE_RESOURCE_FILES: &str = "files";
 
+/// `host.info.app` of the headless agent. The shared project catalog is the
+/// headless host's contract; a desktop host reports its own app name and keeps
+/// serving projects the way it always has.
+pub const REMOTE_APP_AGENT: &str = "codux-agent";
+
 pub const REMOTE_HELLO: &str = "hello";
 pub const REMOTE_ERROR: &str = "error";
 pub const REMOTE_RELAY_ERROR: &str = "relay.error";

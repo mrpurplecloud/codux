@@ -1,0 +1,9 @@
+{
+  "change_id": "sync-headless-project-catalog",
+  "created_at": "2026-09-02T06:22:45Z",
+  "status": "proposed",
+  "capabilities": [
+    "headless-project-catalog"
+  ],
+  "updated_at": "2026-09-02T06:22:45Z"
+}

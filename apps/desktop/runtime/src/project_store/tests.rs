@@ -714,3 +714,239 @@ fn state_value(support_dir: &Path) -> Value {
         &support_dir.join("state.json"),
     ))
 }
+
+fn catalog_support_dir(label: &str, state: Value) -> PathBuf {
+    let support_dir = temp_dir(label);
+    fs::create_dir_all(&support_dir).unwrap();
+    fs::write(
+        support_dir.join("state.json"),
+        serde_json::to_string_pretty(&state).unwrap(),
+    )
+    .unwrap();
+    support_dir
+}
+
+fn catalog_item(host_project_id: &str, name: &str, path: &str) -> RemoteCatalogProject {
+    RemoteCatalogProject {
+        host_project_id: host_project_id.to_string(),
+        name: name.to_string(),
+        path: path.to_string(),
+    }
+}
+
+#[test]
+fn remote_baseline_creates_projections_scoped_by_device() {
+    let support_dir = catalog_support_dir(
+        "remote-catalog-baseline",
+        json!({ "projects": [], "selectedProjectId": null }),
+    );
+    let store = ProjectStore::new(support_dir.clone());
+
+    store
+        .reconcile_remote_projects("device-1", &[catalog_item("p-1", "Alpha", "/srv/alpha")])
+        .unwrap();
+    store
+        .reconcile_remote_projects("device-2", &[catalog_item("p-1", "Beta", "/srv/beta")])
+        .unwrap();
+
+    let projects = store.projects_snapshot();
+    assert_eq!(projects.len(), 2);
+    assert_eq!(projects[0].id, remote_projection_id("device-1", "p-1"));
+    assert_ne!(projects[0].id, projects[1].id);
+    assert_eq!(projects[0].host_project_id.as_deref(), Some("p-1"));
+    assert_eq!(projects[0].name, "Alpha");
+    assert_eq!(
+        projects[0].runtime_target,
+        ProjectRuntimeTarget::Remote {
+            device_id: "device-1".to_string()
+        }
+    );
+
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn remote_reconciliation_keeps_desktop_id_and_local_metadata() {
+    let projection_id = remote_projection_id("device-1", "p-1");
+    let support_dir = catalog_support_dir(
+        "remote-catalog-metadata",
+        json!({
+            "projects": [{
+                "id": "legacy-desktop-id",
+                "name": "Old name",
+                "path": "/srv/old",
+                "badgeText": "AL",
+                "badgeColorHex": "#ff0000",
+                "gitDefaultPushRemoteName": "upstream",
+                "environmentVariables": { "FOO": "bar" },
+                "runtimeTarget": { "kind": "remote", "deviceId": "device-1" },
+                "hostProjectId": "p-1",
+                "unknownField": "keep"
+            }],
+            "selectedProjectId": "legacy-desktop-id"
+        }),
+    );
+    let store = ProjectStore::new(support_dir.clone());
+
+    store
+        .reconcile_remote_projects("device-1", &[catalog_item("p-1", "New name", "/srv/new")])
+        .unwrap();
+
+    let projects = store.projects_snapshot();
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].id, "legacy-desktop-id");
+    assert_ne!(projects[0].id, projection_id);
+    assert_eq!(projects[0].name, "New name");
+    assert_eq!(projects[0].path, "/srv/new");
+    assert_eq!(projects[0].badge_text.as_deref(), Some("AL"));
+    assert_eq!(
+        projects[0].git_default_push_remote_name.as_deref(),
+        Some("upstream")
+    );
+    assert_eq!(
+        projects[0]
+            .environment_variables
+            .get("FOO")
+            .map(String::as_str),
+        Some("bar")
+    );
+    assert_eq!(
+        state_value(&support_dir)["projects"][0]["unknownField"],
+        json!("keep")
+    );
+
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn remote_reconciliation_prunes_only_managed_projections() {
+    let support_dir = catalog_support_dir(
+        "remote-catalog-prune",
+        json!({
+            "projects": [
+                { "id": "local", "name": "Local", "path": "/tmp/local" },
+                {
+                    "id": "wsl",
+                    "name": "Wsl",
+                    "path": "/home/wsl",
+                    "runtimeTarget": { "kind": "wsl", "distribution": "Ubuntu" }
+                },
+                {
+                    "id": "legacy-remote",
+                    "name": "Legacy",
+                    "path": "/srv/legacy",
+                    "runtimeTarget": { "kind": "remote", "deviceId": "device-1" }
+                },
+                {
+                    "id": "other-device",
+                    "name": "Other",
+                    "path": "/srv/other",
+                    "runtimeTarget": { "kind": "remote", "deviceId": "device-2" },
+                    "hostProjectId": "p-other"
+                },
+                {
+                    "id": "managed",
+                    "name": "Managed",
+                    "path": "/srv/managed",
+                    "runtimeTarget": { "kind": "remote", "deviceId": "device-1" },
+                    "hostProjectId": "p-managed"
+                }
+            ],
+            "worktrees": [{ "id": "w1", "projectId": "managed" }],
+            "worktreeTasks": [{ "worktreeId": "w1", "title": "gone" }],
+            "selectedProjectId": "managed",
+            "selectedWorktreeIdByProject": { "managed": "w1" }
+        }),
+    );
+    let store = ProjectStore::new(support_dir.clone());
+
+    store.reconcile_remote_projects("device-1", &[]).unwrap();
+
+    let snapshot = store.snapshot();
+    let ids = snapshot
+        .projects
+        .iter()
+        .map(|project| project.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["local", "wsl", "legacy-remote", "other-device"]);
+    assert!(snapshot.worktrees.is_empty());
+    assert!(snapshot.worktree_tasks.is_empty());
+    assert!(
+        !snapshot
+            .selected_worktree_id_by_project
+            .contains_key("managed")
+    );
+    assert_eq!(
+        snapshot.selected_project_id.as_deref(),
+        Some("other-device")
+    );
+
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn unchanged_remote_snapshot_does_not_rewrite_state() {
+    let support_dir = catalog_support_dir(
+        "remote-catalog-idempotent",
+        json!({ "projects": [], "selectedProjectId": null }),
+    );
+    let store = ProjectStore::new(support_dir.clone());
+    let catalog = [catalog_item("p-1", "Alpha", "/srv/alpha")];
+    store
+        .reconcile_remote_projects("device-1", &catalog)
+        .unwrap();
+    let written_at = fs::metadata(support_dir.join("state.json"))
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    store
+        .reconcile_remote_projects("device-1", &catalog)
+        .unwrap();
+
+    assert_eq!(
+        fs::metadata(support_dir.join("state.json"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        written_at
+    );
+
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn remote_project_id_pairs_are_scoped_to_one_device() {
+    let support_dir = catalog_support_dir(
+        "remote-catalog-pairs",
+        json!({
+            "projects": [
+                {
+                    "id": "managed",
+                    "path": "/srv/managed",
+                    "runtimeTarget": { "kind": "remote", "deviceId": "device-1" },
+                    "hostProjectId": "p-managed"
+                },
+                {
+                    "id": "legacy",
+                    "path": "/srv/legacy",
+                    "runtimeTarget": { "kind": "remote", "deviceId": "device-1" }
+                },
+                {
+                    "id": "other",
+                    "path": "/srv/other",
+                    "runtimeTarget": { "kind": "remote", "deviceId": "device-2" },
+                    "hostProjectId": "p-other"
+                }
+            ]
+        }),
+    );
+    let store = ProjectStore::new(support_dir.clone());
+
+    assert_eq!(
+        store.remote_project_id_pairs("device-1"),
+        [("managed".to_string(), "p-managed".to_string())]
+    );
+
+    fs::remove_dir_all(support_dir).ok();
+}

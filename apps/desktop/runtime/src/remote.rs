@@ -5,6 +5,7 @@ mod crypto;
 mod devices;
 mod envelope;
 mod host;
+mod project_bridge;
 mod protocol;
 mod registration;
 mod relay;
@@ -17,6 +18,8 @@ mod types;
 
 use std::path::PathBuf;
 
+#[cfg(test)]
+pub(crate) use controller::TestHostRoute;
 pub use controller::{
     PairingTicket, RemoteController, RemoteControllerTarget, RemoteDirectoryEntry,
     RemoteDirectoryListing, parse_pairing_ticket,

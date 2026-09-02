@@ -477,6 +477,36 @@ impl RemoteControllerManager {
             .collect()
     }
 
+    /// Every live host link with the epoch of the connection that carries it.
+    /// A reconnect bumps the epoch, which is how per-connection work (the
+    /// project-catalog subscription) knows to run again.
+    pub fn connected_controllers(&self) -> Vec<(String, u64, Arc<RemoteController>)> {
+        let Ok(connections) = self.shared.connections.lock() else {
+            return Vec::new();
+        };
+        connections
+            .iter()
+            .filter_map(|(device_id, controller)| {
+                Some((
+                    device_id.clone(),
+                    self.connection_epoch(device_id)?,
+                    Arc::clone(controller),
+                ))
+            })
+            .collect()
+    }
+
+    /// The epoch of the current connection to `device_id`, or `None` if this
+    /// device has never been dialed.
+    pub fn connection_epoch(&self, device_id: &str) -> Option<u64> {
+        self.shared
+            .connection_epochs
+            .lock()
+            .ok()?
+            .get(device_id)
+            .copied()
+    }
+
     pub fn drain_disconnected_devices(&self) -> Vec<String> {
         self.shared
             .disconnected_devices
@@ -550,6 +580,24 @@ impl RemoteControllerManager {
             }
             std::thread::sleep(Duration::from_millis(120));
         }
+    }
+
+    /// Publish a controller as the live link for `device_id` without pairing or
+    /// dialing, so runtime-level tests can drive a fake host.
+    #[cfg(test)]
+    pub(crate) fn insert_test_connection(
+        &self,
+        device_id: &str,
+        controller: Arc<RemoteController>,
+    ) {
+        self.shared.next_connection_epoch(device_id);
+        self.shared
+            .connections
+            .lock()
+            .unwrap()
+            .insert(device_id.to_string(), controller);
+        self.shared
+            .set_link(device_id, ControllerLinkState::Connected);
     }
 
     /// Drop a paired host and any live connection or link state for it.

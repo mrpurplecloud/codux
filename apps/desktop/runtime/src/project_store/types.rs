@@ -35,6 +35,11 @@ pub struct ProjectRecord {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub environment_variables: BTreeMap<String, String>,
     pub runtime_target: ProjectRuntimeTarget,
+    /// The id the hosting Headless catalog uses for this project. Only remote
+    /// projections carry one; local, WSL, and not-yet-migrated legacy remote
+    /// records leave it unset, which keeps the record readable by older builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_project_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -59,6 +64,8 @@ struct ProjectRecordWire {
     runtime_target: Option<ProjectRuntimeTarget>,
     #[serde(default)]
     host_device_id: Option<String>,
+    #[serde(default)]
+    host_project_id: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for ProjectRecord {
@@ -82,6 +89,10 @@ impl<'de> Deserialize<'de> for ProjectRecord {
             git_default_push_remote_name: wire.git_default_push_remote_name,
             environment_variables: wire.environment_variables,
             runtime_target,
+            host_project_id: wire
+                .host_project_id
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty()),
         })
     }
 }

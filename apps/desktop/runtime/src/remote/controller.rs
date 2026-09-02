@@ -17,12 +17,14 @@ use codux_protocol::{
     REMOTE_FILE_WRITE, REMOTE_FILE_WRITE_BLOB, REMOTE_FILE_WRITTEN, REMOTE_GIT_INVOKE,
     REMOTE_GIT_READ, REMOTE_GIT_STATUS, REMOTE_HOST_INFO, REMOTE_HOST_METRICS,
     REMOTE_MEMORY_EXTRACT, REMOTE_MEMORY_READ, REMOTE_MEMORY_RESULT, REMOTE_PAIRING_CONFIRMED,
-    REMOTE_PAIRING_REJECTED, REMOTE_PAIRING_REQUEST, REMOTE_PROJECT_LIST, REMOTE_TERMINAL_BUFFER,
-    REMOTE_TERMINAL_BUFFER_MAX_CHARS, REMOTE_TERMINAL_CLOSE, REMOTE_TERMINAL_CLOSED,
-    REMOTE_TERMINAL_CREATE, REMOTE_TERMINAL_CREATED, REMOTE_TERMINAL_INPUT, REMOTE_TERMINAL_LIST,
-    REMOTE_TERMINAL_OUTPUT, REMOTE_TERMINAL_STATUS, REMOTE_TERMINAL_VIEWPORT_RESIZE,
-    REMOTE_TRANSPORT_IROH, REMOTE_WORKTREE_CREATE, REMOTE_WORKTREE_LIST, REMOTE_WORKTREE_MERGE,
-    REMOTE_WORKTREE_REMOVE, REMOTE_WORKTREE_UPDATED, RemoteHostMetrics,
+    REMOTE_PAIRING_REJECTED, REMOTE_PAIRING_REQUEST, REMOTE_PROJECT_ADD, REMOTE_PROJECT_EDIT,
+    REMOTE_PROJECT_LIST, REMOTE_PROJECT_REMOVE, REMOTE_PROJECT_UPDATED, REMOTE_RESOURCE_PROJECTS,
+    REMOTE_RESOURCE_SUBSCRIBE, REMOTE_TERMINAL_BUFFER, REMOTE_TERMINAL_BUFFER_MAX_CHARS,
+    REMOTE_TERMINAL_CLOSE, REMOTE_TERMINAL_CLOSED, REMOTE_TERMINAL_CREATE, REMOTE_TERMINAL_CREATED,
+    REMOTE_TERMINAL_INPUT, REMOTE_TERMINAL_LIST, REMOTE_TERMINAL_OUTPUT, REMOTE_TERMINAL_STATUS,
+    REMOTE_TERMINAL_VIEWPORT_RESIZE, REMOTE_TRANSPORT_IROH, REMOTE_WORKTREE_CREATE,
+    REMOTE_WORKTREE_LIST, REMOTE_WORKTREE_MERGE, REMOTE_WORKTREE_REMOVE, REMOTE_WORKTREE_UPDATED,
+    RemoteHostMetrics,
 };
 use codux_remote_transport::{
     RemoteControllerTransportConfig, RemoteTransport, RemoteTransportCandidate,
@@ -36,6 +38,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::controller_store::{SavedRemoteHost, SavedRemoteTransport};
+use super::project_bridge::ProjectIdBridge;
 use super::transport_factory::RemoteTransportFactory;
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -200,6 +203,10 @@ struct Waiter {
     tx: Sender<Result<Value, String>>,
 }
 
+/// Feeds one host message into a controller's router (test hosts only).
+#[cfg(test)]
+pub(crate) type TestHostRoute = Arc<dyn Fn(&[u8]) + Send + Sync>;
+
 type TerminalSink = Box<dyn Fn(Value) + Send + Sync>;
 type TerminalOutputForwarder = Box<dyn Fn(Vec<u8>) + Send + Sync>;
 
@@ -207,6 +214,8 @@ type TerminalOutputForwarder = Box<dyn Fn(Vec<u8>) + Send + Sync>;
 struct ControllerInner {
     waiters: Mutex<Vec<Waiter>>,
     events: Mutex<VecDeque<(String, Value)>>,
+    // Desktop project id <-> host project id for this host's projections.
+    project_ids: ProjectIdBridge,
     // Raw full-envelope sink (used by tests that drive a RemoteOutputRouter).
     terminal_sink: Mutex<Option<TerminalSink>>,
     // Per-session byte forwarders for terminal.output — the desktop terminal UI
@@ -226,7 +235,7 @@ impl ControllerInner {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let payload = envelope.get("payload").cloned().unwrap_or(Value::Null);
+        let mut payload = envelope.get("payload").cloned().unwrap_or(Value::Null);
         let request_id = envelope.get("requestId").and_then(Value::as_str);
         // Terminal output never goes through the waiter/event path. A raw sink
         // (tests) gets the full envelope; otherwise demux by sessionId to the
@@ -276,6 +285,12 @@ impl ControllerInner {
                 }
             }
             return;
+        }
+        // Hand every domain the desktop's own project id. Catalog messages are
+        // the exception: their ids ARE the host's catalog identity, and the
+        // reconciliation that builds the bridge reads them.
+        if !is_project_catalog_message(&kind) {
+            self.project_ids.to_local(&mut payload);
         }
         {
             let mut waiters = self.waiters.lock().unwrap();
@@ -347,6 +362,20 @@ impl ControllerInner {
 
 fn is_pairing_event(kind: &str) -> bool {
     matches!(kind, REMOTE_PAIRING_CONFIRMED | REMOTE_PAIRING_REJECTED)
+}
+
+/// Catalog traffic speaks the host's own project identity end to end: the
+/// snapshot the desktop reconciles from, and the acknowledgement naming the
+/// entry the host committed.
+fn is_project_catalog_message(kind: &str) -> bool {
+    matches!(
+        kind,
+        REMOTE_PROJECT_LIST
+            | REMOTE_PROJECT_ADD
+            | REMOTE_PROJECT_EDIT
+            | REMOTE_PROJECT_REMOVE
+            | REMOTE_PROJECT_UPDATED
+    )
 }
 
 fn required_remote_result(value: Value, operation: &str) -> Result<Value, String> {
@@ -503,6 +532,31 @@ impl RemoteController {
         }
     }
 
+    /// Drive a controller against an in-test host: `build_transport` receives the
+    /// callback that feeds a host message back into this controller's router, so
+    /// a fake host can reply and push exactly like a real one.
+    #[cfg(test)]
+    pub(crate) fn with_test_transport(
+        device_id: &str,
+        build_transport: impl FnOnce(TestHostRoute) -> Arc<dyn RemoteTransport>,
+    ) -> Self {
+        let inner = Arc::new(ControllerInner::default());
+        let router = Arc::clone(&inner);
+        let route: TestHostRoute = Arc::new(move |data: &[u8]| router.route(data));
+        Self {
+            transport: build_transport(route),
+            device_id: device_id.to_string(),
+            inner,
+            next_id: AtomicU64::new(1),
+        }
+    }
+
+    /// Deliver one host message as if the transport had received it.
+    #[cfg(test)]
+    pub(crate) fn route_test_message(&self, data: &[u8]) {
+        self.inner.route(data);
+    }
+
     /// Send a request and block until a reply of type `expect` arrives (or the
     /// host returns an error, or the request times out).
     pub fn request(&self, expect: &str, kind: &str, payload: Value) -> Result<Value, String> {
@@ -550,56 +604,42 @@ impl RemoteController {
         self.inner.events.lock().unwrap().drain(..).collect()
     }
 
+    /// Take the queued pushes whose kind `wanted` accepts, oldest first,
+    /// leaving every other controller event queued.
+    fn drain_pushed(&self, wanted: impl Fn(&str) -> bool) -> Vec<(String, Value)> {
+        let mut events = self.inner.events.lock().unwrap();
+        let mut taken = Vec::new();
+        events.retain(|(kind, payload)| {
+            if wanted(kind) {
+                taken.push((kind.clone(), payload.clone()));
+                false
+            } else {
+                true
+            }
+        });
+        taken
+    }
+
     /// Drain unsolicited `ai.stats` payloads the host pushed (live runtime
-    /// updates), leaving any other queued events in place. Returns them oldest
-    /// first; callers apply the latest.
+    /// updates). Returns them oldest first; callers apply the latest.
     pub fn drain_pushed_ai_stats(&self) -> Vec<Value> {
-        let mut events = self.inner.events.lock().unwrap();
-        let mut payloads = Vec::new();
-        events.retain(|(kind, payload)| {
-            if kind == REMOTE_AI_STATS {
-                payloads.push(payload.clone());
-                false
-            } else {
-                true
-            }
-        });
-        payloads
+        self.drain_pushed(|kind| kind == REMOTE_AI_STATS)
+            .into_iter()
+            .map(|(_, payload)| payload)
+            .collect()
     }
 
-    /// Drain unsolicited `terminal.status` pushes (the host's live agent dots),
-    /// leaving any other queued events in place.
+    /// Drain unsolicited `terminal.status` pushes (the host's live agent dots).
     pub fn drain_pushed_terminal_status(&self) -> Vec<Value> {
-        let mut events = self.inner.events.lock().unwrap();
-        let mut payloads = Vec::new();
-        events.retain(|(kind, payload)| {
-            if kind == REMOTE_TERMINAL_STATUS {
-                payloads.push(payload.clone());
-                false
-            } else {
-                true
-            }
-        });
-        payloads
+        self.drain_pushed(|kind| kind == REMOTE_TERMINAL_STATUS)
+            .into_iter()
+            .map(|(_, payload)| payload)
+            .collect()
     }
 
-    /// Drain unsolicited hosted worktree/terminal-list resource updates while
-    /// leaving every other controller event untouched.
+    /// Drain unsolicited hosted worktree/terminal-list resource updates.
     pub fn drain_hosted_workspace_updates(&self) -> Vec<(String, Value)> {
-        let mut events = self.inner.events.lock().unwrap();
-        let mut updates = Vec::new();
-        events.retain(|(kind, payload)| {
-            if matches!(
-                kind.as_str(),
-                REMOTE_WORKTREE_UPDATED | REMOTE_TERMINAL_LIST
-            ) {
-                updates.push((kind.clone(), payload.clone()));
-                false
-            } else {
-                true
-            }
-        });
-        updates
+        self.drain_pushed(|kind| matches!(kind, REMOTE_WORKTREE_UPDATED | REMOTE_TERMINAL_LIST))
     }
 
     pub async fn shutdown(&self) {
@@ -910,6 +950,45 @@ impl RemoteController {
         self.request(REMOTE_PROJECT_LIST, REMOTE_PROJECT_LIST, json!({}))
     }
 
+    /// Publish the desktop↔host project id pairs for this host, so every
+    /// project-scoped envelope is translated at the transport boundary.
+    pub fn set_project_id_pairs(&self, pairs: Vec<(String, String)>) {
+        self.inner.project_ids.replace(pairs);
+    }
+
+    /// Subscribe to the host's project catalog and take its baseline snapshot.
+    /// Only call this when `host.info` advertises the `projects` resource.
+    pub fn subscribe_projects(&self) -> Result<Value, String> {
+        self.request(
+            REMOTE_PROJECT_LIST,
+            REMOTE_RESOURCE_SUBSCRIBE,
+            json!({ "resource": REMOTE_RESOURCE_PROJECTS, "baseline": true }),
+        )
+    }
+
+    /// Register a project in the host's catalog. The host commits before it
+    /// acknowledges, and returns the id its catalog settled on.
+    pub fn project_add(&self, name: &str, path: &str) -> Result<String, String> {
+        let reply = self.request(
+            REMOTE_PROJECT_UPDATED,
+            REMOTE_PROJECT_ADD,
+            json!({ "name": name, "path": path }),
+        )?;
+        reply
+            .get("projectId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| "project.updated reply is missing projectId.".to_string())
+    }
+
+    /// Drain the catalog snapshots the host pushed since the last call.
+    pub fn drain_pushed_project_lists(&self) -> Vec<Value> {
+        self.drain_pushed(|kind| kind == REMOTE_PROJECT_LIST)
+            .into_iter()
+            .map(|(_, payload)| payload)
+            .collect()
+    }
+
     /// List a project's worktrees on the host.
     pub fn worktree_list(&self, project_id: &str, project_path: &str) -> Result<Value, String> {
         self.request(
@@ -1109,9 +1188,14 @@ impl RemoteController {
     fn envelope_with_request_id(
         &self,
         kind: &str,
-        payload: Value,
+        mut payload: Value,
         request_id: Option<&str>,
     ) -> Value {
+        // Every project-scoped request leaves with the id the host's catalog
+        // uses, whatever id the calling domain happened to hold.
+        if !is_project_catalog_message(kind) {
+            self.inner.project_ids.to_host(&mut payload);
+        }
         let session_id = payload.get("sessionId").cloned();
         let mut envelope = json!({ "type": kind, "deviceId": self.device_id, "payload": payload });
         if let Some(request_id) = request_id {

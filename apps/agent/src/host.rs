@@ -529,7 +529,7 @@ fn make_handler(
                     runtime_instance_id: runtime_instance_id.clone(),
                     name: name.clone(),
                     platform: std::env::consts::OS.to_string(),
-                    app: "codux-agent".to_string(),
+                    app: codux_protocol::REMOTE_APP_AGENT.to_string(),
                     resource_subscriptions: vec![
                         REMOTE_RESOURCE_PROJECTS.to_string(),
                         codux_protocol::REMOTE_RESOURCE_TERMINALS.to_string(),

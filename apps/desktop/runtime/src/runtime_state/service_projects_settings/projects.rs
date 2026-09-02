@@ -34,6 +34,15 @@ impl RuntimeService {
         &self,
         request: ProjectCreateRequest,
     ) -> Result<ProjectListSnapshot, String> {
+        // A project on a host that owns its catalog is the host's to create:
+        // commit there first, then adopt the catalog it committed. Hosts without
+        // the capability — and hosts that are offline, where the capability is
+        // unknowable — keep the previous controller-local behaviour.
+        if let Some(device_id) = request.runtime_target.remote_device_id().map(str::to_string)
+            && let Some(controller) = self.remote_project_catalog_host(&device_id)
+        {
+            return self.create_remote_project(&device_id, &controller, request);
+        }
         let snapshot = ProjectStore::new(self.support_dir.clone()).create_project(request)?;
         if let Some(project_id) = snapshot.selected_project_id.as_deref() {
             let _ = self.mark_project_active_with_watch(project_id);

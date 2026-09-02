@@ -1241,6 +1241,7 @@ impl CoduxApp {
         let remote_events = self.runtime_service.drain_remote_events();
         let mut remote_summary_events = 0;
         let mut remote_terminal_layout_events = 0;
+        let mut remote_project_catalog_events = 0;
         let mut changed_worktree_projects = HashMap::new();
         for event in &remote_events {
             match event {
@@ -1255,6 +1256,9 @@ impl CoduxApp {
                 RemoteHostEvent::TerminalLayoutChanged(_) => {
                     remote_terminal_layout_events += 1;
                 }
+                RemoteHostEvent::ProjectsChanged => {
+                    remote_project_catalog_events += 1;
+                }
                 RemoteHostEvent::WorktreesChanged {
                     project_id,
                     project_path,
@@ -1265,6 +1269,12 @@ impl CoduxApp {
         }
         if remote_terminal_layout_events > 0 {
             self.reconcile_remote_terminal_layout(cx);
+        }
+        if remote_project_catalog_events > 0 {
+            // A host's catalog landed in the local store; show it.
+            let next = self.runtime_service.reload_state();
+            self.apply_project_list_state(next, cx);
+            self.invalidate_project_management(cx);
         }
         for (project_id, project_path) in changed_worktree_projects {
             if self

@@ -240,6 +240,7 @@ impl RuntimeService {
 
     pub fn drain_remote_events(&self) -> Vec<RemoteHostEvent> {
         let mut events = self.remote_host.drain_events();
+        events.extend(self.sync_remote_project_catalogs());
         events.extend(self.drain_hosted_workspace_updates());
         if let Ok(mut hosted) = self.hosted_runtime_events.lock() {
             events.extend(hosted.drain(..));

@@ -189,9 +189,16 @@ pub(super) fn project_uuid(name: &str, path: &str, target_identity: Option<&str>
     let identity = target_identity
         .map(|identity| format!(":{identity}"))
         .unwrap_or_default();
+    project_uuid_from(&format!("{name}:{path}{identity}"))
+}
+
+/// A stable project id derived from whatever identifies the project. One
+/// namespace for every project id this store mints, so two derivations can
+/// never collide by sharing a suffix.
+pub(super) fn project_uuid_from(key: &str) -> String {
     Uuid::new_v5(
         &Uuid::NAMESPACE_URL,
-        format!("codux:project:{name}:{path}{identity}").as_bytes(),
+        format!("codux:project:{key}").as_bytes(),
     )
     .to_string()
 }

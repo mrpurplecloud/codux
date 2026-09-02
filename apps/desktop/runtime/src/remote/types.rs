@@ -25,6 +25,9 @@ pub struct RemoteSummary {
 pub enum RemoteHostEvent {
     Summary(Box<RemoteSummary>),
     TerminalLayoutChanged(RemoteTerminalLayoutChanged),
+    /// A remote host's project catalog was reconciled into the local store, so
+    /// the project list on screen is stale.
+    ProjectsChanged,
     WorktreesChanged {
         project_id: String,
         project_path: String,

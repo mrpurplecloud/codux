@@ -98,6 +98,7 @@ pub struct RuntimeService {
     power_manager: Arc<PowerManager>,
     remote_host: Arc<RemoteHostRuntime>,
     remote_controllers: Arc<crate::remote::RemoteControllerManager>,
+    remote_project_sync: Arc<Mutex<HashMap<String, RemoteProjectSyncState>>>,
     wsl_runtimes: Arc<crate::wsl::WslRuntimeManager>,
     host_browser_proxy: Arc<crate::host_browser::HostBrowserProxy>,
 }
