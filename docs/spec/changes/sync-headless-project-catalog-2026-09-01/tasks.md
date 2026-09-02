@@ -96,7 +96,7 @@ would show one host path twice and translate one host ID into two Desktop IDs.
 
 **Blocked by:** 2. Desktop Authoritative Add and ID Bridge.
 
-**Status:** done
+**Status:** done — commit `8d3ec643`
 
 - [x] 4.1 Add Desktop remote edit/remove paths that wait for Headless commit and consume authoritative snapshot.
 - [x] 4.2 Add two-direction integration cases: Desktop mutation updates Mobile-style client; Mobile-style mutation updates Desktop projection.
