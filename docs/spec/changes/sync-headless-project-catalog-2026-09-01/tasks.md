@@ -53,6 +53,11 @@ The version guard is scoped to the controller's connection epoch rather than to
 a separately tracked runtime-instance id: a host restart always drops the link,
 so a new epoch is exactly what a new runtime instance produces.
 
+Corrected under ticket 5: 2.5 also let an add fall back to a local write when the
+host could not be reached, which contradicts "Disconnected cache is read-only" in
+the delta spec. A host this desktop has already synced a catalog with now refuses
+the add instead — see the ticket 5 notes.
+
 Two things 2.6/2.7 forced that the ticket text does not name. The host calls a
 project's default worktree by the project's own id, so once outbound requests
 carry the host id, the worktree ids coming back are host-scoped too; the id
@@ -168,7 +173,7 @@ Where each automated gate lives:
 
 5.5, run from the repository root on macOS 24.6.0 (darwin, arm64):
 
-- `cargo test -p codux-runtime` — 420 passed, 4 ignored.
+- `cargo test -p codux-runtime` — 425 passed, 4 ignored.
 - `cargo test -p codux-agent` — 39 passed.
 - `cargo test -p codux-protocol` — 15 passed.
 - `cargo test -p codux-runtime-core` — 47 passed.
@@ -180,6 +185,36 @@ Where each automated gate lives:
 
 5.8: no `[DEBUG-` marker and no throwaway harness in `apps/` or `crates/`; the
 fake host in the desktop tests is the same seam tickets 2 to 4 already used.
+
+A review of tickets 1 to 4 found six defects the gates above did not cover. Each
+was fixed by removing the thing that could disagree rather than by adding a
+guard around it:
+
+- The host minted a snapshot's resource version after releasing the store lock,
+  so a delayed fan-out could publish an old catalog under a new version and
+  clients would lose an entry that is on disk. The version is now minted with
+  the catalog inside the store's mutation lock and travels on `ProjectCommit`;
+  the separate resource counter for `projects` is gone.
+- Desktop recorded a snapshot's version before reconciling it, and outside the
+  reconciliation. A failed apply consumed the version for good, and two applies
+  could interleave. Check, write, and record now happen under one hold of the
+  sync-state lock, and parsing happens before it.
+- A remote add whose host was unreachable fell back to a local record that no
+  later connection could upload and no snapshot would ever mention. Ownership is
+  now one question with three answers (`ProjectCatalogOwner`): live, unreachable,
+  or not a catalog. Only the last keeps the controller-local flow.
+- A reconnected controller carried an empty project-id bridge until its baseline
+  landed, so an early terminal, Git, AI, or worktree request could cross it with
+  a Desktop ID. Every live connection is now published through one path that
+  loads the bridge from the persisted projections first.
+- An edit or removal raised on another controller reconciled the store and
+  stopped there, leaving watchers, project activity, workspace layouts, and
+  caches behind. Reconciliation returns what changed, and both it and an
+  explicit close run the same `finish_project_removal`.
+- Path-keyed remote routing had its own `.find()` and could pick another host's
+  project when two hosts serve the same path. It now goes through the store's
+  one path resolver, where the selected project wins and an ambiguous path is an
+  error.
 
 5.6 and 5.7 are not run: they need a Desktop build, a phone, a running Headless
 host, and a Windows host, none of which exist in this environment. Their

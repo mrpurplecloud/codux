@@ -32,6 +32,24 @@ impl ProjectStore {
         &self,
         workspace_path: &str,
     ) -> Result<super::ProjectRuntimeTarget, String> {
+        Ok(self
+            .project_for_workspace_path(workspace_path)?
+            .map(|project| project.runtime_target)
+            .unwrap_or(super::ProjectRuntimeTarget::Local))
+    }
+
+    /// The project a workspace path belongs to, by its root or one of its
+    /// worktrees. `None` means no project claims the path.
+    ///
+    /// Two projects can hold the same path — two headless hosts can each serve
+    /// `/srv/alpha` — so the selected project wins, and an otherwise ambiguous
+    /// path is an error rather than whichever record happens to come first.
+    /// Every path-keyed lookup routes through here, so none of them can answer
+    /// with a different project than the others.
+    pub fn project_for_workspace_path(
+        &self,
+        workspace_path: &str,
+    ) -> Result<Option<ProjectRecord>, String> {
         let snapshot = self.snapshot();
         let project_for_path = |project: &ProjectRecord| {
             workspace_paths_equal(&project.path, workspace_path, &project.runtime_target)
@@ -55,7 +73,7 @@ impl ProjectStore {
             })
             .filter(|project| project_for_path(project))
         {
-            return Ok(selected.runtime_target.clone());
+            return Ok(Some(selected.clone()));
         }
         let matches = snapshot
             .projects
@@ -63,10 +81,10 @@ impl ProjectStore {
             .filter(|project| project_for_path(project))
             .collect::<Vec<_>>();
         match matches.as_slice() {
-            [] => Ok(super::ProjectRuntimeTarget::Local),
-            [project] => Ok(project.runtime_target.clone()),
+            [] => Ok(None),
+            [project] => Ok(Some((*project).clone())),
             _ => Err(format!(
-                "Workspace path belongs to multiple runtime targets: {workspace_path}"
+                "Workspace path belongs to multiple projects: {workspace_path}"
             )),
         }
     }

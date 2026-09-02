@@ -78,6 +78,7 @@ impl ControllerLinkPath {
 /// reconnect loop, so a dropped link can evict + reconnect without a reference
 /// back to the owning `RuntimeService`.
 struct ManagerShared {
+    support_dir: PathBuf,
     store: RemoteControllerStore,
     connections: Mutex<HashMap<String, Arc<RemoteController>>>,
     connection_epochs: Mutex<HashMap<String, u64>>,
@@ -138,6 +139,32 @@ impl ManagerShared {
             .ok()
             .and_then(|epochs| epochs.get(device_id).copied())
             == Some(epoch)
+    }
+
+    /// Publish `controller` as the live link for `device_id`.
+    ///
+    /// The project-id bridge is loaded from the persisted projections before the
+    /// connection becomes visible. The catalog subscription refreshes it from
+    /// the host's baseline moments later, but the desktop restores its projects
+    /// as soon as a link reports connected, so a terminal, git, AI, or worktree
+    /// request can be the first thing to cross a fresh connection — and a
+    /// desktop id sent there would scope the host's work to a project it does
+    /// not have. Every live connection is published here, so none can be
+    /// reachable before its bridge is.
+    fn publish_connection(&self, device_id: &str, controller: Arc<RemoteController>) {
+        controller.set_project_id_pairs(
+            crate::project_store::ProjectStore::new(self.support_dir.clone())
+                .remote_project_id_pairs(device_id),
+        );
+        let old = self
+            .connections
+            .lock()
+            .ok()
+            .and_then(|mut connections| connections.insert(device_id.to_string(), controller));
+        if let Some(old) = old {
+            Self::shutdown_controller(old);
+        }
+        self.set_link(device_id, ControllerLinkState::Connected);
     }
 
     fn shutdown_controller(controller: Arc<RemoteController>) {
@@ -271,18 +298,10 @@ impl ManagerShared {
             let on_state = self.state_handler(&device_id, epoch);
             match RemoteController::connect_saved(&host, on_state).await {
                 Ok(controller) => {
-                    let old = if let Ok(mut connections) = self.connections.lock() {
-                        connections.insert(device_id.clone(), Arc::new(controller))
-                    } else {
-                        None
-                    };
-                    if let Some(old) = old {
-                        Self::shutdown_controller(old);
-                    }
+                    self.publish_connection(&device_id, Arc::new(controller));
                     if let Ok(mut errors) = self.last_errors.lock() {
                         errors.remove(&device_id);
                     }
-                    self.set_link(&device_id, ControllerLinkState::Connected);
                     crate::runtime_trace::runtime_trace(
                         "remote",
                         &format!("controller_connect ok device={device_id} n={attempt}"),
@@ -327,6 +346,7 @@ impl RemoteControllerManager {
     pub fn new(support_dir: PathBuf) -> Self {
         Self {
             shared: Arc::new(ManagerShared {
+                support_dir: support_dir.clone(),
                 store: RemoteControllerStore::new(support_dir),
                 connections: Mutex::new(HashMap::new()),
                 connection_epochs: Mutex::new(HashMap::new()),
@@ -404,19 +424,8 @@ impl RemoteControllerManager {
             on_state,
         ))?;
         self.shared.store.upsert(saved.clone())?;
-        let old = self
-            .shared
-            .connections
-            .lock()
-            .ok()
-            .and_then(|mut connections| {
-                connections.insert(saved.device_id.clone(), Arc::new(controller))
-            });
-        if let Some(old) = old {
-            ManagerShared::shutdown_controller(old);
-        }
         self.shared
-            .set_link(&saved.device_id, ControllerLinkState::Connected);
+            .publish_connection(&saved.device_id, Arc::new(controller));
         Ok(saved)
     }
 
@@ -591,13 +600,7 @@ impl RemoteControllerManager {
         controller: Arc<RemoteController>,
     ) {
         self.shared.next_connection_epoch(device_id);
-        self.shared
-            .connections
-            .lock()
-            .unwrap()
-            .insert(device_id.to_string(), controller);
-        self.shared
-            .set_link(device_id, ControllerLinkState::Connected);
+        self.shared.publish_connection(device_id, controller);
     }
 
     /// Drop a paired host and any live connection or link state for it.

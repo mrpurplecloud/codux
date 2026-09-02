@@ -11,6 +11,28 @@
 /// over, and the host's catalog is authoritative from then on.
 const REMOTE_PROJECT_MIGRATION_VERSION: u64 = 1;
 
+/// Who owns the projects of one paired device.
+pub(crate) enum ProjectCatalogOwner {
+    /// A headless host that owns its catalog and can be reached right now.
+    Live(Arc<crate::remote::RemoteController>),
+    /// A host this desktop has already synced a catalog with, unreachable now.
+    /// Its projects are still its own: writing one here would diverge silently
+    /// and be undone by its next snapshot.
+    Unreachable,
+    /// No shared catalog: a pre-change agent, a desktop host, or a device this
+    /// desktop has never synced with. These keep the controller-local flows.
+    NotACatalog,
+}
+
+impl ProjectCatalogOwner {
+    fn require(self, device_id: &str) -> Result<Arc<crate::remote::RemoteController>, String> {
+        match self {
+            Self::Live(controller) => Ok(controller),
+            _ => Err(format!("Remote host {device_id} is unavailable.")),
+        }
+    }
+}
+
 /// Per-host sync state, keyed by device id and pinned to one connection.
 ///
 /// `connection_epoch` scopes the whole record, and is what keeps the version
@@ -208,6 +230,13 @@ impl RuntimeService {
 
     /// Reconcile one `project.list` snapshot and refresh the transport's id
     /// bridge. Returns whether the local store changed.
+    ///
+    /// Version check, store write, and version record happen under one hold of
+    /// the sync-state lock. Latest-wins needs the applied version and the
+    /// applied catalog to be the same fact: recording a version around a write
+    /// that then fails would make the host's next re-delivery of it a duplicate
+    /// and ignore it forever, and two snapshots applying at once could leave the
+    /// older one's catalog behind the newer one's version.
     fn apply_remote_project_snapshot(
         &self,
         device_id: &str,
@@ -215,58 +244,90 @@ impl RuntimeService {
         payload: &Value,
         controller: &crate::remote::RemoteController,
     ) -> Result<bool, String> {
-        if !self.accept_remote_project_version(device_id, epoch, payload)? {
-            return Ok(false);
-        }
+        // Parsing is the caller's error to report, and it needs no lock.
         let catalog = remote_catalog_from_payload(payload)?;
-        let store = ProjectStore::new(self.support_dir.clone());
-        let changed = store.reconcile_remote_projects(device_id, &catalog)?;
-        controller.set_project_id_pairs(store.remote_project_id_pairs(device_id));
-        if changed {
-            self.sync_pet_project_memberships();
-        }
-        Ok(changed)
-    }
-
-    /// Latest-wins within one host runtime instance: a duplicate or older
-    /// version cannot roll this desktop back.
-    fn accept_remote_project_version(
-        &self,
-        device_id: &str,
-        epoch: u64,
-        payload: &Value,
-    ) -> Result<bool, String> {
         let version = payload.get("version").and_then(Value::as_u64);
-        let mut states = self
-            .remote_project_sync
-            .lock()
-            .map_err(|_| "Remote project sync state is poisoned.".to_string())?;
-        let state = sync_state_for(&mut states, device_id, epoch);
-        let Some(version) = version else {
+        let store = ProjectStore::new(self.support_dir.clone());
+        // The workspaces of the projections that are about to be pruned; they
+        // cannot be looked up once the records are gone.
+        let workspaces = store.project_workspaces_snapshot();
+        let change = {
+            let mut states = self
+                .remote_project_sync
+                .lock()
+                .map_err(|_| "Remote project sync state is poisoned.".to_string())?;
+            let state = sync_state_for(&mut states, device_id, epoch);
             // An unversioned snapshot comes from a host without the resource
-            // version stamp; apply it and keep the guard where it is.
-            return Ok(true);
+            // version stamp; apply it and leave the guard where it is.
+            if version.is_some_and(|version| {
+                state.version.is_some_and(|applied| version <= applied)
+            }) {
+                return Ok(false);
+            }
+            let change = store.reconcile_remote_projects(device_id, &catalog)?;
+            controller.set_project_id_pairs(store.remote_project_id_pairs(device_id));
+            if let Some(version) = version {
+                state.version = Some(version);
+            }
+            change
         };
-        if state.version.is_some_and(|applied| version <= applied) {
+        if change.is_empty() {
             return Ok(false);
         }
-        state.version = Some(version);
+        self.follow_remote_catalog_change(&change, &workspaces);
         Ok(true)
     }
 
-    /// The live controller of a host that owns its project catalog, if this is
-    /// such a host and it is reachable right now.
+    /// Follow a catalog change with the runtime lifecycle the local paths run.
     ///
-    /// The answer comes from the host itself rather than from the cached probe:
-    /// a mutation can be raised before the connection's probe has answered, and
-    /// routing it locally then would create exactly the phantom project the
-    /// host-first flow exists to prevent. An unreachable host answers nothing,
-    /// and the caller keeps the pre-change local behaviour.
-    pub(crate) fn remote_project_catalog_host(
+    /// A projection removed on another controller leaves this desktop exactly
+    /// like one closed here, and a projection the host re-pathed must re-point
+    /// the watchers that were following the old path. Both reuse
+    /// [`finish_project_removal`](RuntimeService::finish_project_removal), so
+    /// there is one description of what leaving means.
+    fn follow_remote_catalog_change(
         &self,
-        device_id: &str,
-    ) -> Option<Arc<crate::remote::RemoteController>> {
-        let controller = self
+        change: &crate::project_store::RemoteCatalogChange,
+        workspaces: &[crate::project_store::ProjectWorkspaceRecord],
+    ) {
+        let selected = ProjectStore::new(self.support_dir.clone())
+            .list_snapshot()
+            .selected_project_id;
+        if !change.removed_project_ids.is_empty() {
+            let workspace_ids = workspaces
+                .iter()
+                .filter(|workspace| {
+                    change
+                        .removed_project_ids
+                        .contains(&workspace.root_project_id)
+                })
+                .map(|workspace| workspace.id.clone())
+                .collect::<Vec<_>>();
+            self.finish_project_removal(
+                &change.removed_project_ids,
+                &workspace_ids,
+                selected.as_deref(),
+            );
+            return;
+        }
+        if let Some(selected) = selected.filter(|selected| {
+            change.moved_project_ids.contains(selected)
+        }) {
+            let _ = self.mark_project_active_with_watch(&selected);
+        }
+        self.sync_pet_project_memberships();
+    }
+
+    /// Who owns the projects of `device_id`.
+    ///
+    /// Liveness is asked of the host rather than of the cached probe: a mutation
+    /// can be raised before the connection's probe has answered, and deciding
+    /// from a missing answer would create exactly the phantom project the
+    /// host-first flow exists to prevent. A host that cannot answer is not
+    /// therefore a host without a catalog — this desktop's own record of having
+    /// synced with it says which of the two it is.
+    pub(crate) fn project_catalog_owner(&self, device_id: &str) -> ProjectCatalogOwner {
+        let live = self
             .remote_controllers
             .controller_for_blocking(device_id, REMOTE_CONNECT_TIMEOUT)
             .inspect_err(|error| {
@@ -275,8 +336,25 @@ impl RuntimeService {
                     &format!("catalog host unreachable device={device_id} error={error}"),
                 )
             })
-            .ok()?;
-        host_info_shares_projects(&controller.host_info().ok()?).then_some(controller)
+            .ok()
+            .filter(|controller| {
+                controller
+                    .host_info()
+                    .is_ok_and(|info| host_info_shares_projects(&info))
+            });
+        match live {
+            Some(controller) => ProjectCatalogOwner::Live(controller),
+            // The migration marker is this desktop's record that the host once
+            // served it a catalog; from then on that host owns its projects
+            // whether or not it can be reached.
+            None if ProjectStore::new(self.support_dir.clone())
+                .remote_project_migration_version(device_id)
+                > 0 =>
+            {
+                ProjectCatalogOwner::Unreachable
+            }
+            None => ProjectCatalogOwner::NotACatalog,
+        }
     }
 
     /// The controller of the host that owns a projection's catalog, for a
@@ -290,8 +368,7 @@ impl RuntimeService {
         &self,
         device_id: &str,
     ) -> Result<Arc<crate::remote::RemoteController>, String> {
-        self.remote_project_catalog_host(device_id)
-            .ok_or_else(|| format!("Remote host {device_id} is unavailable."))
+        self.project_catalog_owner(device_id).require(device_id)
     }
 
     /// Rename or re-path a project in a host's catalog, then adopt the catalog

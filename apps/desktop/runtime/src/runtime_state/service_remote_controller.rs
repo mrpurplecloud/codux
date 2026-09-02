@@ -237,11 +237,17 @@ impl RuntimeService {
             .map(|(device_id, _)| device_id)
     }
 
+    /// The `(device_id, project_id)` of the remote project a path belongs to.
+    ///
+    /// Resolved through the store's one path resolver, so this cannot answer
+    /// with a different project than the runtime-target lookup that decides
+    /// where the same path's terminals and files go — which matters as soon as
+    /// two hosts serve the same path.
     pub(crate) fn remote_project_for_path(&self, project_path: &str) -> Option<(String, String)> {
         crate::project_store::ProjectStore::new(self.support_dir.clone())
-            .projects_snapshot()
-            .into_iter()
-            .find(|project| crate::path::paths_equal(&project.path, project_path))
+            .project_for_workspace_path(project_path)
+            .ok()
+            .flatten()
             .and_then(|project| {
                 project
                     .runtime_target

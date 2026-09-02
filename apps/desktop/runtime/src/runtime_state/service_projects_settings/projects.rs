@@ -35,13 +35,20 @@ impl RuntimeService {
         request: ProjectCreateRequest,
     ) -> Result<ProjectListSnapshot, String> {
         // A project on a host that owns its catalog is the host's to create:
-        // commit there first, then adopt the catalog it committed. Hosts without
-        // the capability — and hosts that are offline, where the capability is
-        // unknowable — keep the previous controller-local behaviour.
-        if let Some(device_id) = request.runtime_target.remote_device_id().map(str::to_string)
-            && let Some(controller) = self.remote_project_catalog_host(&device_id)
-        {
-            return self.create_remote_project(&device_id, &controller, request);
+        // commit there first, then adopt the catalog it committed. An
+        // unreachable owner fails instead of writing locally — that record could
+        // never be uploaded afterwards (migration has already run for that host)
+        // and no snapshot would ever mention it, leaving a project only this
+        // desktop can see. Hosts that own no catalog keep the previous
+        // controller-local behaviour.
+        if let Some(device_id) = request.runtime_target.remote_device_id().map(str::to_string) {
+            match self.project_catalog_owner(&device_id) {
+                ProjectCatalogOwner::NotACatalog => {}
+                owner => {
+                    let controller = owner.require(&device_id)?;
+                    return self.create_remote_project(&device_id, &controller, request);
+                }
+            }
         }
         let snapshot = ProjectStore::new(self.support_dir.clone()).create_project(request)?;
         if let Some(project_id) = snapshot.selected_project_id.as_deref() {
@@ -162,28 +169,48 @@ impl RuntimeService {
     }
 
     pub fn close_project(&self, project_id: &str) -> Result<Option<String>, String> {
-        let workspace_ids = self.project_workspace_ids_for_root(project_id);
+        let store = ProjectStore::new(self.support_dir.clone());
         // Removing a projection removes catalog membership, which only the host
         // can do; the snapshot it publishes prunes this projection and every
-        // other controller's. The host's directory and sessions are untouched.
-        let store = ProjectStore::new(self.support_dir.clone());
-        let next_project_id = match store.remote_catalog_projection(project_id) {
-            Some((device_id, host_project_id)) => {
-                let controller = self.required_remote_project_catalog_host(&device_id)?;
-                self.remove_remote_project(&device_id, &host_project_id, &controller)?
+        // other controller's. Reconciling that snapshot runs the lifecycle
+        // below, so this path stops here. The host's directory and sessions are
+        // untouched.
+        if let Some((device_id, host_project_id)) = store.remote_catalog_projection(project_id) {
+            let controller = self.required_remote_project_catalog_host(&device_id)?;
+            return self.remove_remote_project(&device_id, &host_project_id, &controller);
+        }
+        let workspace_ids = self.project_workspace_ids_for_root(project_id);
+        let next_project_id = store.close_project(project_id)?;
+        self.finish_project_removal(
+            std::slice::from_ref(&project_id.to_string()),
+            &workspace_ids,
+            next_project_id.as_deref(),
+        );
+        Ok(next_project_id)
+    }
+
+    /// Everything that must follow projects leaving this desktop, whichever way
+    /// they left: the user closed one, or the host that owns them dropped them
+    /// from its catalog. `workspace_ids` are the workspaces they owned, read
+    /// before the store write that removed them.
+    pub(crate) fn finish_project_removal(
+        &self,
+        project_ids: &[String],
+        workspace_ids: &[String],
+        next_project_id: Option<&str>,
+    ) {
+        for project_id in project_ids {
+            self.remote_host.remove_project_state(project_id);
+            self.project_activity.remove_project(project_id);
+        }
+        self.cleanup_project_workspace_data(workspace_ids);
+        match next_project_id {
+            Some(next_project_id) => {
+                let _ = self.mark_project_active_with_watch(next_project_id);
             }
-            None => store.close_project(project_id)?,
-        };
-        self.remote_host.remove_project_state(project_id);
-        self.cleanup_project_workspace_data(&workspace_ids);
-        self.project_activity.remove_project(project_id);
-        if let Some(next_project_id) = next_project_id.as_deref() {
-            let _ = self.mark_project_active_with_watch(next_project_id);
-        } else {
-            self.stop_active_project_watches();
+            None => self.stop_active_project_watches(),
         }
         self.sync_pet_project_memberships();
-        Ok(next_project_id)
     }
 
     pub fn read_project_file_edit_buffer(

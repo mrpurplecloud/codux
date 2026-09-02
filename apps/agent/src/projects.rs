@@ -25,18 +25,29 @@ pub fn agent_data_dir() -> PathBuf {
         })
 }
 
-/// One committed catalog change: the catalog as saved, plus the entry the
-/// mutation settled on.
+/// One committed catalog change: the catalog as saved, the entry the mutation
+/// settled on, and the version that catalog was committed under.
 pub struct ProjectCommit {
     pub items: Vec<ProjectListItem>,
     pub project_id: String,
+    pub version: u64,
 }
 
 pub struct AgentProjectStore {
     path: PathBuf,
-    /// Held across load → validate → save so two controllers mutating at once
-    /// cannot each save a catalog built from the same stale read.
-    mutation: Mutex<()>,
+    /// The version of the last committed catalog, and the lock held across
+    /// load → validate → save → version.
+    ///
+    /// Minting the version inside the same critical section is what keeps a
+    /// version and the catalog it describes inseparable: two controllers
+    /// mutating at once cannot each save from the same stale read, and a commit
+    /// whose fan-out is delayed cannot carry a version newer than its own
+    /// catalog — so a late broadcast is an older version, which every client
+    /// already knows to drop.
+    ///
+    /// It starts at zero in each host process. A restart is a new version
+    /// epoch, which is exactly what a controller's per-connection guard expects.
+    committed: Mutex<u64>,
 }
 
 impl AgentProjectStore {
@@ -47,8 +58,16 @@ impl AgentProjectStore {
     pub fn with_path(path: PathBuf) -> Self {
         Self {
             path,
-            mutation: Mutex::new(()),
+            committed: Mutex::new(0),
         }
+    }
+
+    /// The stored catalog with the version it was committed under, read under
+    /// the lock a mutation holds so a baseline cannot describe one catalog with
+    /// another's version.
+    pub fn snapshot(&self) -> Result<(Vec<ProjectListItem>, u64), String> {
+        let committed = self.lock_mutation();
+        Ok((self.list()?, *committed))
     }
 
     /// The stored catalog. A missing file is an empty catalog; an unreadable or
@@ -84,13 +103,11 @@ impl AgentProjectStore {
         if path.is_empty() {
             return Err("Project path is required.".to_string());
         }
-        let _mutation = self.lock_mutation();
+        let mut committed = self.lock_mutation();
         let mut items = self.list()?;
         if let Some(existing) = items.iter().find(|item| paths_equal(&item.path, path)) {
-            return Ok(ProjectCommit {
-                project_id: existing.id.clone(),
-                items,
-            });
+            let project_id = existing.id.clone();
+            return Ok(commit(&mut committed, items, project_id));
         }
         let project_id = project_id_for_path(path);
         items.push(ProjectListItem {
@@ -99,7 +116,7 @@ impl AgentProjectStore {
             path: path.to_string(),
         });
         self.save(&items)?;
-        Ok(ProjectCommit { items, project_id })
+        Ok(commit(&mut committed, items, project_id))
     }
 
     /// Rename or re-point an entry, keeping its host project id stable so
@@ -114,7 +131,7 @@ impl AgentProjectStore {
         if path.is_empty() {
             return Err("Project path is required.".to_string());
         }
-        let _mutation = self.lock_mutation();
+        let mut committed = self.lock_mutation();
         let mut items = self.list()?;
         if !items.iter().any(|item| item.id == project_id) {
             return Err("Project not found.".to_string());
@@ -131,30 +148,24 @@ impl AgentProjectStore {
             entry.path = path.to_string();
         }
         self.save(&items)?;
-        Ok(ProjectCommit {
-            items,
-            project_id: project_id.to_string(),
-        })
+        Ok(commit(&mut committed, items, project_id.to_string()))
     }
 
     /// Drop catalog membership. Idempotent, and it never touches the project
     /// directory on disk.
     pub fn remove(&self, project_id: &str) -> Result<ProjectCommit, String> {
-        let _mutation = self.lock_mutation();
+        let mut committed = self.lock_mutation();
         let mut items = self.list()?;
         let before = items.len();
         items.retain(|item| item.id != project_id);
         if items.len() != before {
             self.save(&items)?;
         }
-        Ok(ProjectCommit {
-            items,
-            project_id: project_id.to_string(),
-        })
+        Ok(commit(&mut committed, items, project_id.to_string()))
     }
 
-    fn lock_mutation(&self) -> std::sync::MutexGuard<'_, ()> {
-        match self.mutation.lock() {
+    fn lock_mutation(&self) -> std::sync::MutexGuard<'_, u64> {
+        match self.committed.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }
@@ -180,6 +191,20 @@ impl AgentProjectStore {
             let _ = fs::remove_file(&temporary);
             error.to_string()
         })
+    }
+}
+
+/// Stamp a saved catalog with the next version, still under the mutation lock.
+fn commit(
+    committed: &mut std::sync::MutexGuard<'_, u64>,
+    items: Vec<ProjectListItem>,
+    project_id: String,
+) -> ProjectCommit {
+    **committed += 1;
+    ProjectCommit {
+        items,
+        project_id,
+        version: **committed,
     }
 }
 

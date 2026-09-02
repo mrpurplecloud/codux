@@ -31,6 +31,26 @@ pub struct RemoteCatalogProject {
     pub path: String,
 }
 
+/// What one authoritative snapshot changed locally. The runtime follows the
+/// store with it: a projection that left must free what closing it frees, and a
+/// projection whose path moved must re-point the watchers that were on the old
+/// one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemoteCatalogChange {
+    pub added_project_ids: Vec<String>,
+    pub removed_project_ids: Vec<String>,
+    /// Projections whose host-owned name or path moved.
+    pub moved_project_ids: Vec<String>,
+}
+
+impl RemoteCatalogChange {
+    pub fn is_empty(&self) -> bool {
+        self.added_project_ids.is_empty()
+            && self.removed_project_ids.is_empty()
+            && self.moved_project_ids.is_empty()
+    }
+}
+
 /// A remote record this desktop created before the host owned the catalog. It
 /// carries no `hostProjectId`, so reconciliation leaves it alone until
 /// migration registers its path on the host.
@@ -43,12 +63,12 @@ pub struct LegacyRemoteProject {
 
 impl ProjectStore {
     /// Apply one authoritative catalog snapshot from the Headless host
-    /// `device_id`. Returns whether the local store changed.
+    /// `device_id`. Returns what changed locally.
     pub fn reconcile_remote_projects(
         &self,
         device_id: &str,
         catalog: &[RemoteCatalogProject],
-    ) -> Result<bool, String> {
+    ) -> Result<RemoteCatalogChange, String> {
         let target = normalized_runtime_target(ProjectRuntimeTarget::Remote {
             device_id: device_id.to_string(),
         })?;
@@ -58,8 +78,7 @@ impl ProjectStore {
             .get("selectedProjectId")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let mut changed = false;
-        let mut removed = Vec::new();
+        let mut change = RemoteCatalogChange::default();
         let mut selected_removed_at = None;
         // Desktop id of every projection whose shared fields moved, so the
         // default worktree record follows the rename. A migrated projection
@@ -80,8 +99,8 @@ impl ProjectStore {
                 {
                     Some(item) => {
                         if apply_shared_fields(&mut projects[index], item) {
+                            change.moved_project_ids.push(managed.project_id.clone());
                             renamed.push((managed.project_id, item));
-                            changed = true;
                         }
                         index += 1;
                     }
@@ -90,8 +109,7 @@ impl ProjectStore {
                         if selected_project_id.as_deref() == Some(managed.project_id.as_str()) {
                             selected_removed_at = Some(index);
                         }
-                        removed.push(managed.project_id);
-                        changed = true;
+                        change.removed_project_ids.push(managed.project_id);
                     }
                 }
             }
@@ -103,21 +121,28 @@ impl ProjectStore {
                 }) {
                     continue;
                 }
-                projects.push(Value::Object(new_projection(device_id, item, &target)?));
-                changed = true;
+                let projection = new_projection(device_id, item, &target)?;
+                change.added_project_ids.push(
+                    projection
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                );
+                projects.push(Value::Object(projection));
             }
         }
 
-        if !changed {
-            return Ok(false);
+        if change.is_empty() {
+            return Ok(change);
         }
 
-        apply_removals(&mut raw, &removed, selected_removed_at);
+        apply_removals(&mut raw, &change.removed_project_ids, selected_removed_at);
         for (project_id, item) in renamed {
             update_default_worktree_record(&mut raw, &project_id, &item.name, &item.path);
         }
         self.save_raw_snapshot(&raw)?;
-        Ok(true)
+        Ok(change)
     }
 
     /// The remote records for `device_id` that migration still owes the host.

@@ -1040,7 +1040,10 @@ fn a_desktop_host_catalog_is_not_adopted() {
     // A desktop host advertises `projects` too, but its list is its own
     // controller state: importing it would add projects the user never opened.
     assert!(service.project_list().projects.is_empty());
-    assert!(service.remote_project_catalog_host("device-1").is_none());
+    assert!(matches!(
+        service.project_catalog_owner("device-1"),
+        crate::runtime_state::ProjectCatalogOwner::NotACatalog
+    ));
 
     drop(service);
     fs::remove_dir_all(support_dir).ok();
@@ -1382,6 +1385,183 @@ fn a_disconnected_desktop_still_shows_its_cached_projections() {
     assert_eq!(projects[0].path, "/srv/alpha");
 
     drop(offline);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn a_snapshot_that_cannot_be_applied_does_not_consume_its_version() {
+    let (service, support_dir, _catalog) =
+        remote_project_service("remote-project-bad-snapshot", empty_state());
+    wait_for_catalog_probe(&service, "device-1");
+    let controller = service
+        .remote_controller_for_device("device-1")
+        .expect("live controller");
+    let snapshot = |projects: serde_json::Value| {
+        serde_json::to_vec(&json!({
+            "type": codux_protocol::REMOTE_PROJECT_LIST,
+            "payload": { "projects": projects, "worktrees": [], "version": 9 }
+        }))
+        .unwrap()
+    };
+
+    // An entry with no path cannot be reconciled, so nothing was applied.
+    controller.route_test_message(&snapshot(json!([{ "id": "p-host-1", "name": "Alpha" }])));
+    service.drain_remote_events();
+    assert!(service.project_list().projects.is_empty());
+
+    // The host re-delivers version 9 intact. A guard that had recorded 9 for the
+    // snapshot it refused would drop this one as a duplicate — forever.
+    controller.route_test_message(&snapshot(
+        json!([{ "id": "p-host-1", "name": "Alpha", "path": "/srv/alpha" }]),
+    ));
+    service.drain_remote_events();
+    assert_eq!(service.project_list().projects.len(), 1);
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn an_unreachable_catalog_owner_refuses_a_create_instead_of_writing_locally() {
+    let (service, support_dir, _catalog, _project_id) =
+        one_projection("remote-project-offline-create");
+    wait_until(&service, "the host's catalog to be adopted", || {
+        migration_done(&support_dir)
+    });
+    // The host goes away. It still owns this desktop's projects for that
+    // device — a record written here could never be handed to it afterwards
+    // (migration has already run) and no snapshot would ever mention it.
+    service
+        .remote_controllers
+        .forget("device-1")
+        .expect("drop the link");
+
+    let error = service
+        .project_create(ProjectCreateRequest {
+            name: "Beta".to_string(),
+            path: "/srv/beta".to_string(),
+            badge_text: None,
+            badge_symbol: None,
+            badge_color_hex: None,
+            environment_variables: Default::default(),
+            runtime_target: ProjectRuntimeTarget::Remote {
+                device_id: "device-1".to_string(),
+            },
+        })
+        .expect_err("the catalog owner cannot commit the add");
+
+    assert_eq!(error, "Remote host device-1 is unavailable.");
+    assert_eq!(service.project_list().projects.len(), 1);
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn a_fresh_connection_translates_project_ids_before_its_baseline_lands() {
+    let (service, support_dir, catalog, project_id) = one_projection("remote-project-bridge");
+
+    // Reconnect and use the link immediately, with no tick in between: the
+    // desktop restores its projects as soon as a link reports connected, so a
+    // project-scoped request can precede the catalog baseline.
+    connect_test_host(
+        &service,
+        "device-1",
+        codux_protocol::REMOTE_APP_AGENT,
+        Arc::clone(&catalog),
+    );
+    let controller = service
+        .remote_controller_for_device("device-1")
+        .expect("live controller");
+    let _ = controller.git_status(&project_id, "/srv/alpha");
+
+    let host = catalog.lock().unwrap();
+    let git = host
+        .sent
+        .iter()
+        .find(|envelope| {
+            envelope.get("type").and_then(serde_json::Value::as_str)
+                == Some(codux_protocol::REMOTE_GIT_STATUS)
+        })
+        .expect("git.status envelope");
+    assert_eq!(git["payload"]["projectId"], json!("p-host-1"));
+
+    drop(host);
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn a_removal_on_another_controller_cleans_up_like_a_close_here() {
+    let (service, support_dir, catalog, project_id) =
+        one_projection("remote-project-external-cleanup");
+    service
+        .save_terminal_layout(
+            &project_id,
+            Vec::new(),
+            "terminal-1".to_string(),
+            vec![TerminalPaneSummary {
+                title: "Shell".to_string(),
+                terminal_id: "terminal-1".to_string(),
+            }],
+            vec![1.0],
+            0.24,
+        )
+        .expect("save the projection's terminal layout");
+
+    // The phone removes the project. This desktop did not ask for it, so the
+    // lifecycle has to follow the store on its own.
+    catalog
+        .lock()
+        .unwrap()
+        .mutate_elsewhere(|projects| projects.clear());
+    wait_for_projects(&service, 0);
+
+    assert!(
+        service.terminal_layout_record(&project_id).is_none(),
+        "a projection that left takes its workspace state with it"
+    );
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn the_selected_project_decides_which_host_serves_a_shared_path() {
+    let (service, support_dir, first) =
+        remote_project_service("remote-project-shared-path", empty_state());
+    let second = Arc::new(Mutex::new(FakeHostCatalog {
+        shares_catalog: true,
+        ..FakeHostCatalog::default()
+    }));
+    // Two hosts serving the same path, which the spec allows.
+    for catalog in [&first, &second] {
+        catalog
+            .lock()
+            .unwrap()
+            .projects
+            .push(catalog_project("p-host-1", "Alpha", "/srv/alpha"));
+    }
+    connect_test_host(
+        &service,
+        "device-2",
+        codux_protocol::REMOTE_APP_AGENT,
+        Arc::clone(&second),
+    );
+    wait_for_projects(&service, 2);
+
+    let on_second_host = crate::project_store::remote_projection_id("device-2", "p-host-1");
+    service
+        .select_project(&on_second_host)
+        .expect("select the second host's project");
+
+    assert_eq!(
+        service.remote_project_for_path("/srv/alpha"),
+        Some(("device-2".to_string(), on_second_host)),
+        "the path resolves to the project in view, not to whichever record is first"
+    );
+
+    drop(service);
     fs::remove_dir_all(support_dir).ok();
 }
 

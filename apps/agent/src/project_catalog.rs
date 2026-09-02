@@ -147,6 +147,11 @@ impl ProjectCatalogService {
     /// Acknowledge the mutation to its source, then publish one newer snapshot
     /// to every subscriber and to the source itself, so a controller that never
     /// subscribed still learns the committed catalog.
+    ///
+    /// The version comes from the commit, not from a counter read here: the
+    /// store minted the two together under one lock, so this fan-out describes
+    /// the catalog it actually carries even when a concurrent mutation commits
+    /// and publishes first.
     fn commit(
         &self,
         action: &str,
@@ -157,11 +162,10 @@ impl ProjectCatalogService {
             Ok(commit) => commit,
             Err(message) => return error(&message),
         };
-        let version = self
-            .subscriptions
-            .next_version(REMOTE_RESOURCE_PROJECTS, None, None);
-        let snapshot =
-            with_resource_version(project_list_payload(commit.items, None, None), version);
+        let snapshot = with_resource_version(
+            project_list_payload(commit.items, None, None),
+            commit.version,
+        );
         let mut messages = vec![ProjectMessage {
             device_id: None,
             kind: REMOTE_PROJECT_UPDATED,
@@ -191,11 +195,9 @@ impl ProjectCatalogService {
     }
 
     fn snapshot_payload(&self) -> Result<Value, String> {
-        let version = self
-            .subscriptions
-            .current_version(REMOTE_RESOURCE_PROJECTS, None, None);
+        let (items, version) = self.store.snapshot()?;
         Ok(with_resource_version(
-            project_list_payload(self.store.list()?, None, None),
+            project_list_payload(items, None, None),
             version,
         ))
     }
@@ -588,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_adds_of_different_paths_keep_both_entries() {
+    fn concurrent_adds_publish_each_catalog_under_its_own_version() {
         let dir = temp_dir("concurrent");
         let service = std::sync::Arc::new(service(&dir));
         let paths: Vec<String> = (0..8)
@@ -605,13 +607,18 @@ mod tests {
                         REMOTE_PROJECT_ADD,
                         &json!({ "path": path }),
                         Some("device-a"),
-                    );
+                    )
                 })
             })
             .collect();
-        for handle in handles {
-            handle.join().unwrap();
-        }
+        let mut published = handles
+            .into_iter()
+            .map(|handle| {
+                let outcome = handle.join().unwrap();
+                let snapshot = &pushes_to(&outcome, "device-a", REMOTE_PROJECT_LIST)[0].payload;
+                (version(snapshot), project_paths(snapshot))
+            })
+            .collect::<Vec<_>>();
 
         let listed = service.handle(REMOTE_PROJECT_LIST, &json!({}), Some("device-a"));
         let mut stored = project_paths(&reply_of(&listed, REMOTE_PROJECT_LIST).unwrap().payload);
@@ -619,6 +626,24 @@ mod tests {
         let mut expected = paths;
         expected.sort();
         assert_eq!(stored, expected);
+
+        // Every published catalog carries the version its own commit minted, so
+        // the n-th version describes exactly n entries. This is the pairing a
+        // client's latest-wins guard depends on: with the version minted outside
+        // the store lock, one commit's catalog could go out under another's
+        // version and a client would lose an entry that is on disk. (The window
+        // is too narrow to provoke on demand, so this pins the invariant rather
+        // than reproducing the interleaving.)
+        published.sort_by_key(|(version, _)| *version);
+        for (index, (version, paths)) in published.iter().enumerate() {
+            assert_eq!(*version, index as u64 + 1, "one version per commit");
+            assert_eq!(
+                paths.len(),
+                index + 1,
+                "version {version} describes the catalog of another commit"
+            );
+        }
+        assert_eq!(published.len(), 8);
 
         std::fs::remove_dir_all(dir).ok();
     }

@@ -368,7 +368,7 @@ fn duplicate_workspace_path_without_selection_is_rejected() {
     let error = ProjectStore::new(support_dir.clone())
         .runtime_target_for_workspace_path("/home/user/project")
         .unwrap_err();
-    assert!(error.contains("multiple runtime targets"));
+    assert!(error.contains("multiple projects"));
 
     fs::remove_dir_all(dir).ok();
 }
