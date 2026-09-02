@@ -68,7 +68,7 @@ the pre-change local behaviour.
 
 **Blocked by:** 2. Desktop Authoritative Add and ID Bridge.
 
-**Status:** done
+**Status:** done — commit `3fe943ad`
 
 - [x] 3.1 Add failing fixture with legacy remote record lacking `hostProjectId` and an empty Headless catalog.
 - [x] 3.2 Add per-device migration version and run migration only after valid upgraded-Headless baseline.
