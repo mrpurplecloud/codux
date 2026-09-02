@@ -70,6 +70,21 @@ android {
         }
 
         release {
+            // Opt-in sideload id, e.g. `flutter build apk --release
+            // -Pcodux.appIdSuffix=.sideload`: installs alongside an official
+            // build instead of colliding with it (a locally signed APK cannot
+            // upgrade one signed with the release keystore). Unset by default,
+            // so the CI release artifact is unchanged.
+            val idSuffix = (project.findProperty("codux.appIdSuffix") as String?)
+                ?.trim()
+                .orEmpty()
+            if (idSuffix.isNotEmpty()) {
+                applicationIdSuffix = idSuffix
+                versionNameSuffix = idSuffix
+                manifestPlaceholders["appLabel"] =
+                    "Codux ${idSuffix.trimStart('.', '-')}"
+            }
+
             signingConfig = if (keystorePropertiesFile.exists()) {
                 signingConfigs.getByName("release")
             } else {
