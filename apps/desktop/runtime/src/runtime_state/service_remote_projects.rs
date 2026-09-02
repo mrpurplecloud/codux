@@ -6,6 +6,11 @@
 // that does not advertise the resource keeps the pre-change behaviour: its
 // projects stay whatever the desktop already has.
 
+/// Bumped when every paired host must run a new migration step. A store that
+/// records this version for a host has already handed its legacy remote records
+/// over, and the host's catalog is authoritative from then on.
+const REMOTE_PROJECT_MIGRATION_VERSION: u64 = 1;
+
 /// Per-host sync state, keyed by device id and pinned to one connection.
 ///
 /// `connection_epoch` scopes the whole record, and is what keeps the version
@@ -136,12 +141,69 @@ impl RuntimeService {
             return Ok(());
         }
         let baseline = controller.subscribe_projects()?;
-        if self.apply_remote_project_snapshot(device_id, epoch, &baseline, controller)?
-            && let Ok(mut events) = self.hosted_runtime_events.lock()
-        {
+        let store = ProjectStore::new(self.support_dir.clone());
+        let pending_migration =
+            store.remote_project_migration_version(device_id) < REMOTE_PROJECT_MIGRATION_VERSION;
+        let snapshot = if pending_migration {
+            self.register_legacy_remote_projects(device_id, controller, &store, baseline)?
+        } else {
+            baseline
+        };
+        let changed = self.apply_remote_project_snapshot(device_id, epoch, &snapshot, controller)?;
+        if pending_migration {
+            // Only now: a marker stored before the reconciliation lands would
+            // leave a legacy record unmigrated and never looked at again.
+            store.set_remote_project_migration_version(
+                device_id,
+                REMOTE_PROJECT_MIGRATION_VERSION,
+            )?;
+        }
+        if changed && let Ok(mut events) = self.hosted_runtime_events.lock() {
             events.push_back(RemoteHostEvent::ProjectsChanged);
         }
         Ok(())
+    }
+
+    /// Hand this desktop's legacy remote records — the ones it created back when
+    /// it was the only place they existed — to the host that can serve them,
+    /// once per host. Returns the catalog to reconcile: the one the host
+    /// committed when anything was registered, otherwise the baseline.
+    ///
+    /// `project.add` is idempotent by the host's normalized path, so a path the
+    /// host already knows keeps that entry's name and host id; migration adds
+    /// membership and never renames shared state. Attaching the host ids before
+    /// reconciling is what keeps a migrated record on its desktop id — a
+    /// reconciliation that ran first would build a second projection for the
+    /// same catalog entry.
+    ///
+    /// A failed registration returns the error with no marker stored and no
+    /// record pruned, so the next tick retries the whole set; re-registering an
+    /// already-registered path is a no-op on the host.
+    fn register_legacy_remote_projects(
+        &self,
+        device_id: &str,
+        controller: &crate::remote::RemoteController,
+        store: &ProjectStore,
+        baseline: Value,
+    ) -> Result<Value, String> {
+        let legacy = store.legacy_remote_projects(device_id);
+        if legacy.is_empty() {
+            return Ok(baseline);
+        }
+        crate::runtime_trace::runtime_trace(
+            "remote-projects",
+            &format!(
+                "migrating {} legacy record(s) to device={device_id}",
+                legacy.len()
+            ),
+        );
+        let mut assignments = Vec::with_capacity(legacy.len());
+        for project in &legacy {
+            let host_project_id = controller.project_add(&project.name, &project.path)?;
+            assignments.push((project.project_id.clone(), host_project_id));
+        }
+        store.attach_host_project_ids(device_id, &assignments)?;
+        controller.project_list()
     }
 
     /// Reconcile one `project.list` snapshot and refresh the transport's id

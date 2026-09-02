@@ -68,15 +68,27 @@ the pre-change local behaviour.
 
 **Blocked by:** 2. Desktop Authoritative Add and ID Bridge.
 
-**Status:** ready
+**Status:** done
 
-- [ ] 3.1 Add failing fixture with legacy remote record lacking `hostProjectId` and an empty Headless catalog.
-- [ ] 3.2 Add per-device migration version and run migration only after valid upgraded-Headless baseline.
-- [ ] 3.3 Register legacy paths through idempotent Headless add; existing Headless path wins name and host ID.
-- [ ] 3.4 Attach host IDs while preserving Desktop IDs, badges, environment settings, ordering, and selection when still valid.
-- [ ] 3.5 Persist marker only after all registrations and final reconciliation succeed; partial failure must retry without pruning legacy records.
-- [ ] 3.6 Repeat migration and reconnect tests; assert one entry per normalized path and no resurrection after marker plus Headless removal.
-- [ ] 3.7 Test two controllers migrating disjoint legacy records; final Headless catalog contains union once.
+- [x] 3.1 Add failing fixture with legacy remote record lacking `hostProjectId` and an empty Headless catalog.
+- [x] 3.2 Add per-device migration version and run migration only after valid upgraded-Headless baseline.
+- [x] 3.3 Register legacy paths through idempotent Headless add; existing Headless path wins name and host ID.
+- [x] 3.4 Attach host IDs while preserving Desktop IDs, badges, environment settings, ordering, and selection when still valid.
+- [x] 3.5 Persist marker only after all registrations and final reconciliation succeed; partial failure must retry without pruning legacy records.
+- [x] 3.6 Repeat migration and reconnect tests; assert one entry per normalized path and no resurrection after marker plus Headless removal.
+- [x] 3.7 Test two controllers migrating disjoint legacy records; final Headless catalog contains union once.
+
+Registration runs before the first reconciliation of a connection rather than
+after its baseline: a reconciliation that ran first would build a second
+projection for a catalog entry the legacy record is about to be attached to, and
+the record's Desktop ID — the one layouts and selection point at — would be the
+one left behind.
+
+One case the ticket text does not name. Headless deduplicates by its own
+normalized path, so two legacy records (`/srv/alpha` and `/srv/alpha/`) can come
+back holding one host ID. Only one record may project a catalog entry, so the
+later one is dropped in favour of the record already projecting it; keeping both
+would show one host path twice and translate one host ID into two Desktop IDs.
 
 ## 4. Bidirectional Live Edit and Remove
 

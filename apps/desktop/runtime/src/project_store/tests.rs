@@ -916,6 +916,133 @@ fn unchanged_remote_snapshot_does_not_rewrite_state() {
 }
 
 #[test]
+fn legacy_remote_records_are_listed_until_they_carry_a_host_id() {
+    let support_dir = catalog_support_dir(
+        "remote-catalog-legacy-list",
+        json!({
+            "projects": [
+                {
+                    "id": "legacy",
+                    "name": "Legacy",
+                    "path": "/srv/legacy",
+                    "runtimeTarget": { "kind": "remote", "deviceId": "device-1" }
+                },
+                {
+                    "id": "managed",
+                    "name": "Managed",
+                    "path": "/srv/managed",
+                    "runtimeTarget": { "kind": "remote", "deviceId": "device-1" },
+                    "hostProjectId": "p-managed"
+                },
+                {
+                    "id": "other-device",
+                    "name": "Other",
+                    "path": "/srv/other",
+                    "runtimeTarget": { "kind": "remote", "deviceId": "device-2" }
+                },
+                { "id": "local", "name": "Local", "path": "/tmp/local" }
+            ]
+        }),
+    );
+    let store = ProjectStore::new(support_dir.clone());
+
+    assert_eq!(
+        store.legacy_remote_projects("device-1"),
+        [LegacyRemoteProject {
+            project_id: "legacy".to_string(),
+            name: "Legacy".to_string(),
+            path: "/srv/legacy".to_string(),
+        }]
+    );
+
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn attaching_host_ids_keeps_desktop_ids_and_folds_a_duplicated_path() {
+    let support_dir = catalog_support_dir(
+        "remote-catalog-attach",
+        json!({
+            "projects": [
+                {
+                    "id": "managed",
+                    "name": "Managed",
+                    "path": "/srv/alpha",
+                    "runtimeTarget": { "kind": "remote", "deviceId": "device-1" },
+                    "hostProjectId": "p-alpha"
+                },
+                {
+                    "id": "legacy",
+                    "name": "Legacy",
+                    "path": "/srv/beta",
+                    "badgeText": "LG",
+                    "environmentVariables": { "FOO": "bar" },
+                    "runtimeTarget": { "kind": "remote", "deviceId": "device-1" }
+                },
+                {
+                    "id": "duplicate",
+                    "name": "Duplicate",
+                    "path": "/srv/alpha/",
+                    "runtimeTarget": { "kind": "remote", "deviceId": "device-1" }
+                }
+            ],
+            "worktrees": [{ "id": "w1", "projectId": "duplicate" }],
+            "worktreeTasks": [{ "worktreeId": "w1", "title": "gone" }],
+            "selectedProjectId": "duplicate"
+        }),
+    );
+    let store = ProjectStore::new(support_dir.clone());
+
+    store
+        .attach_host_project_ids(
+            "device-1",
+            &[
+                ("legacy".to_string(), "p-beta".to_string()),
+                // The host deduplicated this path onto the entry the first
+                // record already projects.
+                ("duplicate".to_string(), "p-alpha".to_string()),
+            ],
+        )
+        .unwrap();
+
+    let snapshot = store.snapshot();
+    let ids = snapshot
+        .projects
+        .iter()
+        .map(|project| project.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["managed", "legacy"]);
+    let legacy = &snapshot.projects[1];
+    assert_eq!(legacy.host_project_id.as_deref(), Some("p-beta"));
+    assert_eq!(legacy.badge_text.as_deref(), Some("LG"));
+    assert_eq!(
+        legacy.environment_variables.get("FOO").map(String::as_str),
+        Some("bar")
+    );
+    assert!(snapshot.worktrees.is_empty());
+    assert!(snapshot.worktree_tasks.is_empty());
+    assert_eq!(snapshot.selected_project_id.as_deref(), Some("legacy"));
+
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn the_remote_migration_marker_is_recorded_per_device() {
+    let support_dir = catalog_support_dir("remote-catalog-marker", json!({ "projects": [] }));
+    let store = ProjectStore::new(support_dir.clone());
+
+    assert_eq!(store.remote_project_migration_version("device-1"), 0);
+    store
+        .set_remote_project_migration_version("device-1", 1)
+        .unwrap();
+
+    assert_eq!(store.remote_project_migration_version("device-1"), 1);
+    assert_eq!(store.remote_project_migration_version("device-2"), 0);
+
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
 fn remote_project_id_pairs_are_scoped_to_one_device() {
     let support_dir = catalog_support_dir(
         "remote-catalog-pairs",

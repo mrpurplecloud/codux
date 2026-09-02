@@ -222,6 +222,14 @@ fn remote_project_service_on(
     fs::create_dir_all(&support_dir).expect("create support dir");
     fs::write(support_dir.join("state.json"), state.to_string()).expect("write state");
     let service = RuntimeService::new(support_dir.clone());
+    connect_test_host(&service, app, catalog);
+    (service, support_dir)
+}
+
+/// Attach a fresh connection to `catalog`. Called again on the same service to
+/// reconnect: the manager mints a new connection epoch, exactly like a host
+/// that restarted.
+fn connect_test_host(service: &RuntimeService, app: &str, catalog: Arc<Mutex<FakeHostCatalog>>) {
     let app = app.to_string();
     let controller = crate::remote::RemoteController::with_test_transport("device-1", |route| {
         Arc::new(FakeHostTransport {
@@ -233,7 +241,6 @@ fn remote_project_service_on(
     service
         .remote_controllers
         .insert_test_connection("device-1", Arc::new(controller));
-    (service, support_dir)
 }
 
 /// The tick spawns the capability probe and subscription on the blocking pool.
@@ -277,8 +284,52 @@ fn wait_for_projects(service: &RuntimeService, expected: usize) {
     }
 }
 
+/// Drain the runtime tick until `ready`, so a test never sleeps a fixed amount
+/// for work that runs on the blocking pool.
+fn wait_until(service: &RuntimeService, label: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        service.drain_remote_events();
+        if ready() {
+            return;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {label}");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn migration_done(support_dir: &std::path::Path) -> bool {
+    crate::project_store::ProjectStore::new(support_dir.to_path_buf())
+        .remote_project_migration_version("device-1")
+        > 0
+}
+
+fn host_project_id_of(support_dir: &std::path::Path, project_id: &str) -> Option<String> {
+    crate::project_store::ProjectStore::new(support_dir.to_path_buf())
+        .remote_project_id_pairs("device-1")
+        .into_iter()
+        .find(|(desktop_id, _)| desktop_id == project_id)
+        .map(|(_, host_project_id)| host_project_id)
+}
+
 fn empty_state() -> serde_json::Value {
     json!({ "projects": [], "selectedProjectId": null })
+}
+
+/// A remote project this desktop created before the host owned the catalog: it
+/// has no `hostProjectId`, and the host has never heard of its path.
+fn legacy_state() -> serde_json::Value {
+    json!({
+        "projects": [{
+            "id": "legacy-desktop-id",
+            "name": "Alpha",
+            "path": "/srv/alpha",
+            "badgeText": "AL",
+            "environmentVariables": { "FOO": "bar" },
+            "runtimeTarget": { "kind": "remote", "deviceId": "device-1" }
+        }],
+        "selectedProjectId": "legacy-desktop-id"
+    })
 }
 
 #[test]
@@ -599,6 +650,207 @@ fn a_desktop_host_catalog_is_not_adopted() {
     assert!(service.remote_project_catalog_host("device-1").is_none());
 
     drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn legacy_records_register_on_the_host_and_keep_their_desktop_ids() {
+    let (service, support_dir, catalog) =
+        remote_project_service("remote-project-migrate", legacy_state());
+
+    wait_until(&service, "the legacy migration", || {
+        migration_done(&support_dir)
+    });
+
+    // The host now owns the entry the desktop used to hold alone.
+    assert_eq!(
+        catalog.lock().unwrap().projects,
+        [catalog_project("p-host-1", "Alpha", "/srv/alpha")]
+    );
+    let projects = service.project_list().projects;
+    assert_eq!(projects.len(), 1);
+    // The desktop id survives, so layouts, selection, and local metadata do too.
+    assert_eq!(projects[0].id, "legacy-desktop-id");
+    assert_eq!(projects[0].badge, "AL");
+    assert_eq!(
+        projects[0]
+            .environment_variables
+            .get("FOO")
+            .map(String::as_str),
+        Some("bar")
+    );
+    assert_eq!(
+        host_project_id_of(&support_dir, "legacy-desktop-id").as_deref(),
+        Some("p-host-1")
+    );
+
+    let controller = service
+        .remote_controller_for_device("device-1")
+        .expect("live controller");
+    let _ = controller.git_status("legacy-desktop-id", "/srv/alpha");
+    let host = catalog.lock().unwrap();
+    let git = host
+        .sent
+        .iter()
+        .find(|envelope| {
+            envelope.get("type").and_then(serde_json::Value::as_str)
+                == Some(codux_protocol::REMOTE_GIT_STATUS)
+        })
+        .expect("git.status envelope");
+    assert_eq!(git["payload"]["projectId"], json!("p-host-1"));
+
+    drop(host);
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn an_existing_host_entry_keeps_its_name_and_host_id_through_migration() {
+    let (service, support_dir, catalog) =
+        remote_project_service("remote-project-migrate-existing", legacy_state());
+    catalog
+        .lock()
+        .unwrap()
+        .projects
+        .push(catalog_project("p-host-9", "Alpha on host", "/srv/alpha"));
+
+    wait_until(&service, "the legacy migration", || {
+        migration_done(&support_dir)
+    });
+
+    // One catalog entry per path: the host deduplicated the legacy path onto
+    // the entry it already had, and did not rename it.
+    assert_eq!(
+        catalog.lock().unwrap().projects,
+        [catalog_project("p-host-9", "Alpha on host", "/srv/alpha")]
+    );
+    let projects = service.project_list().projects;
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].id, "legacy-desktop-id");
+    assert_eq!(projects[0].name, "Alpha on host");
+    assert_eq!(
+        host_project_id_of(&support_dir, "legacy-desktop-id").as_deref(),
+        Some("p-host-9")
+    );
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn a_rejected_registration_retries_without_pruning_the_legacy_record() {
+    let (service, support_dir, catalog) =
+        remote_project_service("remote-project-migrate-retry", legacy_state());
+    catalog.lock().unwrap().reject_adds = true;
+
+    wait_for_catalog_probe(&service, "device-1");
+    service.drain_remote_events();
+
+    // Partial failure leaves the marker unset and the legacy record intact —
+    // never a projection the host never accepted.
+    assert!(!migration_done(&support_dir));
+    let projects = service.project_list().projects;
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].id, "legacy-desktop-id");
+    assert!(host_project_id_of(&support_dir, "legacy-desktop-id").is_none());
+
+    catalog.lock().unwrap().reject_adds = false;
+    wait_until(&service, "the retried legacy migration", || {
+        migration_done(&support_dir)
+    });
+
+    assert_eq!(
+        catalog.lock().unwrap().projects,
+        [catalog_project("p-host-1", "Alpha", "/srv/alpha")]
+    );
+    assert_eq!(
+        host_project_id_of(&support_dir, "legacy-desktop-id").as_deref(),
+        Some("p-host-1")
+    );
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn a_migrated_record_removed_on_the_host_is_not_resurrected() {
+    let (service, support_dir, catalog) =
+        remote_project_service("remote-project-migrate-once", legacy_state());
+    wait_until(&service, "the legacy migration", || {
+        migration_done(&support_dir)
+    });
+
+    {
+        // The user removes the project on another controller.
+        let mut host = catalog.lock().unwrap();
+        host.projects.clear();
+        host.version += 1;
+    }
+    connect_test_host(&service, codux_protocol::REMOTE_APP_AGENT, Arc::clone(&catalog));
+
+    wait_for_projects(&service, 0);
+    assert!(catalog.lock().unwrap().projects.is_empty());
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn two_controllers_migrate_their_legacy_records_into_one_catalog() {
+    let (service, support_dir, catalog) =
+        remote_project_service("remote-project-migrate-union", legacy_state());
+    let (other, other_support_dir) = remote_project_service_on(
+        "remote-project-migrate-union-other",
+        json!({
+            "projects": [{
+                "id": "other-desktop-id",
+                "name": "Beta",
+                "path": "/srv/beta",
+                "runtimeTarget": { "kind": "remote", "deviceId": "device-1" }
+            }],
+            "selectedProjectId": "other-desktop-id"
+        }),
+        codux_protocol::REMOTE_APP_AGENT,
+        Arc::clone(&catalog),
+    );
+
+    wait_until(&service, "the first legacy migration", || {
+        migration_done(&support_dir)
+    });
+    wait_until(&other, "the second legacy migration", || {
+        migration_done(&other_support_dir)
+    });
+
+    let mut paths = catalog
+        .lock()
+        .unwrap()
+        .projects
+        .iter()
+        .map(|project| project.path.clone())
+        .collect::<Vec<_>>();
+    paths.sort();
+    assert_eq!(paths, ["/srv/alpha", "/srv/beta"]);
+    // Each controller keeps its own record and adopts the other's.
+    wait_for_projects(&service, 2);
+    wait_for_projects(&other, 2);
+    assert!(
+        service
+            .project_list()
+            .projects
+            .iter()
+            .any(|project| project.id == "legacy-desktop-id")
+    );
+    assert!(
+        other
+            .project_list()
+            .projects
+            .iter()
+            .any(|project| project.id == "other-desktop-id")
+    );
+
+    drop(other);
+    drop(service);
+    fs::remove_dir_all(other_support_dir).ok();
     fs::remove_dir_all(support_dir).ok();
 }
 

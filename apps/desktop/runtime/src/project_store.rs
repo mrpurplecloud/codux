@@ -10,9 +10,9 @@ mod tests;
 mod types;
 
 pub(crate) use helpers::badge_from_name;
-pub use remote_catalog::RemoteCatalogProject;
 #[cfg(test)]
 pub(crate) use remote_catalog::remote_projection_id;
+pub use remote_catalog::{LegacyRemoteProject, RemoteCatalogProject};
 pub use terminal_layout::{
     TerminalBottomTabRecord, TerminalLayoutRecord, TerminalLayoutsSnapshot, TerminalTopPaneRecord,
 };

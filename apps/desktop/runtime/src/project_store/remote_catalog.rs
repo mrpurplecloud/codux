@@ -16,11 +16,27 @@ use crate::project_store::raw_state::{
     update_default_worktree_record,
 };
 use serde_json::{Map, Value};
+use std::collections::HashSet;
+
+/// Where the per-host legacy migration marker lives in `state.json`: one
+/// version per device id, so a new host is migrated on its own first
+/// connection and a migrated one is never re-uploaded.
+const MIGRATION_VERSIONS_KEY: &str = "remoteProjectMigrations";
 
 /// One entry of a host's `project.list` snapshot.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteCatalogProject {
     pub host_project_id: String,
+    pub name: String,
+    pub path: String,
+}
+
+/// A remote record this desktop created before the host owned the catalog. It
+/// carries no `hostProjectId`, so reconciliation leaves it alone until
+/// migration registers its path on the host.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LegacyRemoteProject {
+    pub project_id: String,
     pub name: String,
     pub path: String,
 }
@@ -96,28 +112,126 @@ impl ProjectStore {
             return Ok(false);
         }
 
-        for project_id in &removed {
-            prune_project_state(&mut raw, project_id);
-        }
+        apply_removals(&mut raw, &removed, selected_removed_at);
         for (project_id, item) in renamed {
             update_default_worktree_record(&mut raw, &project_id, &item.name, &item.path);
         }
-        if let Some(removed_index) = selected_removed_at {
-            let next = raw
-                .get("projects")
-                .and_then(Value::as_array)
-                .and_then(|projects| select_project_after_removal(projects, removed_index));
-            match next {
-                Some(next) => {
-                    raw.insert("selectedProjectId".to_string(), Value::String(next));
-                }
-                None => {
-                    raw.remove("selectedProjectId");
-                }
-            }
-        }
         self.save_raw_snapshot(&raw)?;
         Ok(true)
+    }
+
+    /// The remote records for `device_id` that migration still owes the host.
+    pub fn legacy_remote_projects(&self, device_id: &str) -> Vec<LegacyRemoteProject> {
+        self.projects_snapshot()
+            .into_iter()
+            .filter(|project| {
+                project.runtime_target.remote_device_id() == Some(device_id)
+                    && project.host_project_id.is_none()
+            })
+            .map(|project| LegacyRemoteProject {
+                project_id: project.id,
+                name: project.name,
+                path: project.path,
+            })
+            .collect()
+    }
+
+    /// Turn migrated legacy records into projections by attaching the host ids
+    /// their registration settled on, in one transaction. Desktop ids and every
+    /// controller-only field stay as they are.
+    ///
+    /// The host deduplicates by ITS normalized path, so two legacy records can
+    /// come back holding one host id. Only one record may project a catalog
+    /// entry — a second would show the same host path twice and translate one
+    /// host id to two desktop ids — so the later record is dropped in favour of
+    /// the one already projecting that entry.
+    pub fn attach_host_project_ids(
+        &self,
+        device_id: &str,
+        assignments: &[(String, String)],
+    ) -> Result<(), String> {
+        let mut raw = self.raw_snapshot();
+        let selected_project_id = raw
+            .get("selectedProjectId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let mut changed = false;
+        let mut removed = Vec::new();
+        let mut selected_removed_at = None;
+
+        {
+            let projects = ensure_array(&mut raw, "projects")?;
+            let mut taken = projects
+                .iter()
+                .filter_map(|project| managed_projection(project, device_id))
+                .map(|managed| managed.host_project_id)
+                .collect::<HashSet<_>>();
+            let mut index = 0;
+            while index < projects.len() {
+                let project_id = projects[index]
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let Some((_, host_project_id)) = assignments
+                    .iter()
+                    .find(|(assigned, _)| assigned == &project_id)
+                else {
+                    index += 1;
+                    continue;
+                };
+                if !taken.insert(host_project_id.clone()) {
+                    projects.remove(index);
+                    if selected_project_id.as_deref() == Some(project_id.as_str()) {
+                        selected_removed_at = Some(index);
+                    }
+                    removed.push(project_id);
+                    changed = true;
+                    continue;
+                }
+                if let Some(project) = projects[index].as_object_mut() {
+                    project.insert(
+                        "hostProjectId".to_string(),
+                        Value::String(host_project_id.clone()),
+                    );
+                    changed = true;
+                }
+                index += 1;
+            }
+        }
+
+        if !changed {
+            return Ok(());
+        }
+        apply_removals(&mut raw, &removed, selected_removed_at);
+        self.save_raw_snapshot(&raw)
+    }
+
+    /// How far the legacy migration has run for one host. Zero means it has
+    /// never completed, which is also what a store written by an older build
+    /// reports.
+    pub fn remote_project_migration_version(&self, device_id: &str) -> u64 {
+        self.raw_snapshot()
+            .get(MIGRATION_VERSIONS_KEY)
+            .and_then(Value::as_object)
+            .and_then(|versions| versions.get(device_id))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    }
+
+    pub fn set_remote_project_migration_version(
+        &self,
+        device_id: &str,
+        version: u64,
+    ) -> Result<(), String> {
+        let mut raw = self.raw_snapshot();
+        let versions = raw
+            .entry(MIGRATION_VERSIONS_KEY.to_string())
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .ok_or_else(|| format!("{MIGRATION_VERSIONS_KEY} is not an object."))?;
+        versions.insert(device_id.to_string(), Value::from(version));
+        self.save_raw_snapshot(&raw)
     }
 
     /// Every `(desktop id, host project id)` pair this desktop holds for
@@ -133,6 +247,33 @@ impl ProjectStore {
                     .map(|host_project_id| (project.id, host_project_id))
             })
             .collect()
+    }
+}
+
+/// Drop the state that belonged to removed records and move the selection off
+/// one, the same way closing a project does.
+fn apply_removals(
+    raw: &mut Map<String, Value>,
+    removed: &[String],
+    selected_removed_at: Option<usize>,
+) {
+    for project_id in removed {
+        prune_project_state(raw, project_id);
+    }
+    let Some(removed_index) = selected_removed_at else {
+        return;
+    };
+    let next = raw
+        .get("projects")
+        .and_then(Value::as_array)
+        .and_then(|projects| select_project_after_removal(projects, removed_index));
+    match next {
+        Some(next) => {
+            raw.insert("selectedProjectId".to_string(), Value::String(next));
+        }
+        None => {
+            raw.remove("selectedProjectId");
+        }
     }
 }
 
