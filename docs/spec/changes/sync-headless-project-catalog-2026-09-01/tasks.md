@@ -31,7 +31,7 @@ Out of the written scope but required by 1.4: the agent's `runtimeInstanceId` wa
 
 **Blocked by:** 1. Headless Shared Catalog Contract.
 
-**Status:** done
+**Status:** done — commit `94fe2eb5`
 
 - [x] 2.1 Add failing Desktop integration test where Desktop ID differs from host ID; assert remote add commits on Headless before local projection appears.
 - [x] 2.2 Add optional `hostProjectId` to remote project records without changing local or WSL schema behavior.
