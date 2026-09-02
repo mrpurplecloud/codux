@@ -1,6 +1,6 @@
 ---
 created_at: 2026-09-02T06:22:45Z
-updated_at: 2026-09-02T08:00:00Z
+updated_at: 2026-09-02T14:10:00Z
 completed_at:
 ---
 
@@ -137,15 +137,54 @@ covers the controller-side cleanup, which removal shares unchanged.
 
 **Blocked by:** 3. Legacy Desktop Projection Migration; 4. Bidirectional Live Edit and Remove.
 
-**Status:** ready
+**Status:** automated gates done; manual matrix 5.6 and 5.7 outstanding
 
-- [ ] 5.1 Verify new clients fall back to current one-shot/local behavior when host does not advertise project subscriptions.
-- [ ] 5.2 Verify old clients can still call one-shot `project.list/add/remove` against upgraded Headless and ignore additive messages safely.
-- [ ] 5.3 Verify equal host IDs from two Headless devices remain isolated by device ID.
-- [ ] 5.4 Verify disconnect keeps Desktop cache, reconnect resets version epoch, and Headless restart restores catalog.
-- [ ] 5.5 Run focused Agent, Desktop runtime, protocol, and Mobile test suites; record exact commands and results.
+- [x] 5.1 Verify new clients fall back to current one-shot/local behavior when host does not advertise project subscriptions.
+- [x] 5.2 Verify old clients can still call one-shot `project.list/add/remove` against upgraded Headless and ignore additive messages safely.
+- [x] 5.3 Verify equal host IDs from two Headless devices remain isolated by device ID.
+- [x] 5.4 Verify disconnect keeps Desktop cache, reconnect resets version epoch, and Headless restart restores catalog.
+- [x] 5.5 Run focused Agent, Desktop runtime, protocol, and Mobile test suites; record exact commands and results.
 - [ ] 5.6 Run manual matrix: Desktop add, Mobile add, both edit/remove directions, reconnect, Headless restart, and two simultaneously connected controllers.
 - [ ] 5.7 Run manual host-path matrix on Unix and Windows where available; confirm host-native path deduplication and stable IDs.
-- [ ] 5.8 Confirm no `[DEBUG-...]` instrumentation or throwaway harness remains.
-- [ ] 5.9 Update change metadata only after every automated gate passes; archive and update truth specs only after release under Stage 3.
+- [x] 5.8 Confirm no `[DEBUG-...]` instrumentation or throwaway harness remains.
+- [x] 5.9 Update change metadata only after every automated gate passes; archive and update truth specs only after release under Stage 3.
+
+Where each automated gate lives:
+
+- 5.1 `a_host_without_the_capability_keeps_local_project_creation` (already present) plus
+  `a_host_without_the_capability_leaves_existing_records_alone`: a host that does
+  not advertise `projects` is never subscribed to, never migrated to, and never
+  prunes what this desktop already holds for it.
+- 5.2 `a_client_that_never_subscribes_still_uses_the_one_shot_project_api`
+  (codux-agent): add, list, and remove answer a client that never subscribes, and
+  the messages this change added to those flows are additive.
+- 5.3 `two_hosts_minting_the_same_project_id_stay_separate_projections`: two hosts
+  that both minted `p-host-1` produce two projections, and one host's removal
+  leaves the other's alone.
+- 5.4 `a_disconnected_desktop_still_shows_its_cached_projections` and
+  `a_restarted_host_reconciles_from_a_reset_version_epoch`; the host half is
+  `a_restarted_store_serves_the_persisted_catalog_from_a_fresh_version_epoch`
+  (codux-agent, ticket 1).
+
+5.5, run from the repository root on macOS 24.6.0 (darwin, arm64):
+
+- `cargo test -p codux-runtime` — 420 passed, 4 ignored.
+- `cargo test -p codux-agent` — 39 passed.
+- `cargo test -p codux-protocol` — 15 passed.
+- `cargo test -p codux-runtime-core` — 47 passed.
+- `cargo test -p codux` — 247 passed.
+- `flutter test` in `apps/mobile` — 306 passed.
+- `cargo clippy -p codux-runtime -p codux-agent --all-targets` — no warning in the
+  changed files.
+- `cargo fmt --all` — clean.
+
+5.8: no `[DEBUG-` marker and no throwaway harness in `apps/` or `crates/`; the
+fake host in the desktop tests is the same seam tickets 2 to 4 already used.
+
+5.6 and 5.7 are not run: they need a Desktop build, a phone, a running Headless
+host, and a Windows host, none of which exist in this environment. Their
+automated counterparts — Desktop-and-Mobile-direction mutations, reconnect,
+restart, two connected controllers, and path deduplication — pass, but a passing
+in-process test is not device evidence, so both stay unchecked for whoever has
+the hardware. The release under Stage 3 still owes them.
 

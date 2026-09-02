@@ -279,16 +279,21 @@ fn remote_project_service_on(
     fs::create_dir_all(&support_dir).expect("create support dir");
     fs::write(support_dir.join("state.json"), state.to_string()).expect("write state");
     let service = RuntimeService::new(support_dir.clone());
-    connect_test_host(&service, app, catalog);
+    connect_test_host(&service, "device-1", app, catalog);
     (service, support_dir)
 }
 
 /// Attach a fresh connection to `catalog`. Called again on the same service to
 /// reconnect: the manager mints a new connection epoch, exactly like a host
-/// that restarted.
-fn connect_test_host(service: &RuntimeService, app: &str, catalog: Arc<Mutex<FakeHostCatalog>>) {
+/// that restarted. A second `device_id` on one service is a second paired host.
+fn connect_test_host(
+    service: &RuntimeService,
+    device_id: &str,
+    app: &str,
+    catalog: Arc<Mutex<FakeHostCatalog>>,
+) {
     let app = app.to_string();
-    let controller = crate::remote::RemoteController::with_test_transport("device-1", |route| {
+    let controller = crate::remote::RemoteController::with_test_transport(device_id, |route| {
         Arc::new(FakeHostTransport {
             route,
             catalog,
@@ -297,7 +302,7 @@ fn connect_test_host(service: &RuntimeService, app: &str, catalog: Arc<Mutex<Fak
     });
     service
         .remote_controllers
-        .insert_test_connection("device-1", Arc::new(controller));
+        .insert_test_connection(device_id, Arc::new(controller));
 }
 
 /// The tick spawns the capability probe and subscription on the blocking pool.
@@ -1174,7 +1179,12 @@ fn a_migrated_record_removed_on_the_host_is_not_resurrected() {
         host.projects.clear();
         host.version += 1;
     }
-    connect_test_host(&service, codux_protocol::REMOTE_APP_AGENT, Arc::clone(&catalog));
+    connect_test_host(
+        &service,
+        "device-1",
+        codux_protocol::REMOTE_APP_AGENT,
+        Arc::clone(&catalog),
+    );
 
     wait_for_projects(&service, 0);
     assert!(catalog.lock().unwrap().projects.is_empty());
@@ -1265,6 +1275,149 @@ fn a_host_without_the_capability_keeps_local_project_creation() {
 
     assert_eq!(snapshot.projects.len(), 1);
     assert!(catalog.lock().unwrap().projects.is_empty());
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn a_host_without_the_capability_leaves_existing_records_alone() {
+    // A host that predates the shared catalog: it never advertises `projects`,
+    // so this desktop must not subscribe, migrate, or prune anything it holds
+    // for that host.
+    let (service, support_dir, catalog) =
+        remote_project_service("remote-project-legacy-host-records", legacy_state());
+    catalog.lock().unwrap().shares_catalog = false;
+    wait_for_catalog_probe(&service, "device-1");
+    service.drain_remote_events();
+
+    let host = catalog.lock().unwrap();
+    assert!(
+        host.sent.iter().all(|envelope| envelope
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            != Some(codux_protocol::REMOTE_RESOURCE_SUBSCRIBE)),
+        "no subscription is sent to a host that does not share its catalog"
+    );
+    assert!(host.projects.is_empty(), "and nothing is registered on it");
+    drop(host);
+    assert!(!migration_done(&support_dir));
+    let projects = service.project_list().projects;
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].id, "legacy-desktop-id");
+    assert!(host_project_id_of(&support_dir, "legacy-desktop-id").is_none());
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn two_hosts_minting_the_same_project_id_stay_separate_projections() {
+    let (service, support_dir, first) =
+        remote_project_service("remote-project-two-hosts", empty_state());
+    let second = Arc::new(Mutex::new(FakeHostCatalog {
+        shares_catalog: true,
+        ..FakeHostCatalog::default()
+    }));
+    // Two headless hosts that both minted `p-host-1` for different paths — what
+    // a path-derived host id does on two machines with the same layout.
+    first
+        .lock()
+        .unwrap()
+        .projects
+        .push(catalog_project("p-host-1", "Alpha", "/srv/alpha"));
+    second
+        .lock()
+        .unwrap()
+        .projects
+        .push(catalog_project("p-host-1", "Beta", "/srv/beta"));
+    connect_test_host(
+        &service,
+        "device-2",
+        codux_protocol::REMOTE_APP_AGENT,
+        Arc::clone(&second),
+    );
+
+    wait_for_projects(&service, 2);
+
+    let alpha = crate::project_store::remote_projection_id("device-1", "p-host-1");
+    let beta = crate::project_store::remote_projection_id("device-2", "p-host-1");
+    assert_ne!(alpha, beta);
+    let projects = service.project_list().projects;
+    let projection = |project_id: &str| {
+        projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .unwrap_or_else(|| panic!("a projection for {project_id}"))
+    };
+    assert_eq!(projection(&alpha).path, "/srv/alpha");
+    assert_eq!(projection(&beta).path, "/srv/beta");
+
+    // One host's removal cannot take the other host's entry with it.
+    second
+        .lock()
+        .unwrap()
+        .mutate_elsewhere(|projects| projects.clear());
+    wait_for_projects(&service, 1);
+    assert_eq!(service.project_list().projects[0].id, alpha);
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn a_disconnected_desktop_still_shows_its_cached_projections() {
+    let (service, support_dir, _catalog, project_id) =
+        one_projection("remote-project-disconnected");
+    drop(service);
+
+    // Relaunched with the host unreachable: the projection is a read-only cache,
+    // so navigation state survives the outage. The tick runs with no link, and
+    // an absent host is not an empty catalog.
+    let offline = RuntimeService::new(support_dir.clone());
+    offline.drain_remote_events();
+    let projects = offline.project_list().projects;
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].id, project_id);
+    assert_eq!(projects[0].path, "/srv/alpha");
+
+    drop(offline);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn a_restarted_host_reconciles_from_a_reset_version_epoch() {
+    let (service, support_dir, catalog) =
+        remote_project_service("remote-project-restart", empty_state());
+    {
+        let mut host = catalog.lock().unwrap();
+        host.projects
+            .push(catalog_project("p-host-1", "Alpha", "/srv/alpha"));
+        host.version = 5;
+    }
+    wait_for_projects(&service, 1);
+
+    {
+        // The host process restarts: it serves its persisted catalog from a
+        // fresh version epoch, and its subscribers went down with the link.
+        let mut host = catalog.lock().unwrap();
+        host.subscribers.clear();
+        host.projects = vec![catalog_project("p-host-2", "Beta", "/srv/beta")];
+        host.version = 0;
+    }
+    connect_test_host(
+        &service,
+        "device-1",
+        codux_protocol::REMOTE_APP_AGENT,
+        Arc::clone(&catalog),
+    );
+
+    // Version 0 is older than the applied 5. A guard that did not reset with the
+    // connection would ignore the restarted host's catalog for good.
+    wait_until(&service, "the restarted host's catalog", || {
+        let projects = service.project_list().projects;
+        projects.len() == 1 && projects[0].path == "/srv/beta"
+    });
 
     drop(service);
     fs::remove_dir_all(support_dir).ok();

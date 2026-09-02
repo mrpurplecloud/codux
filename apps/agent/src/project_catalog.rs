@@ -439,6 +439,49 @@ mod tests {
     }
 
     #[test]
+    fn a_client_that_never_subscribes_still_uses_the_one_shot_project_api() {
+        // An already-shipped client predates the `projects` resource: it never
+        // subscribes, and the messages this host added — the `project.updated`
+        // acknowledgement and the source-inclusive snapshot — are additive, so
+        // dropping them on the floor leaves its one-shot calls working.
+        let dir = temp_dir("one-shot");
+        let service = service(&dir);
+        let project = project_dir(&dir, "repo");
+
+        let added = service.handle(
+            REMOTE_PROJECT_ADD,
+            &json!({ "path": project, "name": "Repo" }),
+            Some("old-client"),
+        );
+        assert!(reply_of(&added, REMOTE_ERROR).is_none());
+        let project_id = reply_of(&added, REMOTE_PROJECT_UPDATED).unwrap().payload["projectId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let listed = service.handle(REMOTE_PROJECT_LIST, &json!({}), Some("old-client"));
+        assert_eq!(
+            project_paths(&reply_of(&listed, REMOTE_PROJECT_LIST).unwrap().payload),
+            vec![project]
+        );
+        assert!(
+            listed.messages.iter().all(|message| message.reply),
+            "a one-shot list answers the caller and pushes nothing"
+        );
+
+        let removed = service.handle(
+            REMOTE_PROJECT_REMOVE,
+            &json!({ "projectId": project_id }),
+            Some("old-client"),
+        );
+        assert!(reply_of(&removed, REMOTE_ERROR).is_none());
+        let listed = service.handle(REMOTE_PROJECT_LIST, &json!({}), Some("old-client"));
+        assert!(project_paths(&reply_of(&listed, REMOTE_PROJECT_LIST).unwrap().payload).is_empty());
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn unsubscribed_and_disconnected_devices_stop_receiving_snapshots() {
         let dir = temp_dir("unsubscribe");
         let service = service(&dir);
