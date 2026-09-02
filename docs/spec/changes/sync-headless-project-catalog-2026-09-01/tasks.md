@@ -137,7 +137,7 @@ covers the controller-side cleanup, which removal shares unchanged.
 
 **Blocked by:** 3. Legacy Desktop Projection Migration; 4. Bidirectional Live Edit and Remove.
 
-**Status:** automated gates done; manual matrix 5.6 and 5.7 outstanding
+**Status:** automated gates done — commit `8a43eccf`; manual matrix 5.6 and 5.7 outstanding
 
 - [x] 5.1 Verify new clients fall back to current one-shot/local behavior when host does not advertise project subscriptions.
 - [x] 5.2 Verify old clients can still call one-shot `project.list/add/remove` against upgraded Headless and ignore additive messages safely.
