@@ -132,6 +132,7 @@ mod tests {
 fn memory_records() -> Vec<MemoryProjectRecord> {
     AgentProjectStore::new()
         .list()
+        .unwrap_or_default()
         .into_iter()
         .map(|project| MemoryProjectRecord {
             id: project.id.clone(),
@@ -188,6 +189,7 @@ pub async fn memory_extract_payload(payload: &Value) -> Result<Value, String> {
 fn memory_projects() -> Vec<MemoryProjectInfo> {
     AgentProjectStore::new()
         .list()
+        .unwrap_or_default()
         .into_iter()
         .map(|project| MemoryProjectInfo {
             id: project.id,
@@ -204,12 +206,16 @@ fn memory_projects() -> Vec<MemoryProjectInfo> {
 fn host_project_id(payload: &Value) -> Option<String> {
     let project_path = payload.get("projectPath").and_then(Value::as_str);
     if let Some(path) = project_path.filter(|value| !value.is_empty())
-        && let Some(project) = AgentProjectStore::new().list().into_iter().find(|project| {
-            codux_runtime_core::path::local_paths_equal(
-                std::path::Path::new(&project.path),
-                std::path::Path::new(path),
-            )
-        })
+        && let Some(project) = AgentProjectStore::new()
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|project| {
+                codux_runtime_core::path::local_paths_equal(
+                    std::path::Path::new(&project.path),
+                    std::path::Path::new(path),
+                )
+            })
     {
         return Some(project.id);
     }

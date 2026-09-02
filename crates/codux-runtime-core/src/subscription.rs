@@ -267,6 +267,16 @@ impl RuntimeSubscriptionRouter {
     }
 }
 
+/// Stamp a resource key's monotonic version onto an outbound state payload, so
+/// every recipient of one change orders it the same way and a client that missed
+/// a push reconciles by version instead of sticking on stale state.
+pub fn with_resource_version(mut payload: serde_json::Value, version: u64) -> serde_json::Value {
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("version".to_string(), serde_json::json!(version));
+    }
+    payload
+}
+
 fn clean_device_id(device_id: Option<&str>) -> Result<String, String> {
     device_id
         .map(str::trim)

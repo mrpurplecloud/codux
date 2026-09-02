@@ -170,12 +170,8 @@ impl RemoteHostRuntime {
     }
 }
 
-pub(super) fn with_resource_version(mut payload: Value, version: u64) -> Value {
-    if let Some(object) = payload.as_object_mut() {
-        object.insert("version".to_string(), json!(version));
-    }
-    payload
-}
+pub(super) use codux_runtime_core::subscription::with_resource_version;
+
 pub(super) fn remote_worktree_summary_payload(
     project_id: &str,
     summary: crate::worktree::WorktreeSummary,

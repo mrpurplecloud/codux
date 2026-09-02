@@ -16,6 +16,7 @@ mod host;
 mod logo;
 mod memory;
 mod paths;
+mod project_catalog;
 mod projects;
 mod runstate;
 mod runtime_stdio;

@@ -15,6 +15,7 @@ use codux_protocol::{
     REMOTE_GIT_INVOKE, REMOTE_GIT_READ, REMOTE_GIT_STATUS, REMOTE_HOST_INFO, REMOTE_HOST_METRICS,
     REMOTE_MEMORY_EXTRACT, REMOTE_MEMORY_READ, REMOTE_MEMORY_RESULT, REMOTE_PAIRING_CONFIRMED,
     REMOTE_PAIRING_REQUEST, REMOTE_PROJECT_ADD, REMOTE_PROJECT_LIST, REMOTE_PROJECT_REMOVE,
+    REMOTE_RESOURCE_PROJECTS, REMOTE_RESOURCE_SUBSCRIBE, REMOTE_RESOURCE_UNSUBSCRIBE,
     REMOTE_SSH_LIST, REMOTE_SSH_LIST_RESULT, REMOTE_SSH_REMOVE, REMOTE_SSH_UPSERT,
     REMOTE_TERMINAL_CLOSE, REMOTE_TERMINAL_CLOSED, REMOTE_TERMINAL_CREATE, REMOTE_TERMINAL_CREATED,
     REMOTE_TERMINAL_INPUT, REMOTE_TERMINAL_OUTPUT, REMOTE_TERMINAL_STATUS, REMOTE_TRANSPORT_IROH,
@@ -32,7 +33,6 @@ use codux_runtime_core::{
     },
     git::git_status_payload,
     host::{HostInfoPayload, host_info_payload},
-    project::project_list_payload,
 };
 use codux_runtime_live::{
     agent_worktree::{AgentWorktreeControl, AgentWorktreeHost},
@@ -42,6 +42,7 @@ use codux_runtime_live::{
     terminal_pty::TerminalManager,
 };
 
+use crate::project_catalog::ProjectCatalogService;
 use crate::projects::AgentProjectStore;
 use codux_ai_history::indexer::AIHistoryIndexer;
 use serde_json::{Value, json};
@@ -224,11 +225,13 @@ fn remove_device_state(
     driver: &TerminalManager,
     fanout: &crate::terminals::TerminalFanout,
     ai_stats_watchers: &AIStatsWatchers,
+    projects: &ProjectCatalogService,
 ) {
     let device_id = device_id.trim();
     if device_id.is_empty() {
         return;
     }
+    projects.remove_device(device_id);
     let affected_sessions = driver
         .list()
         .into_iter()
@@ -259,7 +262,13 @@ struct AgentMessageHandlerContext {
     indexer: AIHistoryIndexer,
     ai_current_sessions: Arc<AgentAICurrentSessionProvider>,
     ai_stats_watchers: AIStatsWatchers,
+    projects: Arc<ProjectCatalogService>,
     host_id: String,
+    /// Identifies THIS host process. Resource versions restart at zero when the
+    /// agent restarts, so a controller only resets its version guard when this
+    /// value changes — a constant here would make it drop every snapshot the
+    /// restarted host sends.
+    runtime_instance_id: String,
     name: String,
 }
 
@@ -274,7 +283,9 @@ fn make_handler(
         indexer,
         ai_current_sessions,
         ai_stats_watchers,
+        projects,
         host_id,
+        runtime_instance_id,
         name,
     } = context;
     Arc::new(move |source: String, data: Vec<u8>| {
@@ -285,6 +296,42 @@ fn make_handler(
         let device_id = envelope.get("deviceId").and_then(Value::as_str);
         let request_id = envelope.get("requestId").and_then(Value::as_str);
         let payload = envelope.get("payload").cloned().unwrap_or(Value::Null);
+
+        // The shared project catalog owns project CRUD and the `projects`
+        // resource subscription: one committed mutation answers its source and
+        // pushes the same authoritative snapshot to every subscriber, so it
+        // sends its own messages rather than a single reply. Routed before the
+        // terminal check, which claims every resource.subscribe envelope.
+        if ProjectCatalogService::handles(kind) || is_project_subscription(kind, &payload) {
+            let outcome = projects.handle(kind, &payload, device_id);
+            if let Some(project_id) = outcome.removed_project_id.as_deref() {
+                fanout.remove_project(project_id);
+                remove_ai_stats_watcher_project(project_id, &ai_stats_watchers);
+            }
+            for message in outcome.messages {
+                let target = if message.reply {
+                    device_id
+                } else {
+                    message.device_id.as_deref()
+                };
+                let mut outgoing = json!({ "type": message.kind, "payload": message.payload });
+                if let Some(target) = target {
+                    outgoing["deviceId"] = json!(target);
+                }
+                if message.reply
+                    && let Some(request_id) = request_id
+                {
+                    outgoing["requestId"] = json!(request_id);
+                }
+                if let Ok(bytes) = serde_json::to_vec(&outgoing)
+                    && let Ok(guard) = slot.lock()
+                    && let Some(transport) = guard.as_ref()
+                {
+                    transport.send(bytes, target);
+                }
+            }
+            return;
+        }
 
         // Terminals stream output asynchronously, so they are handled
         // imperatively (they send their own responses) rather than as a
@@ -469,7 +516,7 @@ fn make_handler(
                 if let Some(device_id) =
                     device_id.or_else(|| (!source.is_empty()).then_some(source))
                 {
-                    remove_device_state(device_id, &driver, &fanout, &ai_stats_watchers);
+                    remove_device_state(device_id, &driver, &fanout, &ai_stats_watchers, &projects);
                 }
                 None
             }
@@ -479,11 +526,12 @@ fn make_handler(
                 // it connected on; host.info here carries identity/capabilities.
                 host_info_payload(HostInfoPayload {
                     host_id: host_id.clone(),
-                    runtime_instance_id: format!("{host_id}-agent"),
+                    runtime_instance_id: runtime_instance_id.clone(),
                     name: name.clone(),
                     platform: std::env::consts::OS.to_string(),
                     app: "codux-agent".to_string(),
                     resource_subscriptions: vec![
+                        REMOTE_RESOURCE_PROJECTS.to_string(),
                         codux_protocol::REMOTE_RESOURCE_TERMINALS.to_string(),
                     ],
                     transports: Vec::new(),
@@ -592,45 +640,6 @@ fn make_handler(
                 match file_write_bytes(directory, name, &bytes) {
                     Ok(new_path) => Some((REMOTE_FILE_BYTES_WRITTEN, json!({ "path": new_path }))),
                     Err(error) => Some((REMOTE_ERROR, json!({ "message": error }))),
-                }
-            }
-            REMOTE_PROJECT_LIST => Some((
-                REMOTE_PROJECT_LIST,
-                project_list_payload(AgentProjectStore::new().list(), None, None),
-            )),
-            REMOTE_PROJECT_ADD => match payload.get("path").and_then(Value::as_str) {
-                Some(path) => {
-                    let name = payload.get("name").and_then(Value::as_str);
-                    match AgentProjectStore::new().add(path, name) {
-                        Ok(items) => {
-                            Some((REMOTE_PROJECT_LIST, project_list_payload(items, None, None)))
-                        }
-                        Err(error) => Some((REMOTE_ERROR, json!({ "message": error }))),
-                    }
-                }
-                None => Some((
-                    REMOTE_ERROR,
-                    json!({ "message": "Project path is required." }),
-                )),
-            },
-            REMOTE_PROJECT_REMOVE => {
-                let id = payload
-                    .get("id")
-                    .or_else(|| payload.get("projectId"))
-                    .and_then(Value::as_str);
-                match id {
-                    Some(id) => match AgentProjectStore::new().remove(id) {
-                        Ok(items) => {
-                            fanout.remove_project(id);
-                            remove_ai_stats_watcher_project(id, &ai_stats_watchers);
-                            Some((REMOTE_PROJECT_LIST, project_list_payload(items, None, None)))
-                        }
-                        Err(error) => Some((REMOTE_ERROR, json!({ "message": error }))),
-                    },
-                    None => Some((
-                        REMOTE_ERROR,
-                        json!({ "message": "Project id is required." }),
-                    )),
                 }
             }
             REMOTE_GIT_STATUS => {
@@ -758,12 +767,12 @@ fn make_handler(
                     .get("projectId")
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                let store = AgentProjectStore::new();
-                let project = store
-                    .list()
-                    .into_iter()
+                let stored = AgentProjectStore::new().list().unwrap_or_default();
+                let project = stored
+                    .iter()
                     .find(|item| item.id == project_id)
-                    .or_else(|| store.list().into_iter().next());
+                    .or_else(|| stored.first())
+                    .cloned();
                 match project {
                     Some(project) => {
                         // Register the requesting device as a watcher (one project
@@ -877,6 +886,15 @@ fn make_handler(
     })
 }
 
+/// Whether a subscription envelope targets the shared project catalog (every
+/// other resource stays with the terminal dispatch).
+fn is_project_subscription(kind: &str, payload: &Value) -> bool {
+    matches!(
+        kind,
+        REMOTE_RESOURCE_SUBSCRIBE | REMOTE_RESOURCE_UNSUBSCRIBE
+    ) && payload.get("resource").and_then(Value::as_str) == Some(REMOTE_RESOURCE_PROJECTS)
+}
+
 /// Resolve the git target project: id → stored path, path → stored id, then
 /// the raw payload values (mirrors the desktop host's resolution).
 fn git_project_target(payload: &Value) -> (String, String) {
@@ -890,7 +908,7 @@ fn git_project_target(payload: &Value) -> (String, String) {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .trim();
-    let items = AgentProjectStore::new().list();
+    let items = AgentProjectStore::new().list().unwrap_or_default();
     if !project_id.is_empty()
         && let Some(item) = items.iter().find(|item| item.id == project_id)
     {
@@ -907,6 +925,13 @@ fn git_project_target(payload: &Value) -> (String, String) {
         return (item.id.clone(), item.path.clone());
     }
     (project_id.to_string(), project_path.to_string())
+}
+
+/// A fresh identity for this host process, so a controller can tell a restarted
+/// agent from a live one and reset its resource-version guard.
+fn new_runtime_instance_id(host_id: &str) -> Result<String, String> {
+    let token = random_token()?;
+    Ok(format!("{host_id}-agent-{}", &token[..16]))
 }
 
 fn random_token() -> Result<String, String> {
@@ -994,6 +1019,9 @@ async fn connect_serving_host(
         ai_runtime: Arc::clone(&ai_runtime),
     });
     let ai_stats_watchers: AIStatsWatchers = Arc::new(Mutex::new(HashMap::new()));
+    // One catalog per host process: its mutation lock only serializes writers
+    // that share this instance.
+    let projects = Arc::new(ProjectCatalogService::new(AgentProjectStore::new()));
     let indexer = crate::ai_stats::open_indexer();
     // For a custom relay the iroh relay URL must be set explicitly; for presets
     // the transport resolves it from `relay_preset`.
@@ -1021,7 +1049,9 @@ async fn connect_serving_host(
                 indexer: indexer.clone(),
                 ai_current_sessions: Arc::clone(&ai_current_sessions),
                 ai_stats_watchers: Arc::clone(&ai_stats_watchers),
+                projects: Arc::clone(&projects),
                 host_id: cfg.host_id.clone(),
+                runtime_instance_id: new_runtime_instance_id(&cfg.host_id)?,
                 name: cfg.name.clone(),
             }),
             on_upload: Arc::new(|_| Ok(())),
@@ -1029,9 +1059,16 @@ async fn connect_serving_host(
                 let driver = Arc::clone(&driver);
                 let fanout = fanout.clone();
                 let ai_stats_watchers = Arc::clone(&ai_stats_watchers);
+                let projects = Arc::clone(&projects);
                 Arc::new(move |device_id, state| {
                     if matches!(state.as_str(), "closed" | "failed" | "disconnected") {
-                        remove_device_state(&device_id, &driver, &fanout, &ai_stats_watchers);
+                        remove_device_state(
+                            &device_id,
+                            &driver,
+                            &fanout,
+                            &ai_stats_watchers,
+                            &projects,
+                        );
                     }
                 })
             },
@@ -1113,7 +1150,7 @@ fn spawn_ai_stats_poller(
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(1000));
         loop {
             ticker.tick().await;
-            let projects = AgentProjectStore::new().list();
+            let projects = AgentProjectStore::new().list().unwrap_or_default();
             let project_ids = projects
                 .iter()
                 .map(|project| project.id.as_str())
@@ -1809,6 +1846,19 @@ mod tests {
         let watchers = watchers.lock().unwrap();
         assert!(!watchers.contains_key("project-1"));
         assert!(watchers.contains_key("project-2"));
+    }
+
+    #[test]
+    fn every_host_process_gets_its_own_runtime_instance_id() {
+        let first = new_runtime_instance_id("host-1").unwrap();
+        let second = new_runtime_instance_id("host-1").unwrap();
+
+        assert!(first.starts_with("host-1-agent-"));
+        assert_ne!(
+            first, second,
+            "a restarted agent must look like a new runtime instance so clients \
+             reset their resource-version guard"
+        );
     }
 
     #[test]
