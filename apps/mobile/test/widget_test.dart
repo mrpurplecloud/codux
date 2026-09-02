@@ -14,6 +14,7 @@ import 'package:codux_flutter/services/remote_protocol_service.dart';
 import 'package:codux_flutter/services/remote_transport.dart';
 import 'package:codux_flutter/theme/app_theme.dart';
 import 'package:codux_flutter/widgets/components/device_home_screen.dart';
+import 'package:codux_flutter/widgets/components/self_drawn_terminal_view.dart';
 import 'package:uuid/uuid.dart';
 
 void main() {
@@ -792,6 +793,161 @@ void main() {
       // The self-drawn terminal view reports its viewport size on layout, so a
       // resize is expected on remount; the meaningful guarantee (remount from
       // the local pty pool, no terminal.buffer request) is asserted above.
+    },
+  );
+
+  testWidgets(
+    'project switch rehydrates incomplete terminal history before scrolling',
+    (WidgetTester tester) async {
+      final device = await _fakeDevice();
+      final fullHistory = <String>[
+        'history-start',
+        ...List.generate(80, (index) => 'history-line-$index'),
+        'history-end',
+      ].join('\r\n');
+      final fake = _FakeRemoteTransport(
+        device: device,
+        onSent: (transport, envelope) {
+          final type = '${envelope['type'] ?? ''}';
+          if (type == 'host.info') {
+            transport.emitEncrypted(
+              const RelayEnvelope(
+                type: 'project.list',
+                payload: {
+                  'selectedProjectId': 'project-1',
+                  'projects': [
+                    {'id': 'project-1', 'name': 'Project 1', 'path': '/tmp/p1'},
+                    {'id': 'project-2', 'name': 'Project 2', 'path': '/tmp/p2'},
+                  ],
+                },
+              ),
+            );
+            transport.emitEncrypted(
+              const RelayEnvelope(
+                type: 'terminal.list',
+                payload: {
+                  'terminals': [
+                    {
+                      'id': 'session-1',
+                      'title': 'Terminal 1',
+                      'projectId': 'project-1',
+                    },
+                  ],
+                },
+              ),
+            );
+            transport.emitEncrypted(
+              RelayEnvelope(type: 'host.info', payload: _hostInfoPayload()),
+            );
+            return;
+          }
+          if (type == 'project.select') {
+            transport.emitEncrypted(
+              const RelayEnvelope(
+                type: 'project.list',
+                payload: {
+                  'selectedProjectId': 'project-2',
+                  'projects': [
+                    {'id': 'project-1', 'name': 'Project 1', 'path': '/tmp/p1'},
+                    {'id': 'project-2', 'name': 'Project 2', 'path': '/tmp/p2'},
+                  ],
+                },
+              ),
+            );
+            transport.emitEncrypted(
+              const RelayEnvelope(
+                type: 'terminal.list',
+                payload: {
+                  'terminals': [
+                    {
+                      'id': 'session-1',
+                      'title': 'Terminal 1',
+                      'projectId': 'project-1',
+                    },
+                    {
+                      'id': 'session-2',
+                      'title': 'Terminal 2',
+                      'projectId': 'project-2',
+                    },
+                  ],
+                },
+              ),
+            );
+            return;
+          }
+          if (type == 'terminal.buffer' ||
+              _isTerminalBaselineSubscribe(envelope)) {
+            final sessionId = _isTerminalSubscribe(envelope)
+                ? _sessionIdForSubscribe(envelope, {
+                    'project-1': 'session-1',
+                    'project-2': 'session-2',
+                  })
+                : '${envelope['sessionId'] ?? 'session-1'}';
+            final requestPayload = envelope['payload'];
+            final data = sessionId == 'session-2' ? fullHistory : 'ready';
+            transport.emitEncrypted(
+              RelayEnvelope(
+                type: 'terminal.output',
+                sessionId: sessionId,
+                payload: {
+                  'data': data,
+                  'buffer': true,
+                  'offset': 0,
+                  'bufferLength': data.length,
+                  'outputSeq': 2,
+                  if (requestPayload is Map &&
+                      requestPayload['requestId'] != null)
+                    'requestId': requestPayload['requestId'],
+                },
+              ),
+            );
+          }
+        },
+      );
+
+      await tester.pumpWidget(
+        CoduxFlutterApp(
+          initialDevices: [device],
+          transportFactory: (_) => fake,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Mac'));
+      await tester.pumpAndSettle(const Duration(milliseconds: 300));
+
+      fake.emitEncrypted(
+        const RelayEnvelope(
+          type: 'terminal.output',
+          sessionId: 'session-2',
+          payload: {'data': 'history-end', 'outputSeq': 1},
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 300));
+      await _tapProjectTab(tester, 'Project 2');
+      await tester.pumpAndSettle(const Duration(milliseconds: 300));
+
+      final viewFinder = find.byType(SelfDrawnTerminalView);
+      final view = tester.widget<SelfDrawnTerminalView>(viewFinder);
+      final issues = <String>[];
+      final cached = view.controller.cachedOutput('session-2') ?? '';
+      if (!cached.contains('history-start') ||
+          !cached.contains('history-end')) {
+        issues.add('terminal history stayed partial');
+      }
+      final before = view.controller.screenSnapshot('session-2');
+      if (before == null || before.totalLines <= before.rows) {
+        issues.add('terminal has no scrollback');
+      }
+      if (before != null) {
+        await tester.drag(viewFinder, const Offset(0, 1200));
+        await tester.pumpAndSettle();
+        final after = view.controller.screenSnapshot('session-2');
+        if (after == null || after.displayOffset <= before.displayOffset) {
+          issues.add('terminal drag did not move through scrollback');
+        }
+      }
+
+      expect(issues, isEmpty);
     },
   );
 

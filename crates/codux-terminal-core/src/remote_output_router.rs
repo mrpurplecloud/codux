@@ -163,6 +163,9 @@ pub struct RemoteTerminalOutputRouter {
     assembler: TerminalBufferAssembler,
     active_buffer_request_by_session: HashMap<String, String>,
     restore_buffer_request_ids: HashSet<String>,
+    /// Sessions that completed a history baseline; live-only tail output does
+    /// not make a cache safe to restore after a project switch.
+    complete_baseline_sessions: HashSet<String>,
     gap_sessions: HashSet<String>,
     /// Per-session render generation, bumped whenever the screen could change.
     /// The UI caches the decoded screen snapshot keyed by this so it only
@@ -180,6 +183,7 @@ impl RemoteTerminalOutputRouter {
             assembler: TerminalBufferAssembler::new(max_buffer_chars),
             active_buffer_request_by_session: HashMap::new(),
             restore_buffer_request_ids: HashSet::new(),
+            complete_baseline_sessions: HashSet::new(),
             gap_sessions: HashSet::new(),
             render_gen: HashMap::new(),
         }
@@ -243,6 +247,10 @@ impl RemoteTerminalOutputRouter {
 
     pub fn has_cached_output(&self, session_id: &str) -> bool {
         self.content(session_id).is_some()
+    }
+
+    pub fn has_complete_baseline(&self, session_id: &str) -> bool {
+        self.complete_baseline_sessions.contains(session_id)
     }
 
     pub fn buffer_offset(&self, session_id: &str) -> usize {
@@ -317,6 +325,7 @@ impl RemoteTerminalOutputRouter {
             self.assembler.remove(session_id);
         }
         if require_baseline {
+            self.complete_baseline_sessions.remove(session_id);
             self.session(session_id).require_baseline();
         }
         true
@@ -333,6 +342,9 @@ impl RemoteTerminalOutputRouter {
             self.restore_buffer_request_ids
                 .remove(&buffer_request_key(session_id, &stale));
         }
+        if require_baseline {
+            self.complete_baseline_sessions.remove(session_id);
+        }
         let session = self.session(session_id);
         if require_baseline {
             session.require_baseline();
@@ -348,6 +360,7 @@ impl RemoteTerminalOutputRouter {
         self.active_buffer_request_by_session.remove(session_id);
         self.restore_buffer_request_ids
             .retain(|key| !key.starts_with(&format!("{session_id}:")));
+        self.complete_baseline_sessions.remove(session_id);
         self.assembler.remove(session_id);
         self.sequencer.remove(session_id);
         self.gap_sessions.remove(session_id);
@@ -403,6 +416,7 @@ impl RemoteTerminalOutputRouter {
         self.order.clear();
         self.active_buffer_request_by_session.clear();
         self.restore_buffer_request_ids.clear();
+        self.complete_baseline_sessions.clear();
         self.gap_sessions.clear();
         self.assembler.reset();
         self.sequencer.reset();
@@ -875,6 +889,8 @@ impl RemoteTerminalOutputRouter {
             buffer_end.and_then(|value| usize::try_from(value).ok()),
             output_seq,
         );
+        self.complete_baseline_sessions
+            .insert(session_id.to_string());
         self.bump_render(session_id);
         replay
     }
@@ -886,6 +902,8 @@ impl RemoteTerminalOutputRouter {
     ) -> Vec<String> {
         self.gap_sessions.remove(session_id);
         let replay = self.session(session_id).complete_empty_baseline(output_seq);
+        self.complete_baseline_sessions
+            .insert(session_id.to_string());
         self.bump_render(session_id);
         replay
     }

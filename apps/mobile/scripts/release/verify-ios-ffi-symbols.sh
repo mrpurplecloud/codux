@@ -33,6 +33,7 @@ required_symbols=(
   codux_remote_runtime_model_new
   codux_remote_runtime_model_apply_project_list_json
   codux_output_router_new
+  codux_output_router_has_complete_baseline
 )
 
 mach_o_files=()

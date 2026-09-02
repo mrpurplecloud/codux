@@ -202,6 +202,7 @@ class RemoteTerminalBindingCoordinator {
     }
     final hasUsableCache =
         _outputController.hasCachedOutput(bindSessionId) &&
+        _outputController.hasCompleteBaseline(bindSessionId) &&
         !_outputController.hasSequenceGap(bindSessionId) &&
         !_baselineStaleSessionIds.contains(bindSessionId);
     final needsBaseline = !hasUsableCache || plan.bindFullBuffer;
