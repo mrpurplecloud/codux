@@ -363,7 +363,7 @@ class _TerminalOverlay extends StatelessWidget {
                 const SizedBox(width: AppSpacing.s),
                 Text(
                   message,
-                  style: const TextStyle(
+                  style: TextStyle(
                     color: AppColors.terminalTextDim,
                     fontSize: 13,
                     fontWeight: FontWeight.w600,

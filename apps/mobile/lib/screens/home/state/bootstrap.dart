@@ -39,6 +39,7 @@ extension _HomePageBootstrap on HomeController {
     widget.onChangeAccent(AccentChoices.byId(next.accentId));
     widget.onChangeLocale(LocaleChoices.byId(next.localeId));
     widget.onChangeThemeMode(themeModeFromId(next.themeModeId));
+    widget.onChangeTerminalEink(next.terminalEink);
     _applyState(() {
       _settings = next;
       _settingsNameController.text = next.localName;

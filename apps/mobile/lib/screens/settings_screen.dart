@@ -16,12 +16,14 @@ class SettingsScreen extends StatelessWidget {
     required this.currentLogLevel,
     required this.appTextScale,
     required this.terminalFontSize,
+    required this.terminalEink,
     required this.onChangeAccent,
     required this.onChangeLocale,
     required this.onChangeThemeMode,
     required this.onChangeLogLevel,
     required this.onChangeAppTextScale,
     required this.onChangeTerminalFontSize,
+    required this.onChangeTerminalEink,
     required this.onUseDetectedName,
     required this.onSave,
     required this.onBack,
@@ -37,12 +39,14 @@ class SettingsScreen extends StatelessWidget {
   final String currentLogLevel;
   final double appTextScale;
   final double terminalFontSize;
+  final bool terminalEink;
   final ValueChanged<AccentOption> onChangeAccent;
   final ValueChanged<LocaleOption> onChangeLocale;
   final ValueChanged<ThemeMode> onChangeThemeMode;
   final ValueChanged<String> onChangeLogLevel;
   final ValueChanged<double> onChangeAppTextScale;
   final ValueChanged<double> onChangeTerminalFontSize;
+  final ValueChanged<bool> onChangeTerminalEink;
   final VoidCallback onUseDetectedName;
   final VoidCallback onSave;
   final VoidCallback onBack;
@@ -94,10 +98,27 @@ class SettingsScreen extends StatelessWidget {
                 _SectionLabel(prefs.t('settings.themeLabel')),
                 _Card(
                   children: [
-                    _ThemeModeRow(
+                    _SegmentedRow<ThemeMode>(
                       current: currentThemeMode,
                       accent: accent,
                       onSelect: onChangeThemeMode,
+                      options: [
+                        (
+                          ThemeMode.system,
+                          Icons.brightness_auto_rounded,
+                          prefs.t('settings.themeSystem'),
+                        ),
+                        (
+                          ThemeMode.light,
+                          Icons.light_mode_rounded,
+                          prefs.t('settings.themeLight'),
+                        ),
+                        (
+                          ThemeMode.dark,
+                          Icons.dark_mode_rounded,
+                          prefs.t('settings.themeDark'),
+                        ),
+                      ],
                     ),
                     _Divider(),
                     _AccentRow(
@@ -132,6 +153,25 @@ class SettingsScreen extends StatelessWidget {
                       stepLabels: _terminalFontStepLabels(prefs),
                       accent: accent,
                       onChanged: onChangeTerminalFontSize,
+                    ),
+                    _Divider(),
+                    _SegmentedRow<bool>(
+                      label: prefs.t('settings.terminalPalette'),
+                      current: terminalEink,
+                      accent: accent,
+                      onSelect: onChangeTerminalEink,
+                      options: [
+                        (
+                          false,
+                          Icons.gradient_rounded,
+                          prefs.t('settings.terminalPaletteStandard'),
+                        ),
+                        (
+                          true,
+                          Icons.contrast_rounded,
+                          prefs.t('settings.terminalPaletteEink'),
+                        ),
+                      ],
                     ),
                   ],
                 ),
@@ -818,77 +858,94 @@ class _AccentRow extends StatelessWidget {
   );
 }
 
-class _ThemeModeRow extends StatelessWidget {
-  const _ThemeModeRow({
+/// Icon + label segmented picker. Shared by the theme mode and terminal palette
+/// rows so the two stay visually identical.
+class _SegmentedRow<T> extends StatelessWidget {
+  const _SegmentedRow({
+    required this.options,
     required this.current,
     required this.accent,
     required this.onSelect,
+    this.label,
   });
-  final ThemeMode current;
+  final List<(T, IconData, String)> options;
+  final T current;
   final Color accent;
-  final ValueChanged<ThemeMode> onSelect;
+  final ValueChanged<T> onSelect;
+  final String? label;
 
   @override
   Widget build(BuildContext context) {
-    final prefs = AppPreferences.of(context);
-    final options = <(ThemeMode, IconData, String)>[
-      (ThemeMode.system, Icons.brightness_auto_rounded, prefs.t('settings.themeSystem')),
-      (ThemeMode.light, Icons.light_mode_rounded, prefs.t('settings.themeLight')),
-      (ThemeMode.dark, Icons.dark_mode_rounded, prefs.t('settings.themeDark')),
-    ];
     return Padding(
       padding: const EdgeInsets.symmetric(
         horizontal: AppSpacing.l,
         vertical: AppSpacing.m,
       ),
-      child: Container(
-        padding: const EdgeInsets.all(3),
-        decoration: BoxDecoration(
-          color: AppColors.bgElevated,
-          borderRadius: BorderRadius.circular(AppRadius.md),
-        ),
-        child: Row(
-          children: [
-            for (final (mode, icon, label) in options)
-              Expanded(
-                child: GestureDetector(
-                  onTap: () => onSelect(mode),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 160),
-                    height: 36,
-                    decoration: BoxDecoration(
-                      color: mode == current
-                          ? accent.withValues(alpha: 0.18)
-                          : Colors.transparent,
-                      borderRadius: BorderRadius.circular(AppRadius.sm),
-                    ),
-                    alignment: Alignment.center,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          icon,
-                          size: 15,
-                          color: mode == current ? accent : AppColors.textMuted,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (label case final text?) ...[
+            Text(
+              text,
+              style: TextStyle(
+                color: AppColors.textPrimary,
+                fontSize: AppTextSize.body,
+              ),
+            ),
+            const SizedBox(height: AppSpacing.s),
+          ],
+          Container(
+            padding: const EdgeInsets.all(3),
+            decoration: BoxDecoration(
+              color: AppColors.bgElevated,
+              borderRadius: BorderRadius.circular(AppRadius.md),
+            ),
+            child: Row(
+              children: [
+                for (final (value, icon, optionLabel) in options)
+                  Expanded(
+                    child: GestureDetector(
+                      onTap: () => onSelect(value),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 160),
+                        height: 36,
+                        decoration: BoxDecoration(
+                          color: value == current
+                              ? accent.withValues(alpha: 0.18)
+                              : Colors.transparent,
+                          borderRadius: BorderRadius.circular(AppRadius.sm),
                         ),
-                        const SizedBox(width: 5),
-                        Text(
-                          label,
-                          style: TextStyle(
-                            color: mode == current
-                                ? accent
-                                : AppColors.textSecondary,
-                            fontSize: 12.5,
-                            fontWeight: FontWeight.w700,
-                          ),
+                        alignment: Alignment.center,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              icon,
+                              size: 15,
+                              color: value == current
+                                  ? accent
+                                  : AppColors.textMuted,
+                            ),
+                            const SizedBox(width: 5),
+                            Text(
+                              optionLabel,
+                              style: TextStyle(
+                                color: value == current
+                                    ? accent
+                                    : AppColors.textSecondary,
+                                fontSize: 12.5,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
                         ),
-                      ],
+                      ),
                     ),
                   ),
-                ),
-              ),
-          ],
-        ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

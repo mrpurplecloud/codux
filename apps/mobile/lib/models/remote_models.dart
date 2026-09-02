@@ -861,6 +861,7 @@ class MobileSettings {
     this.logLevel = 'info',
     this.appTextScale = defaultAppTextScale,
     this.terminalFontSize = defaultTerminalFontSize,
+    this.terminalEink = false,
   });
   final String localName;
   final String accentId;
@@ -870,6 +871,9 @@ class MobileSettings {
   final String logLevel;
   final double appTextScale;
   final double terminalFontSize;
+  // High-contrast mono terminal palette for e-ink screens. Orthogonal to
+  // themeModeId: it applies on top of whichever brightness is active.
+  final bool terminalEink;
 
   MobileSettings copyWith({
     String? localName,
@@ -879,6 +883,7 @@ class MobileSettings {
     String? logLevel,
     double? appTextScale,
     double? terminalFontSize,
+    bool? terminalEink,
   }) {
     return MobileSettings(
       localName: localName ?? this.localName,
@@ -888,6 +893,7 @@ class MobileSettings {
       logLevel: logLevel ?? this.logLevel,
       appTextScale: appTextScale ?? this.appTextScale,
       terminalFontSize: terminalFontSize ?? this.terminalFontSize,
+      terminalEink: terminalEink ?? this.terminalEink,
     );
   }
 
@@ -914,6 +920,7 @@ class MobileSettings {
         MobileSettings.terminalFontSizeSteps,
         MobileSettings.defaultTerminalFontSize,
       ),
+      terminalEink: json['terminalEink'] == true,
     );
   }
 
@@ -925,6 +932,7 @@ class MobileSettings {
     'logLevel': logLevel,
     'appTextScale': appTextScale,
     'terminalFontSize': terminalFontSize,
+    'terminalEink': terminalEink,
   };
 }
 

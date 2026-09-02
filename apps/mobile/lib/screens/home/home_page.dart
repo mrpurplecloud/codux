@@ -92,6 +92,7 @@ class CoduxHomePage extends StatefulWidget {
     required this.onChangeAccent,
     required this.onChangeLocale,
     required this.onChangeThemeMode,
+    required this.onChangeTerminalEink,
     this.initialDevices,
     this.transportFactory,
   });
@@ -99,6 +100,7 @@ class CoduxHomePage extends StatefulWidget {
   final ValueChanged<AccentOption> onChangeAccent;
   final ValueChanged<LocaleOption> onChangeLocale;
   final ValueChanged<ThemeMode> onChangeThemeMode;
+  final ValueChanged<bool> onChangeTerminalEink;
   final List<StoredDevice>? initialDevices;
   final RemoteTransportFactory? transportFactory;
 
@@ -289,6 +291,7 @@ class _CoduxHomePageState extends State<CoduxHomePage>
       currentLogLevel: c._settings.logLevel,
       appTextScale: c._settings.appTextScale,
       terminalFontSize: c._settings.terminalFontSize,
+      terminalEink: c._settings.terminalEink,
       onChangeAccent: (next) {
         widget.onChangeAccent(next);
         c._applyState(
@@ -318,6 +321,12 @@ class _CoduxHomePageState extends State<CoduxHomePage>
       },
       onChangeTerminalFontSize: (next) {
         final settings = c._settings.copyWith(terminalFontSize: next);
+        c._applyState(() => c._settings = settings);
+        unawaited(c._storage.saveSettings(settings));
+      },
+      onChangeTerminalEink: (next) {
+        widget.onChangeTerminalEink(next);
+        final settings = c._settings.copyWith(terminalEink: next);
         c._applyState(() => c._settings = settings);
         unawaited(c._storage.saveSettings(settings));
       },

@@ -50,6 +50,15 @@ void main() {
     expect(MobileSettings.terminalFontSizeSteps, [12, 13, 14, 16, 18]);
   });
 
+  test('terminal e-ink palette persists and defaults off for old payloads', () {
+    final legacy = MobileSettings.fromJson({'localName': 'Phone'});
+    expect(legacy.terminalEink, isFalse);
+
+    final enabled = legacy.copyWith(terminalEink: true);
+    expect(enabled.toJson()['terminalEink'], isTrue);
+    expect(MobileSettings.fromJson(enabled.toJson()).terminalEink, isTrue);
+  });
+
   test('normalizes local name when saving settings', () {
     const current = MobileSettings(localName: 'Old', logLevel: 'debug');
 

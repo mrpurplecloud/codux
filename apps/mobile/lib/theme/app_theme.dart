@@ -14,6 +14,12 @@ class CoduxTheme {
 
   static Brightness brightness = Brightness.dark;
 
+  /// High-contrast terminal palette for e-ink screens. Orthogonal to
+  /// [brightness]: it pins the terminal canvas to pure black/white and (in
+  /// `TerminalTheme`) collapses the ANSI colors onto a quantized gray ramp,
+  /// because e-ink renders the tuned hues as indistinguishable mid grays.
+  static bool terminalMono = false;
+
   static bool get isLight => brightness == Brightness.light;
 
   static Color _pick(Color dark, Color light) => isLight ? light : dark;
@@ -57,16 +63,29 @@ class AppColors {
   static Color get backdrop =>
       CoduxTheme._pick(const Color(0x8B000000), const Color(0x52000000));
 
-  // Terminal surfaces + chrome (tab strip, input toolbar) stay dark in both
-  // themes — the PTY palette is dark-tuned, so light-mode chrome around it would
-  // clash. Neutral dark constants, never theme-resolved.
-  static const terminalBg = Color(0xFF0D0D0D);
-  static const terminalText = Color(0xFFECECEC);
-  static const terminalTextDim = Color(0xFFB0B0B0);
-  static const terminalTextMuted = Color(0xFF8A8A8A);
-  static const terminalChrome = Color(0xFF161616); // tab strip / header bg
-  static const terminalElevated = Color(0xFF242424); // tool buttons
-  static const terminalHover = Color(0x1FFFFFFF); // active tab wash (white @ 12%)
+  // Terminal surfaces + chrome (tab strip, input toolbar) follow the theme; the
+  // ANSI palette in `terminal_theme.dart` is resolved per theme alongside them,
+  // so light-mode chrome no longer clashes with a dark-tuned PTY palette.
+  // Mono (e-ink) pins the canvas to pure black/white for maximum contrast.
+  static Color get terminalBg => CoduxTheme.terminalMono
+      ? CoduxTheme._pick(const Color(0xFF000000), const Color(0xFFFFFFFF))
+      : CoduxTheme._pick(const Color(0xFF0D0D0D), const Color(0xFFFFFFFF));
+  static Color get terminalText => CoduxTheme.terminalMono
+      ? CoduxTheme._pick(const Color(0xFFFFFFFF), const Color(0xFF000000))
+      : CoduxTheme._pick(const Color(0xFFECECEC), const Color(0xFF1F2328));
+  static Color get terminalTextDim =>
+      CoduxTheme._pick(const Color(0xFFB0B0B0), const Color(0xFF57606A));
+  static Color get terminalTextMuted =>
+      CoduxTheme._pick(const Color(0xFF8A8A8A), const Color(0xFF6E7781));
+  // tab strip / header bg
+  static Color get terminalChrome =>
+      CoduxTheme._pick(const Color(0xFF161616), const Color(0xFFF0F2F5));
+  // tool buttons
+  static Color get terminalElevated =>
+      CoduxTheme._pick(const Color(0xFF242424), const Color(0xFFEAEEF2));
+  // active tab wash (white @ 12% on dark, black @ 8% on light)
+  static Color get terminalHover =>
+      CoduxTheme._pick(const Color(0x1FFFFFFF), const Color(0x14000000));
 }
 
 /// Map the persisted theme-mode id (`system` | `light` | `dark`) to/from the

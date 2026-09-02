@@ -26,10 +26,12 @@ class _CoduxFlutterAppState extends State<CoduxFlutterApp>
   AccentOption _accent = AccentChoices.cyan;
   LocaleOption _locale = LocaleChoices.zhCN;
   ThemeMode _themeMode = ThemeMode.system;
+  bool _terminalEink = false;
 
   void _setAccent(AccentOption next) => setState(() => _accent = next);
   void _setLocale(LocaleOption next) => setState(() => _locale = next);
   void _setThemeMode(ThemeMode next) => setState(() => _themeMode = next);
+  void _setTerminalEink(bool next) => setState(() => _terminalEink = next);
 
   @override
   void initState() {
@@ -66,6 +68,7 @@ class _CoduxFlutterAppState extends State<CoduxFlutterApp>
     // Publish the resolved brightness before the tree builds so the color
     // tokens (AppColors / PadColors) read the right values this frame.
     CoduxTheme.brightness = brightness;
+    CoduxTheme.terminalMono = _terminalEink;
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'Codux Mobile',
@@ -85,6 +88,7 @@ class _CoduxFlutterAppState extends State<CoduxFlutterApp>
           onChangeAccent: _setAccent,
           onChangeLocale: _setLocale,
           onChangeThemeMode: _setThemeMode,
+          onChangeTerminalEink: _setTerminalEink,
           initialDevices: widget.initialDevices,
           transportFactory: widget.transportFactory,
         ),

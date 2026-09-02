@@ -238,6 +238,12 @@ class _SelfDrawnTerminalViewState extends State<SelfDrawnTerminalView>
   void _startBlink() {
     _blinkTimer?.cancel();
     _cursorBlinkOn = true;
+    // E-ink mode: a blinking cursor means a panel refresh twice a second, which
+    // ghosts and drains the display. Keep the cursor solid instead.
+    if (CoduxTheme.terminalMono) {
+      _blinkTimer = null;
+      return;
+    }
     _blinkTimer = Timer.periodic(const Duration(milliseconds: 530), (_) {
       if (!mounted) return;
       setState(() => _cursorBlinkOn = !_cursorBlinkOn);
@@ -248,6 +254,18 @@ class _SelfDrawnTerminalViewState extends State<SelfDrawnTerminalView>
     _blinkTimer?.cancel();
     _blinkTimer = null;
     _cursorBlinkOn = true;
+  }
+
+  /// The mono flag lives on the theme, not in the widget config, so a settings
+  /// change reaches here as a plain rebuild. Re-align the blink loop with it.
+  /// Only touches timer state and fields — never calls `setState` during build.
+  void _reconcileBlink() {
+    if (!_focusNode.hasFocus) return;
+    if (CoduxTheme.terminalMono) {
+      if (_blinkTimer != null) _stopBlink();
+    } else if (_blinkTimer == null) {
+      _startBlink();
+    }
   }
 
   @override
@@ -959,6 +977,7 @@ class _SelfDrawnTerminalViewState extends State<SelfDrawnTerminalView>
 
   @override
   Widget build(BuildContext context) {
+    _reconcileBlink();
     final startHandle = _buildHandle(isStart: true);
     final endHandle = _buildHandle(isStart: false);
     return Focus(
@@ -1047,6 +1066,8 @@ class _SelfDrawnTerminalViewState extends State<SelfDrawnTerminalView>
                       focused: _focusNode.hasFocus,
                       cursorBlinkOn: _cursorBlinkOn,
                       bottomShift: _bottomWindowShift(),
+                      brightness: CoduxTheme.brightness,
+                      mono: CoduxTheme.terminalMono,
                     ),
                   ),
                 );
@@ -1075,6 +1096,8 @@ class _TerminalGridPainter extends CustomPainter {
     this.focused = true,
     this.cursorBlinkOn = true,
     this.bottomShift = 0,
+    required this.brightness,
+    required this.mono,
   });
 
   final TerminalScreenSnapshot? snapshot;
@@ -1088,6 +1111,11 @@ class _TerminalGridPainter extends CustomPainter {
   final ({int row, int col})? selectionEnd;
   final bool focused;
   final bool cursorBlinkOn;
+  // The palette the cells were resolved against. Carried as painter state so a
+  // theme switch repaints — the snapshot itself is unchanged and would compare
+  // identical.
+  final Brightness brightness;
+  final bool mono;
 
   /// Upward (<= 0) pixel shift so the grid's bottom rows stay visible when the
   /// host grid is taller than the phone's viewport. See `_bottomWindowShift`.
@@ -1450,7 +1478,9 @@ class _TerminalGridPainter extends CustomPainter {
         old.selectionEnd != selectionEnd ||
         old.focused != focused ||
         old.cursorBlinkOn != cursorBlinkOn ||
-        old.bottomShift != bottomShift;
+        old.bottomShift != bottomShift ||
+        old.brightness != brightness ||
+        old.mono != mono;
   }
 }
 
