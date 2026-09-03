@@ -511,12 +511,6 @@ impl TerminalPtySession {
         self.set_screen_scrollback(self.remote_screen_scrollback);
     }
 
-    pub fn shrink_remote_screen_scrollback(&self) {
-        self.set_screen_scrollback(initial_remote_screen_scrollback_lines(
-            self.remote_screen_scrollback,
-        ));
-    }
-
     pub fn clear_history(&self) {
         let _commit = self.output_commit.lock();
         self.history.lock().clear();

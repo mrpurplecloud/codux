@@ -210,19 +210,32 @@ fn send(
     device_id: Option<&str>,
     envelope: Value,
     terminal_stream: bool,
-) {
+) -> bool {
     let Ok(bytes) = serde_json::to_vec(&envelope) else {
-        return;
+        return false;
     };
     if let Ok(guard) = transport.lock()
         && let Some(t) = guard.as_ref()
     {
-        if terminal_stream {
-            t.send_terminal(bytes, device_id);
+        let sent = if terminal_stream {
+            t.send_terminal(bytes, device_id)
         } else {
-            t.send(bytes, device_id);
+            t.send(bytes, device_id)
+        };
+        if !sent {
+            eprintln!(
+                "Agent transport send failed: stream={} device={}",
+                if terminal_stream {
+                    "terminal"
+                } else {
+                    "control"
+                },
+                device_id.unwrap_or("")
+            );
         }
+        return sent;
     }
+    false
 }
 
 /// Serialize one frame and fan it out: unicast to each viewer (the transport
@@ -243,10 +256,20 @@ fn fanout(transport: &TransportSlot, viewers: &[String], envelope: Value, termin
     }
     for device in viewers {
         let copy = bytes.clone();
-        if terminal_stream {
-            t.send_terminal(copy, Some(device));
+        let sent = if terminal_stream {
+            t.send_terminal(copy, Some(device))
         } else {
-            t.send(copy, Some(device));
+            t.send(copy, Some(device))
+        };
+        if !sent {
+            eprintln!(
+                "Agent transport send failed: stream={} device={device}",
+                if terminal_stream {
+                    "terminal"
+                } else {
+                    "control"
+                }
+            );
         }
     }
 }
@@ -270,10 +293,20 @@ fn send_to_viewers(
         return;
     };
     for device_id in viewers {
-        if terminal_stream {
-            transport.send_terminal(bytes.clone(), Some(device_id));
+        let sent = if terminal_stream {
+            transport.send_terminal(bytes.clone(), Some(device_id))
         } else {
-            transport.send(bytes.clone(), Some(device_id));
+            transport.send(bytes.clone(), Some(device_id))
+        };
+        if !sent {
+            eprintln!(
+                "Agent transport send failed: stream={} device={device_id}",
+                if terminal_stream {
+                    "terminal"
+                } else {
+                    "control"
+                }
+            );
         }
     }
 }
@@ -589,7 +622,9 @@ fn handle_agent_terminal_event(
 
 /// Send a session's catch-up baseline to a newly-subscribed device, reusing the
 /// shared `snapshot_tail` + `terminal_buffer_payloads` helpers so the wire shape
-/// matches the desktop host exactly.
+/// matches the desktop host exactly. A failed send stops this attempt without
+/// canceling the subscription; the client detects and retries an incomplete
+/// baseline.
 fn send_terminal_baseline(
     driver: &TerminalManager,
     transport: &TransportSlot,
@@ -661,7 +696,9 @@ fn send_terminal_baseline(
         let mut envelope =
             json!({ "type": REMOTE_TERMINAL_OUTPUT, "sessionId": session_id, "payload": payload });
         envelope["deviceId"] = json!(device_id);
-        send(transport, Some(device_id), envelope, true);
+        if !send(transport, Some(device_id), envelope, true) {
+            return;
+        }
     }
 }
 
@@ -685,9 +722,6 @@ impl AgentTerminalCtx<'_> {
 
     fn remove_viewer(&self, session_id: &str, device_id: &str) {
         self.fanout.remove_viewer(session_id, device_id);
-        if self.fanout.viewers(session_id).is_empty() {
-            self.driver.shrink_remote_screen_scrollback(session_id);
-        }
     }
 
     /// Register a viewer for `session_id` and, when asked, push its catch-up
@@ -1408,6 +1442,81 @@ mod tests {
 
         assert!(message_types(&received, "phone-a").is_empty());
         assert!(message_types(&received, "phone-b").is_empty());
+    }
+
+    #[test]
+    fn failed_baseline_send_keeps_new_viewer_for_retry() {
+        let (transport, _) = test_transport(&[]);
+        let driver = Arc::new(TerminalManager::new());
+        let fanout = TerminalFanout::new();
+        let ctx = AgentTerminalCtx {
+            driver: &driver,
+            transport: &transport,
+            fanout: &fanout,
+        };
+
+        ctx.subscribe_session("session-1", "phone-a", true, &json!({ "maxChars": 100 }));
+
+        assert_eq!(fanout.viewers("session-1"), vec!["phone-a"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn last_viewer_unsubscribe_preserves_remote_scrollback() {
+        let (transport, _) = test_transport(&[]);
+        let driver = Arc::new(TerminalManager::new());
+        let fanout = TerminalFanout::new();
+        let ctx = AgentTerminalCtx {
+            driver: &driver,
+            transport: &transport,
+            fanout: &fanout,
+        };
+        let command = "read ready; i=0; while [ \"$i\" -lt 800 ]; do printf 'line-%04d\\r\\n' \"$i\"; i=$((i + 1)); done; printf '__DONE__\\r\\n'; read hold";
+        let (session, output) = driver
+            .attach_or_create_with_context(
+                TerminalPtyConfig {
+                    shell: Some("/bin/sh".to_string()),
+                    command: Some(command.to_string()),
+                    cols: Some(80),
+                    rows: Some(24),
+                    scrollback_lines: Some(2_000),
+                    ..Default::default()
+                },
+                None,
+                Arc::new(|_| true),
+            )
+            .expect("create terminal");
+
+        ctx.add_viewer(session.id(), "phone-a");
+        session.write(b"\n").expect("start output");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut received = String::new();
+        while std::time::Instant::now() < deadline && !received.contains("__DONE__") {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if let Ok(bytes) = output.recv_timeout(remaining.min(Duration::from_millis(100))) {
+                received.push_str(&String::from_utf8_lossy(&bytes));
+            }
+        }
+        assert!(received.contains("__DONE__"));
+
+        let before = driver
+            .screen_snapshot(session.id())
+            .expect("snapshot before unsubscribe")
+            .total_lines;
+        assert!(
+            before > 500,
+            "expected retained scrollback, got {before} lines"
+        );
+
+        ctx.remove_viewer(session.id(), "phone-a");
+
+        let after = driver
+            .screen_snapshot(session.id())
+            .expect("snapshot after unsubscribe")
+            .total_lines;
+        assert_eq!(after, before);
+
+        let _ = session.kill();
     }
 
     #[test]

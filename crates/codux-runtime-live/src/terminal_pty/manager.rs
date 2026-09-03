@@ -296,12 +296,6 @@ impl TerminalManager {
         }
     }
 
-    pub fn shrink_remote_screen_scrollback(&self, session_id: &str) {
-        if let Ok(session) = self.session(session_id) {
-            session.shrink_remote_screen_scrollback();
-        }
-    }
-
     pub fn release_viewport(
         &self,
         session_id: &str,

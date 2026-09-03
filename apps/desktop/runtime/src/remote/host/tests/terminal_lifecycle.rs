@@ -528,6 +528,67 @@ fn remote_terminal_list_excludes_exited_sessions() {
     fs::remove_dir_all(support_dir).ok();
 }
 
+#[cfg(unix)]
+#[test]
+fn last_remote_viewer_unsubscribe_preserves_scrollback() {
+    let support_dir = temp_support_dir("codux-remote-terminal-unsubscribe-scrollback");
+    let terminals = Arc::new(TerminalManager::new());
+    let runtime = Arc::new(RemoteHostRuntime::new_with_ai_history_and_terminals(
+        support_dir.clone(),
+        Default::default(),
+        Arc::clone(&terminals),
+    ));
+    let command = "read ready; i=0; while [ \"$i\" -lt 800 ]; do printf 'line-%04d\\r\\n' \"$i\"; i=$((i + 1)); done; printf '__DONE__\\r\\n'; read hold";
+    let (session, output) = terminals
+        .attach_or_create_with_context(
+            TerminalPtyConfig {
+                shell: Some("/bin/sh".to_string()),
+                command: Some(command.to_string()),
+                cwd: Some(support_dir.to_string_lossy().to_string()),
+                cols: Some(80),
+                rows: Some(24),
+                scrollback_lines: Some(2_000),
+                ..Default::default()
+            },
+            None,
+            Arc::new(|_| true),
+        )
+        .expect("create terminal");
+
+    runtime.register_terminal_viewer(session.id(), Some("device-1"));
+    session.write(b"\n").expect("start output");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut received = String::new();
+    while Instant::now() < deadline && !received.contains("__DONE__") {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if let Ok(bytes) = output.recv_timeout(remaining.min(Duration::from_millis(100))) {
+            received.push_str(&String::from_utf8_lossy(&bytes));
+        }
+    }
+    assert!(received.contains("__DONE__"));
+
+    let before = terminals
+        .screen_snapshot(session.id())
+        .expect("snapshot before unsubscribe")
+        .total_lines;
+    assert!(
+        before > 500,
+        "expected retained scrollback, got {before} lines"
+    );
+
+    runtime.remove_terminal_viewer_for_session(session.id(), Some("device-1"));
+
+    assert!(runtime.terminal_output_viewers(session.id()).is_empty());
+    let after = terminals
+        .screen_snapshot(session.id())
+        .expect("snapshot after unsubscribe")
+        .total_lines;
+    assert_eq!(after, before);
+
+    let _ = session.kill();
+    fs::remove_dir_all(support_dir).ok();
+}
+
 #[test]
 fn device_disconnect_releases_owned_terminal_viewport() {
     let support_dir = temp_support_dir("codux-remote-terminal-viewport-disconnect");
