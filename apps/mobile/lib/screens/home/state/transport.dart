@@ -164,6 +164,9 @@ extension _HomePageTransport on HomeController {
   void _handleTransportClosed(String reason) {
     _remoteRuntimeEpoch += 1;
     _transportConnected = false;
+    // Nothing left to hold: drop the keep-alive notification instead of
+    // claiming a connection that is gone.
+    unawaited(_backgroundKeepAlive.stop());
     _connectInFlight = false;
     _connectInFlightKey = null;
     _cancelHostResponseProbe();

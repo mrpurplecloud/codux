@@ -59,6 +59,18 @@ void main() {
     expect(MobileSettings.fromJson(enabled.toJson()).terminalEink, isTrue);
   });
 
+  test('background keep-alive persists and defaults on for old payloads', () {
+    final legacy = MobileSettings.fromJson({'localName': 'Phone'});
+    expect(legacy.keepConnectionAlive, isTrue);
+
+    final disabled = legacy.copyWith(keepConnectionAlive: false);
+    expect(disabled.toJson()['keepConnectionAlive'], isFalse);
+    expect(
+      MobileSettings.fromJson(disabled.toJson()).keepConnectionAlive,
+      isFalse,
+    );
+  });
+
   test('normalizes local name when saving settings', () {
     const current = MobileSettings(localName: 'Old', logLevel: 'debug');
 

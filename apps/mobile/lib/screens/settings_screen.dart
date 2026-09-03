@@ -17,6 +17,7 @@ class SettingsScreen extends StatelessWidget {
     required this.appTextScale,
     required this.terminalFontSize,
     required this.terminalEink,
+    required this.keepConnectionAlive,
     required this.onChangeAccent,
     required this.onChangeLocale,
     required this.onChangeThemeMode,
@@ -24,6 +25,7 @@ class SettingsScreen extends StatelessWidget {
     required this.onChangeAppTextScale,
     required this.onChangeTerminalFontSize,
     required this.onChangeTerminalEink,
+    required this.onChangeKeepConnectionAlive,
     required this.onUseDetectedName,
     required this.onSave,
     required this.onBack,
@@ -40,6 +42,7 @@ class SettingsScreen extends StatelessWidget {
   final double appTextScale;
   final double terminalFontSize;
   final bool terminalEink;
+  final bool keepConnectionAlive;
   final ValueChanged<AccentOption> onChangeAccent;
   final ValueChanged<LocaleOption> onChangeLocale;
   final ValueChanged<ThemeMode> onChangeThemeMode;
@@ -47,6 +50,7 @@ class SettingsScreen extends StatelessWidget {
   final ValueChanged<double> onChangeAppTextScale;
   final ValueChanged<double> onChangeTerminalFontSize;
   final ValueChanged<bool> onChangeTerminalEink;
+  final ValueChanged<bool> onChangeKeepConnectionAlive;
   final VoidCallback onUseDetectedName;
   final VoidCallback onSave;
   final VoidCallback onBack;
@@ -170,6 +174,25 @@ class SettingsScreen extends StatelessWidget {
                           true,
                           Icons.contrast_rounded,
                           prefs.t('settings.terminalPaletteEink'),
+                        ),
+                      ],
+                    ),
+                    _Divider(),
+                    _SegmentedRow<bool>(
+                      label: prefs.t('settings.backgroundKeepAlive'),
+                      current: keepConnectionAlive,
+                      accent: accent,
+                      onSelect: onChangeKeepConnectionAlive,
+                      options: [
+                        (
+                          true,
+                          Icons.link_rounded,
+                          prefs.t('settings.backgroundKeepAliveOn'),
+                        ),
+                        (
+                          false,
+                          Icons.link_off_rounded,
+                          prefs.t('settings.backgroundKeepAliveOff'),
                         ),
                       ],
                     ),

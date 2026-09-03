@@ -862,6 +862,7 @@ class MobileSettings {
     this.appTextScale = defaultAppTextScale,
     this.terminalFontSize = defaultTerminalFontSize,
     this.terminalEink = false,
+    this.keepConnectionAlive = true,
   });
   final String localName;
   final String accentId;
@@ -874,6 +875,9 @@ class MobileSettings {
   // High-contrast mono terminal palette for e-ink screens. Orthogonal to
   // themeModeId: it applies on top of whichever brightness is active.
   final bool terminalEink;
+  // Hold the host link while the app sits in the background (Android only: it
+  // runs a foreground service so the process keeps sending iroh heartbeats).
+  final bool keepConnectionAlive;
 
   MobileSettings copyWith({
     String? localName,
@@ -884,6 +888,7 @@ class MobileSettings {
     double? appTextScale,
     double? terminalFontSize,
     bool? terminalEink,
+    bool? keepConnectionAlive,
   }) {
     return MobileSettings(
       localName: localName ?? this.localName,
@@ -894,6 +899,7 @@ class MobileSettings {
       appTextScale: appTextScale ?? this.appTextScale,
       terminalFontSize: terminalFontSize ?? this.terminalFontSize,
       terminalEink: terminalEink ?? this.terminalEink,
+      keepConnectionAlive: keepConnectionAlive ?? this.keepConnectionAlive,
     );
   }
 
@@ -921,6 +927,9 @@ class MobileSettings {
         MobileSettings.defaultTerminalFontSize,
       ),
       terminalEink: json['terminalEink'] == true,
+      // Absent in stores written before background keep-alive existed, and the
+      // feature ships on: only an explicit `false` turns it off.
+      keepConnectionAlive: json['keepConnectionAlive'] != false,
     );
   }
 
@@ -933,6 +942,7 @@ class MobileSettings {
     'appTextScale': appTextScale,
     'terminalFontSize': terminalFontSize,
     'terminalEink': terminalEink,
+    'keepConnectionAlive': keepConnectionAlive,
   };
 }
 

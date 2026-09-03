@@ -35,6 +35,7 @@ class HomeController extends ChangeNotifier with WidgetsBindingObserver {
   final _remoteSyncController = RemoteConnectionSyncController();
   final _remoteRuntime = RemoteRuntimeStore();
   final _terminalRepaint = TerminalRepaintSignal();
+  final _backgroundKeepAlive = BackgroundKeepAlive();
   final _settingsNameController = TextEditingController();
   final _fileEditorController = CodeEditingController();
   final _projectNameController = TextEditingController();
@@ -483,6 +484,7 @@ class HomeController extends ChangeNotifier with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       _appInForeground = true;
       _appSuspended = false;
+      unawaited(_backgroundKeepAlive.stop());
       final device = _activeDevice;
       if (device == null) return;
       if (_transportConnected) {
@@ -508,6 +510,7 @@ class HomeController extends ChangeNotifier with WidgetsBindingObserver {
     if (state == AppLifecycleState.detached) {
       _appInForeground = false;
       _appSuspended = true;
+      unawaited(_backgroundKeepAlive.stop());
       _disconnectTransport(
         status: _t('app.disconnected'),
         closeTerminal: false,
@@ -531,6 +534,20 @@ class HomeController extends ChangeNotifier with WidgetsBindingObserver {
       // immediately instead of waiting for the lease to expire.
       if (_transportConnected) {
         _releaseTerminalViewport();
+      }
+      // The link dies on its own once this process stops sending heartbeats,
+      // so holding it means holding the process (Android foreground service).
+      if (shouldKeepAliveInBackground(
+        enabled: _settings.keepConnectionAlive,
+        connected: _transportConnected,
+        state: state,
+      )) {
+        unawaited(
+          _backgroundKeepAlive.start(
+            title: _t('keepAlive.notificationTitle'),
+            body: _t('keepAlive.notificationBody'),
+          ),
+        );
       }
       CoduxLog.info(
         '[codux-flutter-lifecycle] background keep transport state=${state.name}',

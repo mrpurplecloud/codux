@@ -142,6 +142,11 @@ const supportedFlutterLocales = [
 ];
 
 const Map<String, String> _zhCN = {
+  'settings.backgroundKeepAlive': '后台保持连接',
+  'settings.backgroundKeepAliveOn': '开启',
+  'settings.backgroundKeepAliveOff': '关闭',
+  'keepAlive.notificationTitle': 'Codux 保持连接中',
+  'keepAlive.notificationBody': '切回应用即可继续，无需重连',
   'app.unbound': '未绑定电脑',
   'app.connected': '已连接',
   'app.notConnected': '未连接',
@@ -461,6 +466,11 @@ const Map<String, String> _zhCN = {
 };
 
 const Map<String, String> _zhTW = {
+  'settings.backgroundKeepAlive': '背景保持連線',
+  'settings.backgroundKeepAliveOn': '開啟',
+  'settings.backgroundKeepAliveOff': '關閉',
+  'keepAlive.notificationTitle': 'Codux 保持連線中',
+  'keepAlive.notificationBody': '切回應用即可繼續，不需重新連線',
   'app.unbound': '未綁定電腦',
   'app.connected': '已連線',
   'app.notConnected': '未連線',
@@ -781,6 +791,11 @@ const Map<String, String> _zhTW = {
 };
 
 const Map<String, String> _en = {
+  'settings.backgroundKeepAlive': 'Keep connection in background',
+  'settings.backgroundKeepAliveOn': 'On',
+  'settings.backgroundKeepAliveOff': 'Off',
+  'keepAlive.notificationTitle': 'Codux is holding the connection',
+  'keepAlive.notificationBody': 'Switch back to continue without reconnecting',
   'app.unbound': 'No device',
   'app.connected': 'Connected',
   'app.notConnected': 'Disconnected',
@@ -1115,6 +1130,11 @@ const Map<String, String> _en = {
 };
 
 const Map<String, String> _ja = {
+  'settings.backgroundKeepAlive': 'バックグラウンドで接続を維持',
+  'settings.backgroundKeepAliveOn': 'オン',
+  'settings.backgroundKeepAliveOff': 'オフ',
+  'keepAlive.notificationTitle': 'Codux が接続を維持しています',
+  'keepAlive.notificationBody': 'アプリに戻ればそのまま続行できます',
   'app.unbound': '未接続のコンピュータ',
   'app.connected': '接続済み',
   'app.notConnected': '未接続',
@@ -1425,6 +1445,11 @@ const Map<String, String> _ja = {
 };
 
 const Map<String, String> _ko = {
+  'settings.backgroundKeepAlive': '백그라운드 연결 유지',
+  'settings.backgroundKeepAliveOn': '켜기',
+  'settings.backgroundKeepAliveOff': '끄기',
+  'keepAlive.notificationTitle': 'Codux가 연결을 유지하는 중',
+  'keepAlive.notificationBody': '앱으로 돌아오면 재연결 없이 이어집니다',
   'app.unbound': '연결된 컴퓨터 없음',
   'app.connected': '연결됨',
   'app.notConnected': '연결 안 됨',
@@ -1735,6 +1760,12 @@ const Map<String, String> _ko = {
 
 final Map<String, String> _fr = {
   ..._en,
+  'settings.backgroundKeepAlive': 'Garder la connexion en arrière-plan',
+  'settings.backgroundKeepAliveOn': 'Activé',
+  'settings.backgroundKeepAliveOff': 'Désactivé',
+  'keepAlive.notificationTitle': 'Codux maintient la connexion',
+  'keepAlive.notificationBody':
+      'Revenez à l\'application pour continuer sans reconnexion',
   'app.connected': 'Connecté',
   'app.notConnected': 'Déconnecté',
   'app.addDevice': 'Ajouter un ordinateur',
@@ -2044,6 +2075,12 @@ final Map<String, String> _fr = {
 
 final Map<String, String> _de = {
   ..._en,
+  'settings.backgroundKeepAlive': 'Verbindung im Hintergrund halten',
+  'settings.backgroundKeepAliveOn': 'Ein',
+  'settings.backgroundKeepAliveOff': 'Aus',
+  'keepAlive.notificationTitle': 'Codux hält die Verbindung',
+  'keepAlive.notificationBody':
+      'Zurück zur App, um ohne neue Verbindung weiterzumachen',
   'app.connected': 'Verbunden',
   'app.notConnected': 'Getrennt',
   'app.addDevice': 'Computer hinzufügen',
@@ -2353,6 +2390,12 @@ final Map<String, String> _de = {
 
 final Map<String, String> _es = {
   ..._en,
+  'settings.backgroundKeepAlive': 'Mantener la conexión en segundo plano',
+  'settings.backgroundKeepAliveOn': 'Activado',
+  'settings.backgroundKeepAliveOff': 'Desactivado',
+  'keepAlive.notificationTitle': 'Codux mantiene la conexión',
+  'keepAlive.notificationBody':
+      'Vuelve a la aplicación para continuar sin reconectar',
   'app.connected': 'Conectado',
   'app.notConnected': 'Desconectado',
   'app.addDevice': 'Añadir ordenador',
@@ -2662,6 +2705,12 @@ final Map<String, String> _es = {
 
 final Map<String, String> _ptBR = {
   ..._en,
+  'settings.backgroundKeepAlive': 'Manter conexão em segundo plano',
+  'settings.backgroundKeepAliveOn': 'Ativado',
+  'settings.backgroundKeepAliveOff': 'Desativado',
+  'keepAlive.notificationTitle': 'O Codux está mantendo a conexão',
+  'keepAlive.notificationBody':
+      'Volte ao aplicativo para continuar sem reconectar',
   'app.connected': 'Conectado',
   'app.notConnected': 'Desconectado',
   'app.addDevice': 'Adicionar computador',
@@ -2971,6 +3020,12 @@ final Map<String, String> _ptBR = {
 
 final Map<String, String> _ru = {
   ..._en,
+  'settings.backgroundKeepAlive': 'Держать соединение в фоне',
+  'settings.backgroundKeepAliveOn': 'Вкл.',
+  'settings.backgroundKeepAliveOff': 'Выкл.',
+  'keepAlive.notificationTitle': 'Codux удерживает соединение',
+  'keepAlive.notificationBody':
+      'Вернитесь в приложение, чтобы продолжить без переподключения',
   'app.connected': 'Подключено',
   'app.notConnected': 'Отключено',
   'app.addDevice': 'Добавить компьютер',

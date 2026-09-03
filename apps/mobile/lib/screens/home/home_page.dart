@@ -21,6 +21,7 @@ import 'home_workspace_builder.dart';
 import 'home_workspace_shell_data.dart';
 import 'home_runtime_coordinator.dart';
 import '../settings_screen.dart';
+import '../../services/background_keepalive.dart';
 import '../../services/log_service.dart';
 import '../../services/log_export_service.dart';
 import '../../services/local_voice_recognition_service.dart';
@@ -292,6 +293,7 @@ class _CoduxHomePageState extends State<CoduxHomePage>
       appTextScale: c._settings.appTextScale,
       terminalFontSize: c._settings.terminalFontSize,
       terminalEink: c._settings.terminalEink,
+      keepConnectionAlive: c._settings.keepConnectionAlive,
       onChangeAccent: (next) {
         widget.onChangeAccent(next);
         c._applyState(
@@ -329,6 +331,14 @@ class _CoduxHomePageState extends State<CoduxHomePage>
         final settings = c._settings.copyWith(terminalEink: next);
         c._applyState(() => c._settings = settings);
         unawaited(c._storage.saveSettings(settings));
+      },
+      onChangeKeepConnectionAlive: (next) {
+        final settings = c._settings.copyWith(keepConnectionAlive: next);
+        c._applyState(() => c._settings = settings);
+        unawaited(c._storage.saveSettings(settings));
+        // Turning it off while the service is running must take effect now,
+        // not at the next foreground switch.
+        if (!next) unawaited(c._backgroundKeepAlive.stop());
       },
       onUseDetectedName: () => c._applyState(
         () => c._settingsNameController.text = c._detectedDeviceName,
