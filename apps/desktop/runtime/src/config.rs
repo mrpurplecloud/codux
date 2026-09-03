@@ -134,15 +134,23 @@ impl ConfigStore {
         &self,
         update: impl FnOnce(&mut Map<String, Value>) -> Result<R, String>,
     ) -> Result<R, String> {
-        let result = {
+        let (result, changed) = {
             let _write_guard = self.write_lock.lock();
             let mut next = self.snapshot.read().clone();
             let result = update(&mut next)?;
-            *self.snapshot.write() = next;
-            self.revision.fetch_add(1, Ordering::Release);
-            result
+            let changed = {
+                let current = self.snapshot.read();
+                *current != next
+            };
+            if changed {
+                *self.snapshot.write() = next;
+                self.revision.fetch_add(1, Ordering::Release);
+            }
+            (result, changed)
         };
-        self.schedule_write()?;
+        if changed {
+            self.schedule_write()?;
+        }
         Ok(result)
     }
 
@@ -327,6 +335,17 @@ pub fn settings_file_path(support_dir: impl Into<PathBuf>) -> PathBuf {
 
 pub fn raw_state_snapshot(path: &Path) -> Map<String, Value> {
     ConfigStore::for_file(path.to_path_buf()).snapshot()
+}
+
+pub fn update_raw_state_snapshot<R>(
+    path: &Path,
+    update: impl FnOnce(&mut Map<String, Value>) -> Result<R, String>,
+) -> Result<R, String> {
+    ConfigStore::for_file(path.to_path_buf()).update(|snapshot| {
+        let result = update(snapshot)?;
+        sanitize_state_snapshot(snapshot);
+        Ok(result)
+    })
 }
 
 pub fn save_raw_state_snapshot(path: &Path, snapshot: &Map<String, Value>) -> Result<(), String> {

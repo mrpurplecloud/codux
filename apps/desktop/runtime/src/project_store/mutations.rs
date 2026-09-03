@@ -31,24 +31,6 @@ impl ProjectStore {
         {
             return Err("Worktree belongs to a different project.".to_string());
         }
-        let snapshot = self.snapshot();
-        if !snapshot
-            .projects
-            .iter()
-            .any(|project| project.id == project_id)
-        {
-            return Err("Project not found.".to_string());
-        }
-        let current_worktrees = snapshot
-            .worktrees
-            .iter()
-            .filter(|worktree| worktree.project_id == project_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        let current_worktree_ids = current_worktrees
-            .iter()
-            .map(|worktree| worktree.id.clone())
-            .collect::<HashSet<_>>();
         let next_worktree_ids = worktrees
             .iter()
             .map(|worktree| worktree.id.clone())
@@ -59,70 +41,91 @@ impl ProjectStore {
                 task.worktree_id == project_id || next_worktree_ids.contains(&task.worktree_id)
             })
             .collect::<Vec<_>>();
-        let current_tasks = snapshot
-            .worktree_tasks
-            .iter()
-            .filter(|task| current_worktree_ids.contains(&task.worktree_id))
-            .cloned()
-            .collect::<Vec<_>>();
         let is_valid_selection = |worktree_id: &str| {
             worktree_id == project_id || next_worktree_ids.contains(worktree_id)
         };
-        let selected_worktree_id = preferred_worktree_id
-            .filter(|worktree_id| is_valid_selection(worktree_id))
-            .map(str::to_string)
-            .or_else(|| {
-                snapshot
+        self.update_raw_snapshot(|raw| {
+            let snapshot = serde_json::from_value::<super::AppSnapshot>(Value::Object(raw.clone()))
+                .unwrap_or_default();
+            if !snapshot
+                .projects
+                .iter()
+                .any(|project| project.id == project_id)
+            {
+                return Err("Project not found.".to_string());
+            }
+            let current_worktrees = snapshot
+                .worktrees
+                .iter()
+                .filter(|worktree| worktree.project_id == project_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            let current_worktree_ids = current_worktrees
+                .iter()
+                .map(|worktree| worktree.id.clone())
+                .collect::<HashSet<_>>();
+            let current_tasks = snapshot
+                .worktree_tasks
+                .iter()
+                .filter(|task| current_worktree_ids.contains(&task.worktree_id))
+                .cloned()
+                .collect::<Vec<_>>();
+            let selected_worktree_id = preferred_worktree_id
+                .filter(|worktree_id| is_valid_selection(worktree_id))
+                .map(str::to_string)
+                .or_else(|| {
+                    snapshot
+                        .selected_worktree_id_by_project
+                        .get(project_id)
+                        .filter(|worktree_id| is_valid_selection(worktree_id))
+                        .cloned()
+                })
+                .unwrap_or_else(|| project_id.to_string());
+            if current_worktrees == worktrees
+                && current_tasks == tasks
+                && snapshot
                     .selected_worktree_id_by_project
                     .get(project_id)
-                    .filter(|worktree_id| is_valid_selection(worktree_id))
-                    .cloned()
-            })
-            .unwrap_or_else(|| project_id.to_string());
-        if current_worktrees == worktrees
-            && current_tasks == tasks
-            && snapshot
-                .selected_worktree_id_by_project
-                .get(project_id)
-                .is_some_and(|current| current == &selected_worktree_id)
-        {
-            return Ok(());
-        }
-        let mut raw = self.raw_snapshot();
-        let records = ensure_array(&mut raw, "worktrees")?;
-        records
-            .retain(|record| record.get("projectId").and_then(Value::as_str) != Some(project_id));
-        records.extend(
-            worktrees
+                    .is_some_and(|current| current == &selected_worktree_id)
+            {
+                return Ok(());
+            }
+            let records = ensure_array(raw, "worktrees")?;
+            records.retain(|record| {
+                record.get("projectId").and_then(Value::as_str) != Some(project_id)
+            });
+            records.extend(
+                worktrees
+                    .into_iter()
+                    .map(serde_json::to_value)
+                    .collect::<Result<Vec<_>, serde_json::Error>>()
+                    .map_err(|error| error.to_string())?,
+            );
+            let replaced_task_ids = current_worktree_ids
                 .into_iter()
-                .map(serde_json::to_value)
-                .collect::<Result<Vec<_>, serde_json::Error>>()
-                .map_err(|error| error.to_string())?,
-        );
-        let replaced_task_ids = current_worktree_ids
-            .into_iter()
-            .chain(next_worktree_ids)
-            .collect::<HashSet<_>>();
-        let task_records = ensure_array(&mut raw, "worktreeTasks")?;
-        task_records.retain(|task| {
-            task.get("worktreeId")
-                .and_then(Value::as_str)
-                .is_none_or(|worktree_id| !replaced_task_ids.contains(worktree_id))
-        });
-        task_records.extend(
-            tasks
-                .into_iter()
-                .map(serde_json::to_value)
-                .collect::<Result<Vec<_>, serde_json::Error>>()
-                .map_err(|error| error.to_string())?,
-        );
-        let selected = raw
-            .entry("selectedWorktreeIdByProject".to_string())
-            .or_insert_with(|| Value::Object(Map::new()))
-            .as_object_mut()
-            .ok_or_else(|| "selectedWorktreeIdByProject is not an object.".to_string())?;
-        selected.insert(project_id.to_string(), Value::String(selected_worktree_id));
-        self.save_raw_snapshot(&raw)
+                .chain(next_worktree_ids.iter().cloned())
+                .collect::<HashSet<_>>();
+            let task_records = ensure_array(raw, "worktreeTasks")?;
+            task_records.retain(|task| {
+                task.get("worktreeId")
+                    .and_then(Value::as_str)
+                    .is_none_or(|worktree_id| !replaced_task_ids.contains(worktree_id))
+            });
+            task_records.extend(
+                tasks
+                    .into_iter()
+                    .map(serde_json::to_value)
+                    .collect::<Result<Vec<_>, serde_json::Error>>()
+                    .map_err(|error| error.to_string())?,
+            );
+            let selected = raw
+                .entry("selectedWorktreeIdByProject".to_string())
+                .or_insert_with(|| Value::Object(Map::new()))
+                .as_object_mut()
+                .ok_or_else(|| "selectedWorktreeIdByProject is not an object.".to_string())?;
+            selected.insert(project_id.to_string(), Value::String(selected_worktree_id));
+            Ok(())
+        })
     }
 
     pub fn create_project(
@@ -130,13 +133,16 @@ impl ProjectStore {
         request: ProjectCreateRequest,
     ) -> Result<ProjectListSnapshot, String> {
         let runtime_target = normalized_runtime_target(request.runtime_target)?;
-        let project_id = self.create_or_select_project_with_target(
-            &request.name,
-            &request.path,
-            &runtime_target,
-        )?;
-        let mut raw = self.raw_snapshot();
-        if let Some(project) = project_record_mut(&mut raw, &project_id) {
+        Self::validate_project_environment_variables(&request.environment_variables)?;
+        let project_path = normalized_project_path(&request.path, runtime_target.is_hosted())?;
+        let project_name =
+            normalized_project_name(&request.name, &project_path, runtime_target.is_hosted());
+        self.update_raw_snapshot(|raw| {
+            let project_id =
+                create_or_select_project_in(raw, &project_name, &project_path, &runtime_target)?;
+            let Some(project) = project_record_mut(raw, &project_id) else {
+                return Err("Project not found.".to_string());
+            };
             project.insert(
                 "runtimeTarget".to_string(),
                 runtime_target_value(&runtime_target)?,
@@ -147,11 +153,17 @@ impl ProjectStore {
                 request.badge_text.as_deref(),
                 request.badge_symbol.as_deref(),
                 request.badge_color_hex.as_deref(),
-                request.environment_variables,
+                &request.environment_variables,
             )?;
-            self.save_raw_snapshot(&raw)?;
-        }
+            Ok(project_id)
+        })?;
         Ok(self.list_snapshot())
+    }
+
+    pub(crate) fn validate_project_environment_variables(
+        environment_variables: &BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        environment_variables_value(environment_variables).map(|_| ())
     }
 
     /// Write the controller-only fields of an existing project. Used after a
@@ -165,18 +177,18 @@ impl ProjectStore {
         badge_color_hex: Option<&str>,
         environment_variables: BTreeMap<String, String>,
     ) -> Result<(), String> {
-        let mut raw = self.raw_snapshot();
-        let Some(project) = project_record_mut(&mut raw, project_id) else {
-            return Err("Project not found.".to_string());
-        };
-        insert_local_project_metadata(
-            project,
-            badge_text,
-            badge_symbol,
-            badge_color_hex,
-            environment_variables,
-        )?;
-        self.save_raw_snapshot(&raw)
+        self.update_raw_snapshot(|raw| {
+            let Some(project) = project_record_mut(raw, project_id) else {
+                return Err("Project not found.".to_string());
+            };
+            insert_local_project_metadata(
+                project,
+                badge_text,
+                badge_symbol,
+                badge_color_hex,
+                &environment_variables,
+            )
+        })
     }
 
     pub fn update_project_from_request(
@@ -187,15 +199,15 @@ impl ProjectStore {
         let project_path = normalized_project_path(&request.path, runtime_target.is_hosted())?;
         let project_name =
             normalized_project_name(&request.name, &project_path, runtime_target.is_hosted());
+        Self::validate_project_environment_variables(&request.environment_variables)?;
         // Moving a record to another runtime target ends its projection of the
         // host it came from, so it must stop carrying that host's project id:
         // the id belongs to a catalog this record no longer answers to.
         let projected_device = self
             .remote_catalog_projection(&request.project_id)
             .map(|(device_id, _)| device_id);
-        let mut raw = self.raw_snapshot();
-        {
-            let projects = ensure_array(&mut raw, "projects")?;
+        self.update_raw_snapshot(|raw| {
+            let projects = ensure_array(raw, "projects")?;
             let index = project_index(projects, &request.project_id)
                 .ok_or_else(|| "Project not found.".to_string())?;
             let Some(project) = projects.get_mut(index).and_then(Value::as_object_mut) else {
@@ -224,16 +236,16 @@ impl ProjectStore {
             );
             project.insert(
                 "environmentVariables".to_string(),
-                environment_variables_value(request.environment_variables)?,
+                environment_variables_value(&request.environment_variables)?,
             );
             project.remove("hostDeviceId");
-        }
-        update_default_worktree_record(&mut raw, &request.project_id, &project_name, &project_path);
-        raw.insert(
-            "selectedProjectId".to_string(),
-            Value::String(request.project_id.clone()),
-        );
-        self.save_raw_snapshot(&raw)?;
+            update_default_worktree_record(raw, &request.project_id, &project_name, &project_path);
+            raw.insert(
+                "selectedProjectId".to_string(),
+                Value::String(request.project_id.clone()),
+            );
+            Ok(())
+        })?;
         Ok(self.list_snapshot())
     }
 
@@ -241,121 +253,118 @@ impl ProjectStore {
         &self,
         request: ProjectReorderRequest,
     ) -> Result<ProjectListSnapshot, String> {
-        let mut raw = self.raw_snapshot();
-        let projects = ensure_array(&mut raw, "projects")?;
-        let ordered_project_ids = request.project_ids;
-        let project_ids = ordered_project_ids.iter().cloned().collect::<HashSet<_>>();
-        if ordered_project_ids.len() != projects.len()
-            || project_ids.len() != projects.len()
-            || projects.iter().any(|project| {
-                project
-                    .as_object()
-                    .and_then(|project| project.get("id"))
-                    .and_then(Value::as_str)
-                    .map(|id| !project_ids.contains(id))
-                    .unwrap_or(true)
-            })
-        {
-            return Err("Project order does not match current projects.".to_string());
-        }
-        let mut by_id = projects
-            .drain(..)
-            .filter_map(|project| {
-                let id = project
-                    .as_object()
-                    .and_then(|project| project.get("id"))
-                    .and_then(Value::as_str)?
-                    .to_string();
-                Some((id, project))
-            })
-            .collect::<HashMap<_, _>>();
-        projects.extend(
-            ordered_project_ids
-                .iter()
-                .filter_map(|id| by_id.remove(id))
-                .collect::<Vec<_>>(),
-        );
-        self.save_raw_snapshot(&raw)?;
+        self.update_raw_snapshot(|raw| {
+            let projects = ensure_array(raw, "projects")?;
+            let ordered_project_ids = request.project_ids;
+            let project_ids = ordered_project_ids.iter().cloned().collect::<HashSet<_>>();
+            if ordered_project_ids.len() != projects.len()
+                || project_ids.len() != projects.len()
+                || projects.iter().any(|project| {
+                    project
+                        .as_object()
+                        .and_then(|project| project.get("id"))
+                        .and_then(Value::as_str)
+                        .map(|id| !project_ids.contains(id))
+                        .unwrap_or(true)
+                })
+            {
+                return Err("Project order does not match current projects.".to_string());
+            }
+            let mut by_id = projects
+                .drain(..)
+                .filter_map(|project| {
+                    let id = project
+                        .as_object()
+                        .and_then(|project| project.get("id"))
+                        .and_then(Value::as_str)?
+                        .to_string();
+                    Some((id, project))
+                })
+                .collect::<HashMap<_, _>>();
+            projects.extend(
+                ordered_project_ids
+                    .iter()
+                    .filter_map(|id| by_id.remove(id))
+                    .collect::<Vec<_>>(),
+            );
+            Ok(())
+        })?;
         Ok(self.list_snapshot())
     }
 
     pub fn select_worktree(&self, request: ProjectSelectWorktreeRequest) -> Result<(), String> {
-        let snapshot = self.snapshot();
-        if !snapshot
-            .projects
-            .iter()
-            .any(|project| project.id == request.project_id)
-        {
-            return Err("Project not found.".to_string());
-        }
-        if request.worktree_id != request.project_id {
+        self.update_raw_snapshot(|raw| {
+            let snapshot = serde_json::from_value::<super::AppSnapshot>(Value::Object(raw.clone()))
+                .unwrap_or_default();
             let project = snapshot
                 .projects
                 .iter()
                 .find(|project| project.id == request.project_id)
                 .ok_or_else(|| "Project not found.".to_string())?;
-            let is_runnable = selected_runtime_worktree_id(
-                &request.project_id,
-                Some(&request.worktree_id),
-                super::snapshot::project_runtime_worktrees(&snapshot, project),
-            )
-            .as_deref()
-                == Some(request.worktree_id.as_str());
-            if !is_runnable {
-                return Err("Worktree not found.".to_string());
+            if request.worktree_id != request.project_id {
+                let is_runnable = selected_runtime_worktree_id(
+                    &request.project_id,
+                    Some(&request.worktree_id),
+                    super::snapshot::project_runtime_worktrees(&snapshot, project),
+                )
+                .as_deref()
+                    == Some(request.worktree_id.as_str());
+                if !is_runnable {
+                    return Err("Worktree not found.".to_string());
+                }
             }
-        }
-        let mut raw = self.raw_snapshot();
-        if !matches!(
-            raw.get("selectedWorktreeIdByProject"),
-            Some(Value::Object(_))
-        ) {
-            raw.insert(
-                "selectedWorktreeIdByProject".to_string(),
-                Value::Object(Map::new()),
-            );
-        }
-        raw.get_mut("selectedWorktreeIdByProject")
-            .and_then(Value::as_object_mut)
-            .ok_or_else(|| "selectedWorktreeIdByProject is not an object.".to_string())?
-            .insert(request.project_id, Value::String(request.worktree_id));
-        self.save_raw_snapshot(&raw)
+            if !matches!(
+                raw.get("selectedWorktreeIdByProject"),
+                Some(Value::Object(_))
+            ) {
+                raw.insert(
+                    "selectedWorktreeIdByProject".to_string(),
+                    Value::Object(Map::new()),
+                );
+            }
+            raw.get_mut("selectedWorktreeIdByProject")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| "selectedWorktreeIdByProject is not an object.".to_string())?
+                .insert(request.project_id, Value::String(request.worktree_id));
+            Ok(())
+        })
     }
 
     pub fn set_default_push_remote(
         &self,
         request: ProjectDefaultPushRemoteRequest,
     ) -> Result<ProjectListSnapshot, String> {
-        let mut raw = self.raw_snapshot();
-        let projects = ensure_array(&mut raw, "projects")?;
-        let index = project_index(projects, &request.project_id)
-            .ok_or_else(|| "Project not found.".to_string())?;
-        let Some(project) = projects.get_mut(index).and_then(Value::as_object_mut) else {
-            return Err("Project record is invalid.".to_string());
-        };
-        project.insert(
-            "gitDefaultPushRemoteName".to_string(),
-            optional_string_value(request.remote_name.as_deref()),
-        );
-        self.save_raw_snapshot(&raw)?;
+        self.update_raw_snapshot(|raw| {
+            let projects = ensure_array(raw, "projects")?;
+            let index = project_index(projects, &request.project_id)
+                .ok_or_else(|| "Project not found.".to_string())?;
+            let Some(project) = projects.get_mut(index).and_then(Value::as_object_mut) else {
+                return Err("Project record is invalid.".to_string());
+            };
+            project.insert(
+                "gitDefaultPushRemoteName".to_string(),
+                optional_string_value(request.remote_name.as_deref()),
+            );
+            Ok(())
+        })?;
         Ok(self.list_snapshot())
     }
 
     pub fn select_project(&self, project_id: &str) -> Result<(), String> {
-        let snapshot = self.snapshot();
-        if !snapshot
-            .projects
-            .iter()
-            .any(|project| project.id == project_id)
-        {
-            return Err("Project does not exist in state.json.".to_string());
-        }
-        let mut raw = self.raw_snapshot();
-        raw.insert(
-            "selectedProjectId".to_string(),
-            Value::String(project_id.to_string()),
-        );
-        self.save_raw_snapshot(&raw)
+        self.update_raw_snapshot(|raw| {
+            let exists = raw
+                .get("projects")
+                .and_then(Value::as_array)
+                .is_some_and(|projects| project_index(projects, project_id).is_some());
+            if !exists {
+                return Err("Project does not exist in state.json.".to_string());
+            }
+            raw.insert(
+                "selectedProjectId".to_string(),
+                Value::String(project_id.to_string()),
+            );
+            Ok(())
+        })
     }
 
     pub fn create_or_select_project(&self, name: &str, path: &str) -> Result<String, String> {
@@ -376,37 +385,9 @@ impl ProjectStore {
     ) -> Result<String, String> {
         let project_path = normalized_project_path(path, runtime_target.is_hosted())?;
         let project_name = normalized_project_name(name, &project_path, runtime_target.is_hosted());
-        let mut raw = self.raw_snapshot();
-        let projects = ensure_array(&mut raw, "projects")?;
-
-        if let Some(existing_id) = projects.iter().find_map(|project| {
-            let project = serde_json::from_value::<ProjectRecord>(project.clone()).ok()?;
-            (workspace_paths_equal(&project.path, &project_path, &project.runtime_target)
-                && project.runtime_target == *runtime_target)
-                .then_some(project.id)
-        }) {
-            raw.insert(
-                "selectedProjectId".to_string(),
-                Value::String(existing_id.clone()),
-            );
-            self.save_raw_snapshot(&raw)?;
-            return Ok(existing_id);
-        }
-
-        let target_identity = runtime_target.identity();
-        let project_id = project_uuid(&project_name, &project_path, target_identity.as_deref());
-        let mut record = project_record(&project_id, &project_name, &project_path);
-        record.insert(
-            "runtimeTarget".to_string(),
-            runtime_target_value(runtime_target)?,
-        );
-        projects.push(Value::Object(record));
-        raw.insert(
-            "selectedProjectId".to_string(),
-            Value::String(project_id.clone()),
-        );
-        self.save_raw_snapshot(&raw)?;
-        Ok(project_id)
+        self.update_raw_snapshot(|raw| {
+            create_or_select_project_in(raw, &project_name, &project_path, runtime_target)
+        })
     }
 
     pub fn move_project(
@@ -414,69 +395,70 @@ impl ProjectStore {
         project_id: &str,
         direction: ProjectMoveDirection,
     ) -> Result<(), String> {
-        let mut raw = self.raw_snapshot();
-        let projects = ensure_array(&mut raw, "projects")?;
-        let Some(index) = project_index(projects, project_id) else {
-            return Err("Project not found.".to_string());
-        };
-        let next_index = match direction {
-            ProjectMoveDirection::Up => index.checked_sub(1),
-            ProjectMoveDirection::Down => {
-                if index + 1 < projects.len() {
-                    Some(index + 1)
-                } else {
-                    None
-                }
-            }
-        };
-        let Some(next_index) = next_index else {
-            return Ok(());
-        };
-        projects.swap(index, next_index);
-        raw.insert(
-            "selectedProjectId".to_string(),
-            Value::String(project_id.to_string()),
-        );
-        self.save_raw_snapshot(&raw)
-    }
-
-    pub fn close_project(&self, project_id: &str) -> Result<Option<String>, String> {
-        let mut raw = self.raw_snapshot();
-        let selected_project_id = raw
-            .get("selectedProjectId")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let next_project_id = {
-            let projects = ensure_array(&mut raw, "projects")?;
+        self.update_raw_snapshot(|raw| {
+            let projects = ensure_array(raw, "projects")?;
             let Some(index) = project_index(projects, project_id) else {
                 return Err("Project not found.".to_string());
             };
-            projects.remove(index);
-            if selected_project_id.as_deref() == Some(project_id) {
-                select_project_after_removal(projects, index)
-            } else {
-                selected_project_id.filter(|selected| project_index(projects, selected).is_some())
-            }
-        };
-        prune_project_state(&mut raw, project_id);
-        if let Some(next_project_id) = &next_project_id {
+            let next_index = match direction {
+                ProjectMoveDirection::Up => index.checked_sub(1),
+                ProjectMoveDirection::Down => {
+                    if index + 1 < projects.len() {
+                        Some(index + 1)
+                    } else {
+                        None
+                    }
+                }
+            };
+            let Some(next_index) = next_index else {
+                return Ok(());
+            };
+            projects.swap(index, next_index);
             raw.insert(
                 "selectedProjectId".to_string(),
-                Value::String(next_project_id.clone()),
+                Value::String(project_id.to_string()),
             );
-        } else {
-            raw.remove("selectedProjectId");
-        }
-        self.save_raw_snapshot(&raw)?;
-        Ok(next_project_id)
+            Ok(())
+        })
+    }
+
+    pub fn close_project(&self, project_id: &str) -> Result<Option<String>, String> {
+        self.update_raw_snapshot(|raw| {
+            let selected_project_id = raw
+                .get("selectedProjectId")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let next_project_id = {
+                let projects = ensure_array(raw, "projects")?;
+                let Some(index) = project_index(projects, project_id) else {
+                    return Err("Project not found.".to_string());
+                };
+                projects.remove(index);
+                if selected_project_id.as_deref() == Some(project_id) {
+                    select_project_after_removal(projects, index)
+                } else {
+                    selected_project_id
+                        .filter(|selected| project_index(projects, selected).is_some())
+                }
+            };
+            prune_project_state(raw, project_id);
+            if let Some(next_project_id) = &next_project_id {
+                raw.insert(
+                    "selectedProjectId".to_string(),
+                    Value::String(next_project_id.clone()),
+                );
+            } else {
+                raw.remove("selectedProjectId");
+            }
+            Ok(next_project_id)
+        })
     }
 
     pub fn update_project(&self, project_id: &str, name: &str, path: &str) -> Result<(), String> {
         let project_path = normalized_existing_path(path)?;
         let project_name = normalized_project_name(name, &project_path, false);
-        let mut raw = self.raw_snapshot();
-        {
-            let projects = ensure_array(&mut raw, "projects")?;
+        self.update_raw_snapshot(|raw| {
+            let projects = ensure_array(raw, "projects")?;
             let index = project_index(projects, project_id)
                 .ok_or_else(|| "Project not found.".to_string())?;
             let Some(project) = projects.get_mut(index).and_then(Value::as_object_mut) else {
@@ -484,13 +466,13 @@ impl ProjectStore {
             };
             project.insert("name".to_string(), Value::String(project_name.clone()));
             project.insert("path".to_string(), Value::String(project_path.clone()));
-        }
-        update_default_worktree_record(&mut raw, project_id, &project_name, &project_path);
-        raw.insert(
-            "selectedProjectId".to_string(),
-            Value::String(project_id.to_string()),
-        );
-        self.save_raw_snapshot(&raw)
+            update_default_worktree_record(raw, project_id, &project_name, &project_path);
+            raw.insert(
+                "selectedProjectId".to_string(),
+                Value::String(project_id.to_string()),
+            );
+            Ok(())
+        })
     }
 }
 
@@ -533,12 +515,47 @@ fn project_record_mut<'a>(
         })
 }
 
+fn create_or_select_project_in(
+    raw: &mut Map<String, Value>,
+    project_name: &str,
+    project_path: &str,
+    runtime_target: &ProjectRuntimeTarget,
+) -> Result<String, String> {
+    let projects = ensure_array(raw, "projects")?;
+    if let Some(existing_id) = projects.iter().find_map(|project| {
+        let project = serde_json::from_value::<ProjectRecord>(project.clone()).ok()?;
+        (workspace_paths_equal(&project.path, project_path, &project.runtime_target)
+            && project.runtime_target == *runtime_target)
+            .then_some(project.id)
+    }) {
+        raw.insert(
+            "selectedProjectId".to_string(),
+            Value::String(existing_id.clone()),
+        );
+        return Ok(existing_id);
+    }
+
+    let target_identity = runtime_target.identity();
+    let project_id = project_uuid(project_name, project_path, target_identity.as_deref());
+    let mut record = project_record(&project_id, project_name, project_path);
+    record.insert(
+        "runtimeTarget".to_string(),
+        runtime_target_value(runtime_target)?,
+    );
+    projects.push(Value::Object(record));
+    raw.insert(
+        "selectedProjectId".to_string(),
+        Value::String(project_id.clone()),
+    );
+    Ok(project_id)
+}
+
 fn insert_local_project_metadata(
     project: &mut Map<String, Value>,
     badge_text: Option<&str>,
     badge_symbol: Option<&str>,
     badge_color_hex: Option<&str>,
-    environment_variables: BTreeMap<String, String>,
+    environment_variables: &BTreeMap<String, String>,
 ) -> Result<(), String> {
     project.insert("badgeText".to_string(), optional_string_value(badge_text));
     project.insert(
@@ -561,7 +578,7 @@ fn runtime_target_value(runtime_target: &ProjectRuntimeTarget) -> Result<Value, 
         .map_err(|error| format!("Failed to serialize project runtime target: {error}"))
 }
 
-fn environment_variables_value(variables: BTreeMap<String, String>) -> Result<Value, String> {
+fn environment_variables_value(variables: &BTreeMap<String, String>) -> Result<Value, String> {
     let mut normalized = BTreeMap::new();
     for (key, value) in variables {
         let key = key.trim();
@@ -573,7 +590,7 @@ fn environment_variables_value(variables: BTreeMap<String, String>) -> Result<Va
                 "Environment variable {key} is reserved for Codux runtime."
             ));
         }
-        normalized.insert(key.to_string(), value);
+        normalized.insert(key.to_string(), value.clone());
     }
     serde_json::to_value(normalized)
         .map_err(|error| format!("Failed to serialize project environment variables: {error}"))

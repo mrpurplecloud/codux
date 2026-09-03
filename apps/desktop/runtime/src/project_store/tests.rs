@@ -188,6 +188,13 @@ fn project_environment_variables_are_persisted_and_summarized() {
         })
         .expect_err("reserved environment key should be rejected");
     assert!(error.contains("CODUX_PROJECT_ID"));
+    assert!(
+        ProjectStore::new(support_dir.clone())
+            .list_snapshot()
+            .projects
+            .is_empty(),
+        "validation failure must not leave a partial project"
+    );
 
     let mut variables = std::collections::BTreeMap::new();
     variables.insert(" API_BASE ".to_string(), "https://example.test".to_string());
@@ -701,6 +708,59 @@ fn hosted_worktree_sync_preserves_other_projects_and_allows_selection() {
     fs::remove_dir_all(dir).ok();
 }
 
+#[test]
+fn unchanged_worktree_sync_preserves_unknown_fields() {
+    let dir = temp_dir("project-store-worktree-forward-compat");
+    let support_dir = dir.join("support");
+    fs::create_dir_all(&support_dir).unwrap();
+    let worktree = ProjectWorktreeRecord {
+        id: "worktree-1".to_string(),
+        project_id: "project-1".to_string(),
+        name: "Worktree".to_string(),
+        branch: "feature".to_string(),
+        path: "/tmp/worktree-1".to_string(),
+        status: "active".to_string(),
+        is_default: false,
+        created_at: 1,
+        updated_at: 2,
+    };
+    let task = WorktreeTaskRecord {
+        worktree_id: "worktree-1".to_string(),
+        title: "Task".to_string(),
+        base_branch: "main".to_string(),
+        base_commit: None,
+        status: "active".to_string(),
+        created_at: 1,
+        updated_at: 2,
+        started_at: None,
+        completed_at: None,
+    };
+    let mut worktree_value = serde_json::to_value(&worktree).unwrap();
+    worktree_value["futureField"] = json!("keep");
+    let mut task_value = serde_json::to_value(&task).unwrap();
+    task_value["futureField"] = json!("keep");
+    fs::write(
+        support_dir.join("state.json"),
+        json!({
+            "projects": [{ "id": "project-1", "name": "Project", "path": "/tmp/project-1" }],
+            "worktrees": [worktree_value],
+            "worktreeTasks": [task_value],
+            "selectedWorktreeIdByProject": { "project-1": "worktree-1" }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    ProjectStore::new(support_dir.clone())
+        .replace_project_worktree_state("project-1", vec![worktree], vec![task], Some("worktree-1"))
+        .unwrap();
+
+    let state = state_value(&support_dir);
+    assert_eq!(state["worktrees"][0]["futureField"], "keep");
+    assert_eq!(state["worktreeTasks"][0]["futureField"], "keep");
+    fs::remove_dir_all(dir).ok();
+}
+
 fn temp_dir(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -761,6 +821,47 @@ fn remote_baseline_creates_projections_scoped_by_device() {
             device_id: "device-1".to_string()
         }
     );
+
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn remote_reconciliation_keeps_a_concurrent_state_update() {
+    let support_dir = catalog_support_dir(
+        "remote-catalog-concurrent-update",
+        json!({ "projects": [], "selectedProjectId": null }),
+    );
+    let state_file = support_dir.join("state.json");
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+    let writer = std::thread::spawn(move || {
+        crate::config::update_raw_state_snapshot(&state_file, |raw| {
+            raw.insert("concurrentField".to_string(), json!("kept"));
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(())
+        })
+        .unwrap();
+    });
+    entered_rx.recv().unwrap();
+
+    let reconcile_store = ProjectStore::new(support_dir.clone());
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+    let reconciler = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        reconcile_store
+            .reconcile_remote_projects("device-1", &[catalog_item("p-1", "Alpha", "/srv/alpha")])
+            .unwrap();
+    });
+    started_rx.recv().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    release_tx.send(()).unwrap();
+    writer.join().unwrap();
+    reconciler.join().unwrap();
+
+    let state = state_value(&support_dir);
+    assert_eq!(state["concurrentField"], "kept");
+    assert_eq!(state["projects"].as_array().unwrap().len(), 1);
 
     fs::remove_dir_all(support_dir).ok();
 }
@@ -860,7 +961,7 @@ fn remote_reconciliation_prunes_only_managed_projections() {
     );
     let store = ProjectStore::new(support_dir.clone());
 
-    store.reconcile_remote_projects("device-1", &[]).unwrap();
+    let change = store.reconcile_remote_projects("device-1", &[]).unwrap();
 
     let snapshot = store.snapshot();
     let ids = snapshot
@@ -880,6 +981,8 @@ fn remote_reconciliation_prunes_only_managed_projections() {
         snapshot.selected_project_id.as_deref(),
         Some("other-device")
     );
+    assert_eq!(change.removed_project_ids, ["managed"]);
+    assert_eq!(change.removed_workspace_ids, ["managed", "w1"]);
 
     fs::remove_dir_all(support_dir).ok();
 }
@@ -993,7 +1096,7 @@ fn attaching_host_ids_keeps_desktop_ids_and_folds_a_duplicated_path() {
     );
     let store = ProjectStore::new(support_dir.clone());
 
-    store
+    let change = store
         .attach_host_project_ids(
             "device-1",
             &[
@@ -1022,6 +1125,8 @@ fn attaching_host_ids_keeps_desktop_ids_and_folds_a_duplicated_path() {
     assert!(snapshot.worktrees.is_empty());
     assert!(snapshot.worktree_tasks.is_empty());
     assert_eq!(snapshot.selected_project_id.as_deref(), Some("legacy"));
+    assert_eq!(change.removed_project_ids, ["duplicate"]);
+    assert_eq!(change.removed_workspace_ids, ["duplicate", "w1"]);
 
     fs::remove_dir_all(support_dir).ok();
 }

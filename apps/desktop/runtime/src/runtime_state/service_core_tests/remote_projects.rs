@@ -18,6 +18,7 @@ struct FakeHostCatalog {
     /// Every envelope a controller sent, for asserting outbound identity.
     sent: Vec<serde_json::Value>,
     reject_adds: bool,
+    fail_host_info_send: bool,
     shares_catalog: bool,
 }
 
@@ -83,6 +84,12 @@ impl codux_remote_transport::RemoteTransport for FakeHostTransport {
         let request_id = envelope.get("requestId").cloned();
         let payload = envelope.get("payload").cloned().unwrap_or(json!({}));
         let mut catalog = self.catalog.lock().unwrap();
+        if catalog.fail_host_info_send
+            && envelope.get("type").and_then(serde_json::Value::as_str)
+                == Some(codux_protocol::REMOTE_HOST_INFO)
+        {
+            return false;
+        }
         catalog.sent.push(envelope.clone());
         let route = |kind: &str, payload: serde_json::Value, request_id: Option<&serde_json::Value>| {
             let mut message = json!({ "type": kind, "payload": payload });
@@ -232,6 +239,16 @@ fn payload_field(payload: &serde_json::Value, key: &str) -> String {
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_string()
+}
+
+fn sent_count(catalog: &Arc<Mutex<FakeHostCatalog>>, kind: &str) -> usize {
+    catalog
+        .lock()
+        .unwrap()
+        .sent
+        .iter()
+        .filter(|envelope| envelope.get("type").and_then(serde_json::Value::as_str) == Some(kind))
+        .count()
 }
 
 fn catalog_project(
@@ -417,6 +434,14 @@ fn host_baseline_creates_projections_with_desktop_ids() {
             device_id: "device-1".to_string()
         }
     );
+    let activity = service.project_activity_snapshot();
+    assert_eq!(activity.active_project_id.as_deref(), Some(project.id.as_str()));
+    assert!(
+        activity
+            .tracked_projects
+            .iter()
+            .any(|tracked| tracked.id == project.id)
+    );
 
     drop(service);
     fs::remove_dir_all(support_dir).ok();
@@ -505,6 +530,88 @@ fn remote_add_before_the_capability_probe_answers_still_commits_on_the_host() {
 }
 
 #[test]
+fn early_same_path_add_waits_for_legacy_identity_migration() {
+    let (service, support_dir, catalog) =
+        remote_project_service("remote-project-add-early-legacy", legacy_state());
+
+    service
+        .project_create(ProjectCreateRequest {
+            name: "Retry".to_string(),
+            path: "/srv/alpha".to_string(),
+            badge_text: None,
+            badge_symbol: None,
+            badge_color_hex: None,
+            environment_variables: Default::default(),
+            runtime_target: ProjectRuntimeTarget::Remote {
+                device_id: "device-1".to_string(),
+            },
+        })
+        .expect("same-path add remains idempotent during migration");
+    wait_until(&service, "the early legacy migration", || {
+        migration_done(&support_dir)
+    });
+
+    assert_eq!(
+        catalog.lock().unwrap().projects,
+        [catalog_project("p-host-1", "Alpha", "/srv/alpha")]
+    );
+    let projects = service.project_list().projects;
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].id, "legacy-desktop-id");
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn early_legacy_edit_commits_through_the_catalog_owner() {
+    let (service, support_dir, catalog) =
+        remote_project_service("remote-project-edit-early-legacy", legacy_state());
+
+    service
+        .project_update(edit_request(
+            "legacy-desktop-id",
+            "Renamed",
+            "/srv/renamed",
+        ))
+        .expect("legacy edit waits for migration and commits on the host");
+
+    assert!(migration_done(&support_dir));
+    assert_eq!(
+        catalog.lock().unwrap().projects,
+        [catalog_project("p-host-1", "Renamed", "/srv/renamed")]
+    );
+    assert_eq!(service.project_list().projects[0].id, "legacy-desktop-id");
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn early_legacy_close_commits_through_the_catalog_owner() {
+    let (service, support_dir, catalog) =
+        remote_project_service("remote-project-close-early-legacy", legacy_state());
+
+    service
+        .project_close(crate::project_store::ProjectCloseRequest {
+            project_id: "legacy-desktop-id".to_string(),
+        })
+        .expect("legacy close waits for migration and commits on the host");
+
+    assert!(migration_done(&support_dir));
+    let host = catalog.lock().unwrap();
+    assert!(host.projects.is_empty());
+    assert!(host.sent.iter().any(|envelope| {
+        envelope.get("type").and_then(serde_json::Value::as_str)
+            == Some(codux_protocol::REMOTE_PROJECT_REMOVE)
+    }));
+    drop(host);
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
 fn rejected_remote_add_leaves_the_local_store_unchanged() {
     let (service, support_dir, catalog) =
         remote_project_service("remote-project-add-rejected", empty_state());
@@ -526,6 +633,36 @@ fn rejected_remote_add_leaves_the_local_store_unchanged() {
         .expect_err("host rejects the add");
 
     assert_eq!(error, "Project path is required.");
+    assert!(service.project_list().projects.is_empty());
+    assert!(catalog.lock().unwrap().projects.is_empty());
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn invalid_local_metadata_never_reaches_remote_add() {
+    let (service, support_dir, catalog) =
+        remote_project_service("remote-project-add-invalid-metadata", empty_state());
+    wait_for_catalog_probe(&service, "device-1");
+
+    let error = service
+        .project_create(ProjectCreateRequest {
+            name: "Alpha".to_string(),
+            path: "/srv/alpha".to_string(),
+            badge_text: None,
+            badge_symbol: None,
+            badge_color_hex: None,
+            environment_variables: [("CODUX_PROJECT_ID".to_string(), "reserved".to_string())]
+                .into_iter()
+                .collect(),
+            runtime_target: ProjectRuntimeTarget::Remote {
+                device_id: "device-1".to_string(),
+            },
+        })
+        .expect_err("invalid metadata must fail before the host commit");
+
+    assert!(error.contains("CODUX_PROJECT_ID"));
     assert!(service.project_list().projects.is_empty());
     assert!(catalog.lock().unwrap().projects.is_empty());
 
@@ -658,6 +795,89 @@ fn desktop_edit_commits_on_the_host_and_reaches_the_other_device() {
 }
 
 #[test]
+fn remote_edit_and_close_resolve_catalog_owner_once_each() {
+    let (service, support_dir, catalog, project_id) =
+        one_projection("remote-project-owner-lookup");
+
+    let before_edit = sent_count(&catalog, codux_protocol::REMOTE_HOST_INFO);
+    service
+        .project_update(edit_request(&project_id, "Renamed", "/srv/renamed"))
+        .expect("remote edit");
+    assert_eq!(
+        sent_count(&catalog, codux_protocol::REMOTE_HOST_INFO),
+        before_edit + 1
+    );
+
+    let before_close = sent_count(&catalog, codux_protocol::REMOTE_HOST_INFO);
+    service
+        .project_close(crate::project_store::ProjectCloseRequest { project_id })
+        .expect("remote close");
+    assert_eq!(
+        sent_count(&catalog, codux_protocol::REMOTE_HOST_INFO),
+        before_close + 1
+    );
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn same_device_non_catalog_edit_resolves_owner_once() {
+    let (service, support_dir, catalog) = remote_project_service_for_app(
+        "remote-project-non-catalog-owner-lookup",
+        legacy_state(),
+        "Codux",
+    );
+    wait_for_catalog_probe(&service, "device-1");
+
+    let before_edit = sent_count(&catalog, codux_protocol::REMOTE_HOST_INFO);
+    let snapshot = service
+        .project_update(edit_request(
+            "legacy-desktop-id",
+            "Renamed",
+            "/srv/renamed",
+        ))
+        .expect("non-catalog remote edit");
+
+    assert_eq!(
+        sent_count(&catalog, codux_protocol::REMOTE_HOST_INFO),
+        before_edit + 1
+    );
+    assert_eq!(snapshot.projects[0].name, "Renamed");
+    assert_eq!(snapshot.projects[0].path, "/srv/renamed");
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn invalid_local_metadata_never_reaches_remote_edit() {
+    let (service, support_dir, catalog, project_id) =
+        one_projection("remote-project-edit-invalid-metadata");
+    let mut request = edit_request(&project_id, "Renamed", "/srv/renamed");
+    request.environment_variables =
+        [("CODUX_PROJECT_ID".to_string(), "reserved".to_string())]
+            .into_iter()
+            .collect();
+
+    let error = service
+        .project_update(request)
+        .expect_err("invalid metadata must fail before the host commit");
+
+    assert!(error.contains("CODUX_PROJECT_ID"));
+    assert_eq!(
+        catalog.lock().unwrap().projects,
+        [catalog_project("p-host-1", "Alpha", "/srv/alpha")]
+    );
+    let project = service.project_list().projects.remove(0);
+    assert_eq!(project.name, "Alpha");
+    assert_eq!(project.path, "/srv/alpha");
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
 fn desktop_remove_commits_on_the_host_and_reaches_the_other_device() {
     let (service, support_dir, other, other_support_dir) =
         two_controllers_on_one_project("remote-project-remove");
@@ -707,6 +927,47 @@ fn a_mutation_from_another_client_reaches_the_desktop_projection() {
 }
 
 #[test]
+fn an_inbound_rename_refreshes_non_selected_project_activity() {
+    let (service, support_dir, catalog) =
+        remote_project_service("remote-project-inbound-activity", empty_state());
+    {
+        let mut host = catalog.lock().unwrap();
+        host.projects
+            .push(catalog_project("p-host-1", "Alpha", "/srv/alpha"));
+        host.projects
+            .push(catalog_project("p-host-2", "Beta", "/srv/beta"));
+    }
+    wait_for_projects(&service, 2);
+    let alpha = crate::project_store::remote_projection_id("device-1", "p-host-1");
+    let beta = crate::project_store::remote_projection_id("device-1", "p-host-2");
+    service.select_project(&alpha).unwrap();
+
+    catalog.lock().unwrap().mutate_elsewhere(|projects| {
+        projects[1] = catalog_project("p-host-2", "Renamed beta", "/srv/renamed-beta");
+    });
+    wait_until(&service, "the renamed non-selected projection", || {
+        service
+            .project_list()
+            .projects
+            .iter()
+            .any(|project| project.id == beta && project.name == "Renamed beta")
+    });
+
+    let activity = service.project_activity_snapshot();
+    let tracked = activity
+        .tracked_projects
+        .iter()
+        .find(|project| project.id == beta)
+        .expect("renamed project remains tracked");
+    assert_eq!(tracked.name, "Renamed beta");
+    assert_eq!(tracked.path, "/srv/renamed-beta");
+    assert_eq!(activity.active_project_id.as_deref(), Some(alpha.as_str()));
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
 fn an_edit_onto_a_path_another_entry_owns_changes_nothing() {
     let (service, support_dir, catalog, project_id) =
         one_projection("remote-project-edit-rejected");
@@ -741,14 +1002,14 @@ fn an_edit_onto_a_path_another_entry_owns_changes_nothing() {
 }
 
 #[test]
-fn retargeting_a_projection_leaves_the_catalog_and_takes_the_host_id_with_it() {
+fn retargeting_a_projection_creates_an_independent_project() {
     let (service, support_dir, catalog, project_id) = one_projection("remote-project-retarget");
     let local_path = support_dir.join("alpha");
     fs::create_dir_all(&local_path).expect("local project dir");
 
-    // Moving the record to another runtime target is not a catalog edit: the
-    // record stops projecting this host, so it must stop carrying its id too.
-    service
+    // Changing owners cannot rewrite this host's projection in place. Keep it,
+    // and select a separate project owned by the new target.
+    let snapshot = service
         .project_update(ProjectUpdateRequest {
             project_id: project_id.clone(),
             name: "Alpha".to_string(),
@@ -761,11 +1022,142 @@ fn retargeting_a_projection_leaves_the_catalog_and_takes_the_host_id_with_it() {
         })
         .expect("retarget to local");
 
-    assert!(host_project_id_of(&support_dir, &project_id).is_none());
+    assert_eq!(
+        host_project_id_of(&support_dir, &project_id).as_deref(),
+        Some("p-host-1")
+    );
     assert_eq!(
         catalog.lock().unwrap().projects,
         [catalog_project("p-host-1", "Alpha", "/srv/alpha")],
         "the host's catalog membership is not this desktop's to drop"
+    );
+    let projects = snapshot.projects;
+    assert_eq!(projects.len(), 2, "the host projection remains visible");
+    assert_ne!(projects[0].id, projects[1].id);
+    assert_ne!(
+        snapshot.selected_project_id.as_deref(),
+        Some(project_id.as_str())
+    );
+
+    // A later authoritative snapshot must restore the host projection without
+    // changing either stable id.
+    let ids = projects
+        .iter()
+        .map(|project| project.id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    catalog.lock().unwrap().mutate_elsewhere(|_| {});
+    wait_for_projects(&service, 2);
+    let projects = service.project_list().projects;
+    assert_eq!(projects.len(), 2);
+    assert_eq!(
+        projects
+            .iter()
+            .map(|project| project.id.clone())
+            .collect::<std::collections::HashSet<_>>(),
+        ids
+    );
+    assert!(
+        projects
+            .iter()
+            .any(|project| project.runtime_target == ProjectRuntimeTarget::Local)
+    );
+    assert!(projects.iter().any(|project| {
+        project.runtime_target
+            == (ProjectRuntimeTarget::Remote {
+                device_id: "device-1".to_string(),
+            })
+    }));
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn retargeting_between_catalog_hosts_commits_to_the_new_host() {
+    let (service, support_dir, first, project_id) =
+        one_projection("remote-project-retarget-host");
+    let second = Arc::new(Mutex::new(FakeHostCatalog {
+        shares_catalog: true,
+        ..FakeHostCatalog::default()
+    }));
+    connect_test_host(
+        &service,
+        "device-2",
+        codux_protocol::REMOTE_APP_AGENT,
+        Arc::clone(&second),
+    );
+
+    let snapshot = service
+        .project_update(ProjectUpdateRequest {
+            project_id: project_id.clone(),
+            name: "Beta".to_string(),
+            path: "/srv/beta".to_string(),
+            badge_text: None,
+            badge_symbol: None,
+            badge_color_hex: None,
+            environment_variables: Default::default(),
+            runtime_target: ProjectRuntimeTarget::Remote {
+                device_id: "device-2".to_string(),
+            },
+        })
+        .expect("create on the new catalog host");
+
+    assert_eq!(
+        first.lock().unwrap().projects,
+        [catalog_project("p-host-1", "Alpha", "/srv/alpha")]
+    );
+    assert_eq!(
+        second.lock().unwrap().projects,
+        [catalog_project("p-host-1", "Beta", "/srv/beta")]
+    );
+    assert_eq!(snapshot.projects.len(), 2);
+    assert_ne!(snapshot.projects[0].id, snapshot.projects[1].id);
+    assert!(snapshot.projects.iter().all(|project| {
+        project.runtime_target.remote_device_id().is_some()
+    }));
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn retargeting_a_local_project_to_a_catalog_host_does_not_create_a_phantom() {
+    let state = json!({
+        "projects": [{ "id": "local", "name": "Local", "path": "/tmp/local" }],
+        "selectedProjectId": "local"
+    });
+    let (service, support_dir, catalog) =
+        remote_project_service("remote-project-retarget-local", state);
+
+    let snapshot = service
+        .project_update(ProjectUpdateRequest {
+            project_id: "local".to_string(),
+            name: "Remote".to_string(),
+            path: "/srv/remote".to_string(),
+            badge_text: None,
+            badge_symbol: None,
+            badge_color_hex: None,
+            environment_variables: Default::default(),
+            runtime_target: ProjectRuntimeTarget::Remote {
+                device_id: "device-1".to_string(),
+            },
+        })
+        .expect("retarget commits to the destination owner");
+
+    assert_eq!(
+        catalog.lock().unwrap().projects,
+        [catalog_project("p-host-1", "Remote", "/srv/remote")]
+    );
+    assert_eq!(snapshot.projects.len(), 2);
+    assert!(snapshot.projects.iter().any(|project| project.id == "local"));
+    let remote = snapshot
+        .projects
+        .iter()
+        .find(|project| project.runtime_target.remote_device_id() == Some("device-1"))
+        .expect("host projection");
+    assert_eq!(
+        host_project_id_of(&support_dir, &remote.id).as_deref(),
+        Some("p-host-1")
     );
 
     drop(service);
@@ -1037,6 +1429,18 @@ fn a_desktop_host_catalog_is_not_adopted() {
     ));
     wait_for_catalog_probe(&service, "device-1");
 
+    let controller = service
+        .remote_controller_for_device("device-1")
+        .expect("live desktop host");
+    controller.route_test_message(
+        &serde_json::to_vec(&json!({
+            "type": codux_protocol::REMOTE_PROJECT_LIST,
+            "payload": catalog.lock().unwrap().snapshot(),
+        }))
+        .unwrap(),
+    );
+    service.drain_remote_events();
+
     // A desktop host advertises `projects` too, but its list is its own
     // controller state: importing it would add projects the user never opened.
     assert!(service.project_list().projects.is_empty());
@@ -1044,6 +1448,49 @@ fn a_desktop_host_catalog_is_not_adopted() {
         service.project_catalog_owner("device-1"),
         crate::runtime_state::ProjectCatalogOwner::NotACatalog
     ));
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn catalog_pushes_wait_until_legacy_migration_is_ready() {
+    let (service, support_dir, _catalog) =
+        remote_project_service("remote-project-migration-push-gate", legacy_state());
+    let controller = service
+        .remote_controller_for_device("device-1")
+        .expect("live controller");
+    let epoch = service
+        .remote_controllers
+        .live_connection_epoch("device-1", controller.as_ref())
+        .unwrap();
+    service.remote_project_sync.lock().unwrap().insert(
+        "device-1".to_string(),
+        crate::runtime_state::RemoteProjectSyncState {
+            connection_epoch: epoch,
+            probe_claimed: true,
+            runtime_instance_id: "runtime-1".to_string(),
+            shares_catalog: true,
+            sync_ready: false,
+            version: None,
+        },
+    );
+    controller.route_test_message(
+        &serde_json::to_vec(&json!({
+            "type": codux_protocol::REMOTE_PROJECT_LIST,
+            "payload": {
+                "projects": [{ "id": "p-host-1", "name": "Alpha", "path": "/srv/alpha" }],
+                "version": 1
+            }
+        }))
+        .unwrap(),
+    );
+
+    assert!(service.sync_remote_project_catalogs().is_empty());
+    let projects = service.project_list().projects;
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].id, "legacy-desktop-id");
+    assert!(host_project_id_of(&support_dir, "legacy-desktop-id").is_none());
 
     drop(service);
     fs::remove_dir_all(support_dir).ok();
@@ -1127,6 +1574,57 @@ fn an_existing_host_entry_keeps_its_name_and_host_id_through_migration() {
     assert_eq!(
         host_project_id_of(&support_dir, "legacy-desktop-id").as_deref(),
         Some("p-host-9")
+    );
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn migration_cleanup_follows_a_folded_legacy_project() {
+    let state = json!({
+        "projects": [
+            {
+                "id": "legacy-first",
+                "name": "Alpha",
+                "path": "/srv/alpha",
+                "runtimeTarget": { "kind": "remote", "deviceId": "device-1" }
+            },
+            {
+                "id": "legacy-duplicate",
+                "name": "Duplicate",
+                "path": "/srv/alpha",
+                "runtimeTarget": { "kind": "remote", "deviceId": "device-1" }
+            }
+        ],
+        "selectedProjectId": "legacy-duplicate"
+    });
+    let (service, support_dir, _catalog) =
+        remote_project_service("remote-project-migrate-cleanup", state);
+    service
+        .save_terminal_layout(
+            "legacy-duplicate",
+            Vec::new(),
+            "terminal-1".to_string(),
+            vec![TerminalPaneSummary {
+                title: "Shell".to_string(),
+                terminal_id: "terminal-1".to_string(),
+            }],
+            vec![1.0],
+            0.24,
+        )
+        .expect("save duplicate layout before migration");
+
+    wait_until(&service, "the duplicate legacy migration", || {
+        migration_done(&support_dir)
+    });
+
+    assert_eq!(service.project_list().projects.len(), 1);
+    assert!(
+        service
+            .terminal_layout_record("legacy-duplicate")
+            .is_none(),
+        "folding a legacy duplicate must clean its workspace data"
     );
 
     drop(service);
@@ -1284,6 +1782,36 @@ fn a_host_without_the_capability_keeps_local_project_creation() {
 }
 
 #[test]
+fn a_previous_catalog_owner_cannot_fall_back_to_local_creation() {
+    let (service, support_dir, catalog, _project_id) =
+        one_projection("remote-project-catalog-capability-loss");
+    wait_until(&service, "catalog migration marker", || {
+        migration_done(&support_dir)
+    });
+    catalog.lock().unwrap().shares_catalog = false;
+
+    let error = service
+        .project_create(ProjectCreateRequest {
+            name: "Beta".to_string(),
+            path: "/srv/beta".to_string(),
+            badge_text: None,
+            badge_symbol: None,
+            badge_color_hex: None,
+            environment_variables: Default::default(),
+            runtime_target: ProjectRuntimeTarget::Remote {
+                device_id: "device-1".to_string(),
+            },
+        })
+        .expect_err("a known catalog owner must remain authoritative");
+
+    assert_eq!(error, "Remote host device-1 is unavailable.");
+    assert_eq!(service.project_list().projects.len(), 1);
+    assert_eq!(catalog.lock().unwrap().projects.len(), 1);
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
 fn a_host_without_the_capability_leaves_existing_records_alone() {
     // A host that predates the shared catalog: it never advertises `projects`,
     // so this desktop must not subscribe, migrate, or prune anything it holds
@@ -1422,6 +1950,162 @@ fn a_snapshot_that_cannot_be_applied_does_not_consume_its_version() {
 }
 
 #[test]
+fn a_snapshot_with_an_invalid_version_cannot_roll_the_catalog_back() {
+    let (service, support_dir, _catalog) =
+        remote_project_service("remote-project-invalid-version", empty_state());
+    let controller = service
+        .remote_controller_for_device("device-1")
+        .expect("live controller");
+    let epoch = service
+        .remote_controllers
+        .live_connection_epoch("device-1", controller.as_ref())
+        .unwrap();
+    let current = json!({
+        "projects": [{ "id": "p-host-2", "name": "Beta", "path": "/srv/beta" }],
+        "version": 5
+    });
+    assert!(
+        service
+            .apply_remote_project_snapshot("device-1", epoch, &current, &controller)
+            .unwrap()
+    );
+
+    let invalid = json!({
+        "projects": [{ "id": "p-host-1", "name": "Alpha", "path": "/srv/alpha" }],
+        "version": "newest"
+    });
+    let error = service
+        .apply_remote_project_snapshot("device-1", epoch, &invalid, &controller)
+        .expect_err("an invalid version is not an unversioned compatibility snapshot");
+
+    assert!(error.contains("invalid version"));
+    assert_eq!(service.project_list().projects[0].path, "/srv/beta");
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn a_semantically_ambiguous_snapshot_is_rejected() {
+    let (service, support_dir, _catalog) =
+        remote_project_service("remote-project-ambiguous-snapshot", empty_state());
+    let controller = service
+        .remote_controller_for_device("device-1")
+        .expect("live controller");
+    let epoch = service
+        .remote_controllers
+        .live_connection_epoch("device-1", controller.as_ref())
+        .unwrap();
+    let duplicate_id = json!({
+        "projects": [
+            { "id": "p-host-1", "name": "Alpha", "path": "/srv/alpha" },
+            { "id": "p-host-1", "name": "Beta", "path": "/srv/beta" }
+        ],
+        "version": 8
+    });
+    let error = service
+        .apply_remote_project_snapshot("device-1", epoch, &duplicate_id, &controller)
+        .expect_err("duplicate ids make routing ambiguous");
+    assert!(error.contains("duplicate id"));
+    assert!(service.project_list().projects.is_empty());
+
+    let duplicate_path = json!({
+        "projects": [
+            { "id": "p-host-1", "name": "Alpha", "path": "/srv/alpha" },
+            { "id": "p-host-2", "name": "Duplicate", "path": "/srv/alpha" }
+        ],
+        "version": 8
+    });
+    let error = service
+        .apply_remote_project_snapshot("device-1", epoch, &duplicate_path, &controller)
+        .expect_err("duplicate paths make catalog membership ambiguous");
+    assert!(error.contains("duplicate path"));
+    assert!(service.project_list().projects.is_empty());
+
+    let valid = json!({
+        "projects": [{ "id": "p-host-1", "name": "Alpha", "path": "/srv/alpha" }],
+        "version": 8
+    });
+    assert!(
+        service
+            .apply_remote_project_snapshot("device-1", epoch, &valid, &controller)
+            .unwrap(),
+        "rejected snapshot must not consume its version"
+    );
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn a_replaced_connection_cannot_apply_its_stale_snapshot() {
+    let (service, support_dir, catalog) =
+        remote_project_service("remote-project-stale-connection", empty_state());
+    let old_controller = service
+        .remote_controller_for_device("device-1")
+        .expect("first controller");
+    let old_epoch = service
+        .remote_controllers
+        .live_connection_epoch("device-1", old_controller.as_ref())
+        .unwrap();
+
+    connect_test_host(
+        &service,
+        "device-1",
+        codux_protocol::REMOTE_APP_AGENT,
+        catalog,
+    );
+    let current_controller = service
+        .remote_controller_for_device("device-1")
+        .expect("replacement controller");
+    let current_epoch = service
+        .remote_controllers
+        .live_connection_epoch("device-1", current_controller.as_ref())
+        .unwrap();
+    assert!(current_epoch > old_epoch);
+    let current = json!({
+        "projects": [{ "id": "p-host-2", "name": "Beta", "path": "/srv/beta" }],
+        "version": 2
+    });
+    service
+        .apply_remote_project_snapshot(
+            "device-1",
+            current_epoch,
+            &current,
+            &current_controller,
+        )
+        .unwrap();
+
+    let stale = json!({
+        "projects": [{ "id": "p-host-1", "name": "Alpha", "path": "/srv/alpha" }],
+        "version": 99
+    });
+    assert!(
+        !service
+            .apply_remote_project_snapshot(
+                "device-1",
+                old_epoch,
+                &stale,
+                &old_controller,
+            )
+            .unwrap()
+    );
+    assert!(
+        !service
+            .apply_remote_project_snapshot(
+                "device-1",
+                current_epoch,
+                &stale,
+                &old_controller,
+            )
+            .unwrap(),
+        "an old controller cannot borrow the replacement's epoch"
+    );
+    assert_eq!(service.project_list().projects[0].path, "/srv/beta");
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
 fn an_unreachable_catalog_owner_refuses_a_create_instead_of_writing_locally() {
     let (service, support_dir, _catalog, _project_id) =
         one_projection("remote-project-offline-create");
@@ -1452,6 +2136,34 @@ fn an_unreachable_catalog_owner_refuses_a_create_instead_of_writing_locally() {
 
     assert_eq!(error, "Remote host device-1 is unavailable.");
     assert_eq!(service.project_list().projects.len(), 1);
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn a_failed_capability_query_never_falls_back_to_a_local_remote_project() {
+    let (service, support_dir, catalog) =
+        remote_project_service("remote-project-capability-error", empty_state());
+    catalog.lock().unwrap().fail_host_info_send = true;
+
+    let error = service
+        .project_create(ProjectCreateRequest {
+            name: "Alpha".to_string(),
+            path: "/srv/alpha".to_string(),
+            badge_text: None,
+            badge_symbol: None,
+            badge_color_hex: None,
+            environment_variables: Default::default(),
+            runtime_target: ProjectRuntimeTarget::Remote {
+                device_id: "device-1".to_string(),
+            },
+        })
+        .expect_err("an unknown host contract cannot authorize a local fallback");
+
+    assert_eq!(error, "Remote host device-1 is unavailable.");
+    assert!(service.project_list().projects.is_empty());
+    assert!(catalog.lock().unwrap().projects.is_empty());
 
     drop(service);
     fs::remove_dir_all(support_dir).ok();

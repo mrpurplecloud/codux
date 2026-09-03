@@ -122,10 +122,12 @@ current catalog, which is also what keeps already-shipped Mobile builds working
 side can demonstrate it.
 
 Two things the ticket text does not name. An edit that moves a record to another
-runtime target is not a catalog edit — it takes the record off that host — so it
-keeps the controller-local path and drops the host project id with it; the host
-keeps its own catalog membership, which is not this controller's to remove. And
-a mutation on a projection whose host is unreachable now fails instead of
+runtime target is not a catalog edit. It creates an independent project through
+the new target's normal add flow while preserving the original record: a
+projection remains a projection with its host project id, and a local record
+remains local. The host keeps its own catalog membership, which is not this
+controller's to remove. And a mutation on a projection whose host is unreachable
+now fails instead of
 falling back to a local write: the record exists only because the host listed
 it, so a local edit or removal would diverge silently and be undone by the next
 snapshot.
@@ -222,4 +224,3 @@ automated counterparts — Desktop-and-Mobile-direction mutations, reconnect,
 restart, two connected controllers, and path deduplication — pass, but a passing
 in-process test is not device evidence, so both stay unchecked for whoever has
 the hardware. The release under Stage 3 still owes them.
-

@@ -125,14 +125,30 @@ mod tests {
         fs::remove_dir_all(data_dir).ok();
         fs::remove_dir_all(runtime_root).ok();
     }
+
+    #[test]
+    fn memory_project_loading_surfaces_a_broken_catalog() {
+        let data_dir = temp_dir("broken-catalog");
+        let path = data_dir.join("projects.json");
+        fs::write(&path, "{broken").unwrap();
+
+        let error = memory_records_from(&AgentProjectStore::with_path(path))
+            .expect_err("broken catalog must fail memory loading");
+
+        assert!(error.contains("is not valid JSON"));
+        fs::remove_dir_all(data_dir).ok();
+    }
 }
 
 /// The host's projects as workspace records (the agent has no root/worktree
 /// split, so each project is its own root + workspace).
-fn memory_records() -> Vec<MemoryProjectRecord> {
-    AgentProjectStore::new()
-        .list()
-        .unwrap_or_default()
+fn memory_records() -> Result<Vec<MemoryProjectRecord>, String> {
+    memory_records_from(&AgentProjectStore::new())
+}
+
+fn memory_records_from(store: &AgentProjectStore) -> Result<Vec<MemoryProjectRecord>, String> {
+    Ok(store
+        .list()?
         .into_iter()
         .map(|project| MemoryProjectRecord {
             id: project.id.clone(),
@@ -142,7 +158,7 @@ fn memory_records() -> Vec<MemoryProjectRecord> {
             workspace_path: project.path,
             git_default_push_remote_name: None,
         })
-        .collect()
+        .collect())
 }
 
 /// Run a memory extraction pass on the host with the controller-forwarded
@@ -160,7 +176,7 @@ pub async fn memory_extract_payload(payload: &Value) -> Result<Value, String> {
         .get("outputLocale")
         .and_then(Value::as_str)
         .unwrap_or("");
-    let projects = memory_records();
+    let projects = memory_records()?;
     // The host's indexed AI sessions are the extraction candidates; the agent
     // runs no live AI supervisor, so there are no runtime snapshots.
     let history_sessions = codux_ai_history::normalized::indexed_sessions_since_at(
@@ -186,29 +202,27 @@ pub async fn memory_extract_payload(payload: &Value) -> Result<Value, String> {
 
 /// The host's projects mapped into the engine's project shape (the manager view
 /// labels rows per project).
-fn memory_projects() -> Vec<MemoryProjectInfo> {
-    AgentProjectStore::new()
-        .list()
-        .unwrap_or_default()
+fn memory_projects() -> Result<Vec<MemoryProjectInfo>, String> {
+    Ok(AgentProjectStore::new()
+        .list()?
         .into_iter()
         .map(|project| MemoryProjectInfo {
             id: project.id,
             name: project.name,
             path: project.path,
         })
-        .collect()
+        .collect())
 }
 
 /// Resolve the host's own project id for a controller-supplied path. The
 /// host's memory store is keyed by the host's project ids, but the controller
 /// only knows its own ids; like `ai.state`, it sends the project *path* and the
 /// host maps it to its local project (falling back to the supplied id).
-fn host_project_id(payload: &Value) -> Option<String> {
+fn host_project_id(payload: &Value) -> Result<Option<String>, String> {
     let project_path = payload.get("projectPath").and_then(Value::as_str);
     if let Some(path) = project_path.filter(|value| !value.is_empty())
         && let Some(project) = AgentProjectStore::new()
-            .list()
-            .unwrap_or_default()
+            .list()?
             .into_iter()
             .find(|project| {
                 codux_runtime_core::path::local_paths_equal(
@@ -217,19 +231,19 @@ fn host_project_id(payload: &Value) -> Option<String> {
                 )
             })
     {
-        return Some(project.id);
+        return Ok(Some(project.id));
     }
-    payload
+    Ok(payload
         .get("projectId")
         .and_then(Value::as_str)
-        .map(str::to_string)
+        .map(str::to_string))
 }
 
 /// Serve a `memory.read` query. Returns `{op, result}` where `result` is the
 /// operation's JSON snapshot.
 pub fn memory_read_payload(payload: &Value) -> Result<Value, String> {
     let op = payload.get("op").and_then(Value::as_str).unwrap_or("");
-    let resolved_project_id = host_project_id(payload);
+    let resolved_project_id = host_project_id(payload)?;
     let project_id = resolved_project_id.as_deref();
     let result = match op {
         "summary" => serde_json::to_value(service().summary(project_id))
@@ -258,7 +272,7 @@ pub fn memory_read_payload(payload: &Value) -> Result<Value, String> {
                 .unwrap_or("active");
             let limit = payload.get("limit").and_then(Value::as_i64).unwrap_or(500);
             serde_json::to_value(service().manager_snapshot(
-                &memory_projects(),
+                &memory_projects()?,
                 scope,
                 project_id,
                 tab,

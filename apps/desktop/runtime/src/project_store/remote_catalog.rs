@@ -39,6 +39,9 @@ pub struct RemoteCatalogProject {
 pub struct RemoteCatalogChange {
     pub added_project_ids: Vec<String>,
     pub removed_project_ids: Vec<String>,
+    /// Default and explicit workspace ids captured in the same transaction that
+    /// removed their projects, for deleting controller-side layout/cache data.
+    pub removed_workspace_ids: Vec<String>,
     /// Projections whose host-owned name or path moved.
     pub moved_project_ids: Vec<String>,
 }
@@ -73,76 +76,75 @@ impl ProjectStore {
             device_id: device_id.to_string(),
         })?;
         let device_id = target.remote_device_id().unwrap_or_default();
-        let mut raw = self.raw_snapshot();
-        let selected_project_id = raw
-            .get("selectedProjectId")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let mut change = RemoteCatalogChange::default();
-        let mut selected_removed_at = None;
-        // Desktop id of every projection whose shared fields moved, so the
-        // default worktree record follows the rename. A migrated projection
-        // keeps its old desktop id, so this cannot be derived from the host id.
-        let mut renamed = Vec::new();
+        self.update_raw_snapshot(|raw| {
+            let selected_project_id = raw
+                .get("selectedProjectId")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let mut change = RemoteCatalogChange::default();
+            let mut selected_removed_at = None;
+            // Desktop id of every projection whose shared fields moved, so the
+            // default worktree record follows the rename. A migrated projection
+            // keeps its old desktop id, so this cannot be derived from the host id.
+            let mut renamed = Vec::new();
 
-        {
-            let projects = ensure_array(&mut raw, "projects")?;
-            let mut index = 0;
-            while index < projects.len() {
-                let Some(managed) = managed_projection(&projects[index], device_id) else {
-                    index += 1;
-                    continue;
-                };
-                match catalog
-                    .iter()
-                    .find(|item| item.host_project_id == managed.host_project_id)
-                {
-                    Some(item) => {
-                        if apply_shared_fields(&mut projects[index], item) {
-                            change.moved_project_ids.push(managed.project_id.clone());
-                            renamed.push((managed.project_id, item));
-                        }
+            {
+                let projects = ensure_array(raw, "projects")?;
+                let mut index = 0;
+                while index < projects.len() {
+                    let Some(managed) = managed_projection(&projects[index], device_id) else {
                         index += 1;
-                    }
-                    None => {
-                        projects.remove(index);
-                        if selected_project_id.as_deref() == Some(managed.project_id.as_str()) {
-                            selected_removed_at = Some(index);
+                        continue;
+                    };
+                    match catalog
+                        .iter()
+                        .find(|item| item.host_project_id == managed.host_project_id)
+                    {
+                        Some(item) => {
+                            if apply_shared_fields(&mut projects[index], item) {
+                                change.moved_project_ids.push(managed.project_id.clone());
+                                renamed.push((managed.project_id, item));
+                            }
+                            index += 1;
                         }
-                        change.removed_project_ids.push(managed.project_id);
+                        None => {
+                            projects.remove(index);
+                            if selected_project_id.as_deref() == Some(managed.project_id.as_str()) {
+                                selected_removed_at = Some(index);
+                            }
+                            change.removed_project_ids.push(managed.project_id);
+                        }
                     }
                 }
-            }
 
-            for item in catalog {
-                if projects.iter().any(|project| {
-                    managed_projection(project, device_id)
-                        .is_some_and(|managed| managed.host_project_id == item.host_project_id)
-                }) {
-                    continue;
+                for item in catalog {
+                    if projects.iter().any(|project| {
+                        managed_projection(project, device_id)
+                            .is_some_and(|managed| managed.host_project_id == item.host_project_id)
+                    }) {
+                        continue;
+                    }
+                    let projection = new_projection(device_id, item, &target, projects)?;
+                    change.added_project_ids.push(
+                        projection
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    );
+                    projects.push(Value::Object(projection));
                 }
-                let projection = new_projection(device_id, item, &target)?;
-                change.added_project_ids.push(
-                    projection
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                );
-                projects.push(Value::Object(projection));
             }
-        }
 
-        if change.is_empty() {
-            return Ok(change);
-        }
-
-        apply_removals(&mut raw, &change.removed_project_ids, selected_removed_at);
-        for (project_id, item) in renamed {
-            update_default_worktree_record(&mut raw, &project_id, &item.name, &item.path);
-        }
-        self.save_raw_snapshot(&raw)?;
-        Ok(change)
+            if !change.is_empty() {
+                change.removed_workspace_ids =
+                    apply_removals(raw, &change.removed_project_ids, selected_removed_at);
+                for (project_id, item) in renamed {
+                    update_default_worktree_record(raw, &project_id, &item.name, &item.path);
+                }
+            }
+            Ok(change)
+        })
     }
 
     /// The remote records for `device_id` that migration still owes the host.
@@ -174,62 +176,61 @@ impl ProjectStore {
         &self,
         device_id: &str,
         assignments: &[(String, String)],
-    ) -> Result<(), String> {
-        let mut raw = self.raw_snapshot();
-        let selected_project_id = raw
-            .get("selectedProjectId")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let mut changed = false;
-        let mut removed = Vec::new();
-        let mut selected_removed_at = None;
+    ) -> Result<RemoteCatalogChange, String> {
+        self.update_raw_snapshot(|raw| {
+            let selected_project_id = raw
+                .get("selectedProjectId")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let mut removed = Vec::new();
+            let mut selected_removed_at = None;
 
-        {
-            let projects = ensure_array(&mut raw, "projects")?;
-            let mut taken = projects
-                .iter()
-                .filter_map(|project| managed_projection(project, device_id))
-                .map(|managed| managed.host_project_id)
-                .collect::<HashSet<_>>();
-            let mut index = 0;
-            while index < projects.len() {
-                let project_id = projects[index]
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                let Some((_, host_project_id)) = assignments
+            {
+                let projects = ensure_array(raw, "projects")?;
+                let mut taken = projects
                     .iter()
-                    .find(|(assigned, _)| assigned == &project_id)
-                else {
-                    index += 1;
-                    continue;
-                };
-                if !taken.insert(host_project_id.clone()) {
-                    projects.remove(index);
-                    if selected_project_id.as_deref() == Some(project_id.as_str()) {
-                        selected_removed_at = Some(index);
+                    .filter_map(|project| managed_projection(project, device_id))
+                    .map(|managed| managed.host_project_id)
+                    .collect::<HashSet<_>>();
+                let mut index = 0;
+                while index < projects.len() {
+                    let project_id = projects[index]
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let Some((_, host_project_id)) = assignments
+                        .iter()
+                        .find(|(assigned, _)| assigned == &project_id)
+                    else {
+                        index += 1;
+                        continue;
+                    };
+                    if !taken.insert(host_project_id.clone()) {
+                        projects.remove(index);
+                        if selected_project_id.as_deref() == Some(project_id.as_str()) {
+                            selected_removed_at = Some(index);
+                        }
+                        removed.push(project_id);
+                        continue;
                     }
-                    removed.push(project_id);
-                    changed = true;
-                    continue;
+                    if let Some(project) = projects[index].as_object_mut() {
+                        project.insert(
+                            "hostProjectId".to_string(),
+                            Value::String(host_project_id.clone()),
+                        );
+                    }
+                    index += 1;
                 }
-                if let Some(project) = projects[index].as_object_mut() {
-                    project.insert(
-                        "hostProjectId".to_string(),
-                        Value::String(host_project_id.clone()),
-                    );
-                    changed = true;
-                }
-                index += 1;
             }
-        }
 
-        if !changed {
-            return Ok(());
-        }
-        apply_removals(&mut raw, &removed, selected_removed_at);
-        self.save_raw_snapshot(&raw)
+            let removed_workspace_ids = apply_removals(raw, &removed, selected_removed_at);
+            Ok(RemoteCatalogChange {
+                removed_project_ids: removed,
+                removed_workspace_ids,
+                ..RemoteCatalogChange::default()
+            })
+        })
     }
 
     /// How far the legacy migration has run for one host. Zero means it has
@@ -249,14 +250,15 @@ impl ProjectStore {
         device_id: &str,
         version: u64,
     ) -> Result<(), String> {
-        let mut raw = self.raw_snapshot();
-        let versions = raw
-            .entry(MIGRATION_VERSIONS_KEY.to_string())
-            .or_insert_with(|| Value::Object(Map::new()))
-            .as_object_mut()
-            .ok_or_else(|| format!("{MIGRATION_VERSIONS_KEY} is not an object."))?;
-        versions.insert(device_id.to_string(), Value::from(version));
-        self.save_raw_snapshot(&raw)
+        self.update_raw_snapshot(|raw| {
+            let versions = raw
+                .entry(MIGRATION_VERSIONS_KEY.to_string())
+                .or_insert_with(|| Value::Object(Map::new()))
+                .as_object_mut()
+                .ok_or_else(|| format!("{MIGRATION_VERSIONS_KEY} is not an object."))?;
+            versions.insert(device_id.to_string(), Value::from(version));
+            Ok(())
+        })
     }
 
     /// The `(device id, host project id)` this record projects, if it is a
@@ -294,25 +296,27 @@ fn apply_removals(
     raw: &mut Map<String, Value>,
     removed: &[String],
     selected_removed_at: Option<usize>,
-) {
+) -> Vec<String> {
+    let mut removed_workspace_ids = Vec::new();
     for project_id in removed {
-        prune_project_state(raw, project_id);
+        removed_workspace_ids.push(project_id.clone());
+        removed_workspace_ids.extend(prune_project_state(raw, project_id));
     }
-    let Some(removed_index) = selected_removed_at else {
-        return;
-    };
-    let next = raw
-        .get("projects")
-        .and_then(Value::as_array)
-        .and_then(|projects| select_project_after_removal(projects, removed_index));
-    match next {
-        Some(next) => {
-            raw.insert("selectedProjectId".to_string(), Value::String(next));
-        }
-        None => {
-            raw.remove("selectedProjectId");
+    if let Some(removed_index) = selected_removed_at {
+        let next = raw
+            .get("projects")
+            .and_then(Value::as_array)
+            .and_then(|projects| select_project_after_removal(projects, removed_index));
+        match next {
+            Some(next) => {
+                raw.insert("selectedProjectId".to_string(), Value::String(next));
+            }
+            None => {
+                raw.remove("selectedProjectId");
+            }
         }
     }
+    removed_workspace_ids
 }
 
 /// The desktop id for a catalog entry. Derived from `(device id, host project
@@ -362,8 +366,10 @@ fn new_projection(
     device_id: &str,
     item: &RemoteCatalogProject,
     target: &ProjectRuntimeTarget,
+    existing_projects: &[Value],
 ) -> Result<Map<String, Value>, String> {
-    let project_id = remote_projection_id(device_id, &item.host_project_id);
+    let project_id =
+        available_remote_projection_id(existing_projects, device_id, &item.host_project_id);
     let mut record = project_record(&project_id, &item.name, &item.path);
     record.insert(
         "runtimeTarget".to_string(),
@@ -375,4 +381,33 @@ fn new_projection(
         Value::String(item.host_project_id.clone()),
     );
     Ok(record)
+}
+
+/// Usually a projection owns its canonical composite-derived id. Retargeting a
+/// projection leaves that id on the detached controller-local record while the
+/// host keeps its catalog membership; the next snapshot must then restore the
+/// remote projection under another stable id instead of creating duplicate ids.
+pub(super) fn available_remote_projection_id(
+    projects: &[Value],
+    device_id: &str,
+    host_project_id: &str,
+) -> String {
+    let id_is_taken = |candidate: &str| {
+        projects
+            .iter()
+            .any(|project| project.get("id").and_then(Value::as_str) == Some(candidate))
+    };
+    let canonical = remote_projection_id(device_id, host_project_id);
+    if !id_is_taken(&canonical) {
+        return canonical;
+    }
+    for collision in 1_u64.. {
+        let candidate = project_uuid_from(&format!(
+            "remote:{device_id}:{host_project_id}:projection:{collision}"
+        ));
+        if !id_is_taken(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("the project id space is finite but cannot be exhausted in memory")
 }

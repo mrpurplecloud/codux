@@ -80,7 +80,7 @@ impl ControllerLinkPath {
 struct ManagerShared {
     support_dir: PathBuf,
     store: RemoteControllerStore,
-    connections: Mutex<HashMap<String, Arc<RemoteController>>>,
+    connections: Mutex<HashMap<String, LiveConnection>>,
     connection_epochs: Mutex<HashMap<String, u64>>,
     links: Mutex<HashMap<String, ControllerLinkState>>,
     // Selected path type (direct/relay) per connected device, for the UI badge.
@@ -92,6 +92,11 @@ struct ManagerShared {
     // relay unreachable, dial timeout) instead of a generic message.
     last_errors: Mutex<HashMap<String, String>>,
     disconnected_devices: Mutex<HashSet<String>>,
+}
+
+struct LiveConnection {
+    epoch: u64,
+    controller: Arc<RemoteController>,
 }
 
 impl ManagerShared {
@@ -151,18 +156,16 @@ impl ManagerShared {
     /// desktop id sent there would scope the host's work to a project it does
     /// not have. Every live connection is published here, so none can be
     /// reachable before its bridge is.
-    fn publish_connection(&self, device_id: &str, controller: Arc<RemoteController>) {
+    fn publish_connection(&self, device_id: &str, epoch: u64, controller: Arc<RemoteController>) {
         controller.set_project_id_pairs(
             crate::project_store::ProjectStore::new(self.support_dir.clone())
                 .remote_project_id_pairs(device_id),
         );
-        let old = self
-            .connections
-            .lock()
-            .ok()
-            .and_then(|mut connections| connections.insert(device_id.to_string(), controller));
+        let old = self.connections.lock().ok().and_then(|mut connections| {
+            connections.insert(device_id.to_string(), LiveConnection { epoch, controller })
+        });
         if let Some(old) = old {
-            Self::shutdown_controller(old);
+            Self::shutdown_controller(old.controller);
         }
         self.set_link(device_id, ControllerLinkState::Connected);
     }
@@ -259,7 +262,7 @@ impl ManagerShared {
             .ok()
             .and_then(|mut connections| connections.remove(device_id));
         if let Some(old) = old {
-            Self::shutdown_controller(old);
+            Self::shutdown_controller(old.controller);
         }
         if spawn_needed {
             self.spawn_reconnect_loop(device_id);
@@ -298,7 +301,7 @@ impl ManagerShared {
             let on_state = self.state_handler(&device_id, epoch);
             match RemoteController::connect_saved(&host, on_state).await {
                 Ok(controller) => {
-                    self.publish_connection(&device_id, Arc::new(controller));
+                    self.publish_connection(&device_id, epoch, Arc::new(controller));
                     if let Ok(mut errors) = self.last_errors.lock() {
                         errors.remove(&device_id);
                     }
@@ -425,7 +428,7 @@ impl RemoteControllerManager {
         ))?;
         self.shared.store.upsert(saved.clone())?;
         self.shared
-            .publish_connection(&saved.device_id, Arc::new(controller));
+            .publish_connection(&saved.device_id, epoch, Arc::new(controller));
         Ok(saved)
     }
 
@@ -448,7 +451,9 @@ impl RemoteControllerManager {
             .map(|connections| {
                 connections
                     .iter()
-                    .map(|(device_id, controller)| (device_id.clone(), controller.clone()))
+                    .map(|(device_id, connection)| {
+                        (device_id.clone(), Arc::clone(&connection.controller))
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -471,7 +476,9 @@ impl RemoteControllerManager {
             .map(|connections| {
                 connections
                     .iter()
-                    .map(|(device_id, controller)| (device_id.clone(), controller.clone()))
+                    .map(|(device_id, connection)| {
+                        (device_id.clone(), Arc::clone(&connection.controller))
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -495,25 +502,32 @@ impl RemoteControllerManager {
         };
         connections
             .iter()
-            .filter_map(|(device_id, controller)| {
-                Some((
+            .map(|(device_id, connection)| {
+                (
                     device_id.clone(),
-                    self.connection_epoch(device_id)?,
-                    Arc::clone(controller),
-                ))
+                    connection.epoch,
+                    Arc::clone(&connection.controller),
+                )
             })
             .collect()
     }
 
-    /// The epoch of the current connection to `device_id`, or `None` if this
-    /// device has never been dialed.
-    pub fn connection_epoch(&self, device_id: &str) -> Option<u64> {
-        self.shared
-            .connection_epochs
-            .lock()
-            .ok()?
-            .get(device_id)
-            .copied()
+    /// Epoch of this exact controller while it remains the published live link.
+    /// Device id plus epoch is insufficient when a stale caller accidentally
+    /// pairs an old controller with the replacement controller's current epoch.
+    pub(crate) fn live_connection_epoch(
+        &self,
+        device_id: &str,
+        controller: &RemoteController,
+    ) -> Option<u64> {
+        let Ok(connections) = self.shared.connections.lock() else {
+            return None;
+        };
+        let current = connections.get(device_id)?;
+        if !std::ptr::eq(current.controller.as_ref(), controller) {
+            return None;
+        }
+        Some(current.epoch)
     }
 
     pub fn drain_disconnected_devices(&self) -> Vec<String> {
@@ -526,7 +540,9 @@ impl RemoteControllerManager {
 
     pub fn controller_for(&self, device_id: &str) -> Result<Arc<RemoteController>, String> {
         if let Ok(connections) = self.shared.connections.lock()
-            && let Some(controller) = connections.get(device_id).cloned()
+            && let Some(controller) = connections
+                .get(device_id)
+                .map(|connection| Arc::clone(&connection.controller))
         {
             return Ok(controller);
         }
@@ -561,7 +577,9 @@ impl RemoteControllerManager {
     ) -> Result<Arc<RemoteController>, String> {
         // Already connected (re-browsing the same host): no wait.
         if let Ok(connections) = self.shared.connections.lock()
-            && let Some(controller) = connections.get(device_id).cloned()
+            && let Some(controller) = connections
+                .get(device_id)
+                .map(|connection| Arc::clone(&connection.controller))
         {
             return Ok(controller);
         }
@@ -573,7 +591,9 @@ impl RemoteControllerManager {
         let deadline = Instant::now() + timeout;
         loop {
             if let Ok(connections) = self.shared.connections.lock()
-                && let Some(controller) = connections.get(device_id).cloned()
+                && let Some(controller) = connections
+                    .get(device_id)
+                    .map(|connection| Arc::clone(&connection.controller))
             {
                 return Ok(controller);
             }
@@ -599,8 +619,8 @@ impl RemoteControllerManager {
         device_id: &str,
         controller: Arc<RemoteController>,
     ) {
-        self.shared.next_connection_epoch(device_id);
-        self.shared.publish_connection(device_id, controller);
+        let epoch = self.shared.next_connection_epoch(device_id);
+        self.shared.publish_connection(device_id, epoch, controller);
     }
 
     /// Drop a paired host and any live connection or link state for it.
@@ -615,7 +635,7 @@ impl RemoteControllerManager {
             .ok()
             .and_then(|mut connections| connections.remove(device_id));
         if let Some(old) = old {
-            ManagerShared::shutdown_controller(old);
+            ManagerShared::shutdown_controller(old.controller);
         }
         if let Ok(mut epochs) = self.shared.connection_epochs.lock() {
             epochs.remove(device_id);
@@ -637,6 +657,21 @@ mod tests {
         )
     }
 
+    fn test_controller(device_id: &str) -> Arc<RemoteController> {
+        let hub = codux_remote_transport::LocalMemoryTransportHub::new();
+        Arc::new(RemoteController::with_test_transport(
+            device_id,
+            move |route| {
+                hub.connect(
+                    "controller",
+                    codux_protocol::RemoteTransportKind::Iroh,
+                    Arc::new(move |_, data| route(&data)),
+                    Arc::new(|_, _| {}),
+                )
+            },
+        ))
+    }
+
     #[test]
     fn reconnect_delay_caps_at_background_ceiling() {
         let mut delay = Duration::from_secs(1);
@@ -644,6 +679,37 @@ mod tests {
             delay = next_reconnect_delay(delay);
         }
         assert_eq!(delay, RECONNECT_MAX_DELAY);
+    }
+
+    #[test]
+    fn connected_controller_keeps_its_published_epoch_during_next_dial() {
+        let manager = manager("codux-controller-published-epoch");
+        let old = test_controller("device-1");
+        let old_epoch = manager.shared.next_connection_epoch("device-1");
+        manager
+            .shared
+            .publish_connection("device-1", old_epoch, Arc::clone(&old));
+
+        let next_epoch = manager.shared.next_connection_epoch("device-1");
+        assert!(next_epoch > old_epoch);
+        let connected = manager.connected_controllers();
+        assert_eq!(connected.len(), 1);
+        assert_eq!(connected[0].1, old_epoch);
+        assert!(Arc::ptr_eq(&connected[0].2, &old));
+        assert_eq!(
+            manager.live_connection_epoch("device-1", &old),
+            Some(old_epoch)
+        );
+
+        let new = test_controller("device-1");
+        manager
+            .shared
+            .publish_connection("device-1", next_epoch, Arc::clone(&new));
+        assert_eq!(manager.live_connection_epoch("device-1", &old), None);
+        assert_eq!(
+            manager.live_connection_epoch("device-1", &new),
+            Some(next_epoch)
+        );
     }
 
     #[test]

@@ -42,10 +42,16 @@ pub(super) fn select_project_after_removal(
         .map(str::to_string)
 }
 
-pub(super) fn prune_project_state(snapshot: &mut Map<String, Value>, project_id: &str) {
+pub(super) fn prune_project_state(
+    snapshot: &mut Map<String, Value>,
+    project_id: &str,
+) -> Vec<String> {
     let removed_worktree_ids = remove_worktrees(snapshot, project_id);
     remove_worktree_tasks(snapshot, &removed_worktree_ids);
     remove_selected_worktree(snapshot, project_id);
+    let mut removed_worktree_ids = removed_worktree_ids.into_iter().collect::<Vec<_>>();
+    removed_worktree_ids.sort();
+    removed_worktree_ids
 }
 
 fn remove_worktrees(snapshot: &mut Map<String, Value>, project_id: &str) -> HashSet<String> {

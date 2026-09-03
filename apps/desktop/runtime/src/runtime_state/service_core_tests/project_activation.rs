@@ -42,6 +42,36 @@ fn app_runtime_ready_marks_selected_project_active_and_returns_startup_snapshots
 }
 
 #[test]
+fn hosted_project_activation_does_not_schedule_local_ai_history_refresh() {
+    let support_dir = std::env::temp_dir().join(format!(
+        "codux-hosted-ai-history-activation-{}",
+        uuid::Uuid::new_v4()
+    ));
+    fs::create_dir_all(&support_dir).expect("create support dir");
+    fs::write(
+        support_dir.join("state.json"),
+        json!({
+            "projects": [{
+                "id": "remote-project",
+                "name": "Remote",
+                "path": "/srv/remote",
+                "runtimeTarget": { "kind": "remote", "deviceId": "device-1" }
+            }],
+            "selectedProjectId": "remote-project"
+        })
+        .to_string(),
+    )
+    .expect("write state");
+
+    let service = RuntimeService::new(support_dir.clone());
+    service.refresh_active_ai_history_background();
+
+    assert!(service.ai_history_activation_keys.lock().unwrap().is_empty());
+
+    let _ = fs::remove_dir_all(support_dir);
+}
+
+#[test]
 fn project_update_marks_updated_project_active_and_rewatches_workspace() {
     let support_dir =
         std::env::temp_dir().join(format!("codux-project-update-{}", uuid::Uuid::new_v4()));

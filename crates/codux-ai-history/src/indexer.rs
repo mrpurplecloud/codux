@@ -104,18 +104,20 @@ impl AIHistoryIndexer {
 
     pub fn refresh_project(&self, project: AIHistoryProjectRequest) -> Result<(), String> {
         let cached_snapshot = indexed_project_snapshot(&self.database_path, project.clone())?;
-        let fingerprint = project_history_source_fingerprint(&project);
-        if cached_snapshot.is_some()
-            && project_source_fingerprint_unchanged(&self.state, &project.id, &fingerprint)
-        {
-            let project_state = seed_project_state(&self.state, &project, cached_snapshot)?;
-            push_history_event(
-                &self.events,
-                AIHistoryEvent::ProjectState {
-                    state: project_state,
-                },
-            );
-            return Ok(());
+        // Fingerprinting scans every configured history source. A cache miss
+        // cannot use the unchanged fast path, so let the worker fingerprint once.
+        if cached_snapshot.is_some() {
+            let fingerprint = project_history_source_fingerprint(&project);
+            if project_source_fingerprint_unchanged(&self.state, &project.id, &fingerprint) {
+                let project_state = seed_project_state(&self.state, &project, cached_snapshot)?;
+                push_history_event(
+                    &self.events,
+                    AIHistoryEvent::ProjectState {
+                        state: project_state,
+                    },
+                );
+                return Ok(());
+            }
         }
         let (project_state, should_enqueue) =
             mark_project_queued(&self.state, &project, cached_snapshot)?;

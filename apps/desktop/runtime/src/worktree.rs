@@ -18,7 +18,7 @@ use snapshot::{
 };
 use state::{
     StateFile, WorktreeRecord, WorktreeTaskRecord, enrich_scanned_snapshot_from_state,
-    merge_worktree_snapshot, raw_snapshot, save_raw_snapshot, selected_worktree_id_from_state,
+    merge_worktree_snapshot, raw_snapshot, selected_worktree_id_from_state, update_raw_snapshot,
 };
 use std::path::{Path, PathBuf};
 

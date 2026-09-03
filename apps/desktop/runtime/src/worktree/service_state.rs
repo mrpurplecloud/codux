@@ -1,28 +1,29 @@
 impl WorktreeService {
     pub fn select_worktree(&self, project_id: &str, worktree_id: &str) -> Result<(), String> {
-        let mut raw = raw_snapshot(&self.state_file);
-        let exists = project_id == worktree_id
-            || raw_has_runnable_worktree(&raw, project_id, worktree_id);
-        if !exists {
-            return Err("Worktree not found.".to_string());
-        }
-        if !matches!(
-            raw.get("selectedWorktreeIdByProject"),
-            Some(Value::Object(_))
-        ) {
-            raw.insert(
-                "selectedWorktreeIdByProject".to_string(),
-                Value::Object(Map::new()),
-            );
-        }
-        raw.get_mut("selectedWorktreeIdByProject")
-            .and_then(Value::as_object_mut)
-            .ok_or_else(|| "selectedWorktreeIdByProject is not an object.".to_string())?
-            .insert(
-                project_id.to_string(),
-                Value::String(worktree_id.to_string()),
-            );
-        save_raw_snapshot(&self.state_file, &raw)
+        update_raw_snapshot(&self.state_file, |raw| {
+            let exists = project_id == worktree_id
+                || raw_has_runnable_worktree(raw, project_id, worktree_id);
+            if !exists {
+                return Err("Worktree not found.".to_string());
+            }
+            if !matches!(
+                raw.get("selectedWorktreeIdByProject"),
+                Some(Value::Object(_))
+            ) {
+                raw.insert(
+                    "selectedWorktreeIdByProject".to_string(),
+                    Value::Object(Map::new()),
+                );
+            }
+            raw.get_mut("selectedWorktreeIdByProject")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| "selectedWorktreeIdByProject is not an object.".to_string())?
+                .insert(
+                    project_id.to_string(),
+                    Value::String(worktree_id.to_string()),
+                );
+            Ok(())
+        })
     }
 
     pub fn sync_from_git(
@@ -37,9 +38,9 @@ impl WorktreeService {
             );
         }
         let snapshot = scan_git_worktrees(project_id, project_path)?;
-        let mut raw = raw_snapshot(&self.state_file);
-        merge_worktree_snapshot(&mut raw, project_id, snapshot)?;
-        save_raw_snapshot(&self.state_file, &raw)?;
+        update_raw_snapshot(&self.state_file, |raw| {
+            merge_worktree_snapshot(raw, project_id, snapshot)
+        })?;
         Ok(self.summary(Some(project_id), Some(project_path)))
     }
 
@@ -50,30 +51,31 @@ impl WorktreeService {
         base_branch: Option<&str>,
         base_commit: Option<&str>,
     ) -> Result<(), String> {
-        let mut raw = raw_snapshot(&self.state_file);
-        if let Some(tasks) = raw.get_mut("worktreeTasks").and_then(Value::as_array_mut) {
-            for task in tasks {
-                let Some(task) = task.as_object_mut() else {
-                    continue;
-                };
-                if task.get("worktreeId").and_then(Value::as_str) == Some(worktree_id) {
-                    if let Some(title) = title {
-                        task.insert("title".to_string(), Value::String(title.to_string()));
-                    }
-                    if let Some(base_branch) = base_branch {
+        update_raw_snapshot(&self.state_file, |raw| {
+            if let Some(tasks) = raw.get_mut("worktreeTasks").and_then(Value::as_array_mut) {
+                for task in tasks {
+                    let Some(task) = task.as_object_mut() else {
+                        continue;
+                    };
+                    if task.get("worktreeId").and_then(Value::as_str) == Some(worktree_id) {
+                        if let Some(title) = title {
+                            task.insert("title".to_string(), Value::String(title.to_string()));
+                        }
+                        if let Some(base_branch) = base_branch {
+                            task.insert(
+                                "baseBranch".to_string(),
+                                Value::String(base_branch.to_string()),
+                            );
+                        }
                         task.insert(
-                            "baseBranch".to_string(),
-                            Value::String(base_branch.to_string()),
+                            "baseCommit".to_string(),
+                            base_commit.map_or(Value::Null, |value| Value::String(value.to_string())),
                         );
                     }
-                    task.insert(
-                        "baseCommit".to_string(),
-                        base_commit.map_or(Value::Null, |value| Value::String(value.to_string())),
-                    );
                 }
             }
-        }
-        save_raw_snapshot(&self.state_file, &raw)
+            Ok(())
+        })
     }
 }
 

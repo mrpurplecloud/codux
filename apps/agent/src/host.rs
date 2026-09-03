@@ -222,7 +222,6 @@ fn remove_ai_stats_watcher_project(project_id: &str, watchers: &AIStatsWatchers)
 
 fn remove_device_state(
     device_id: &str,
-    driver: &TerminalManager,
     fanout: &crate::terminals::TerminalFanout,
     ai_stats_watchers: &AIStatsWatchers,
     projects: &ProjectCatalogService,
@@ -232,24 +231,8 @@ fn remove_device_state(
         return;
     }
     projects.remove_device(device_id);
-    let affected_sessions = driver
-        .list()
-        .into_iter()
-        .filter(|terminal| {
-            fanout
-                .viewers(&terminal.id)
-                .iter()
-                .any(|viewer| viewer == device_id)
-        })
-        .map(|terminal| terminal.id)
-        .collect::<Vec<_>>();
     fanout.remove_device(device_id);
     remove_ai_stats_watcher_device(device_id, ai_stats_watchers);
-    for session_id in affected_sessions {
-        if fanout.viewers(&session_id).is_empty() {
-            driver.shrink_remote_screen_scrollback(&session_id);
-        }
-    }
 }
 
 /// Build the message handler that dispatches incoming envelopes to the served
@@ -516,7 +499,7 @@ fn make_handler(
                 if let Some(device_id) =
                     device_id.or_else(|| (!source.is_empty()).then_some(source))
                 {
-                    remove_device_state(device_id, &driver, &fanout, &ai_stats_watchers, &projects);
+                    remove_device_state(device_id, &fanout, &ai_stats_watchers, &projects);
                 }
                 None
             }
@@ -642,58 +625,64 @@ fn make_handler(
                     Err(error) => Some((REMOTE_ERROR, json!({ "message": error }))),
                 }
             }
-            REMOTE_GIT_STATUS => {
-                let (project_id, project_path) = git_project_target(&payload);
-                Some((
+            REMOTE_GIT_STATUS => match git_project_target(&payload) {
+                Ok((project_id, project_path)) => Some((
                     REMOTE_GIT_STATUS,
                     git_status_payload(
                         project_id.as_str(),
                         project_path.as_str(),
                         codux_git::wire::status(&project_path),
                     ),
-                ))
-            }
-            REMOTE_GIT_INVOKE => {
-                let (project_id, project_path) = git_project_target(&payload);
-                let op = payload.get("op").and_then(Value::as_str).unwrap_or("");
-                let args = payload.get("args").cloned().unwrap_or(Value::Null);
-                match codux_git::wire::invoke(&project_path, op, &args) {
-                    Ok(()) => Some((
-                        REMOTE_GIT_STATUS,
-                        git_status_payload(
-                            project_id.as_str(),
-                            project_path.as_str(),
-                            codux_git::wire::status(&project_path),
-                        ),
-                    )),
-                    Err(error) => Some((REMOTE_ERROR, json!({ "message": error }))),
-                }
-            }
-            REMOTE_GIT_READ => {
-                let (project_id, project_path) = git_project_target(&payload);
-                let op = payload.get("op").and_then(Value::as_str).unwrap_or("");
-                let args = payload.get("args").cloned().unwrap_or(Value::Null);
-                // `stored_state` is a full status payload (needs the project
-                // envelope); every other read op shares the engine table.
-                if op == "stored_state" {
-                    Some((
-                        REMOTE_GIT_READ,
-                        json!({
-                            "op": op,
-                            "result": git_status_payload(
-                        project_id.as_str(),
-                        project_path.as_str(),
+                )),
+                Err(error) => Some((REMOTE_ERROR, json!({ "message": error }))),
+            },
+            REMOTE_GIT_INVOKE => match git_project_target(&payload) {
+                Ok((project_id, project_path)) => {
+                    let op = payload.get("op").and_then(Value::as_str).unwrap_or("");
+                    let args = payload.get("args").cloned().unwrap_or(Value::Null);
+                    match codux_git::wire::invoke(&project_path, op, &args) {
+                        Ok(()) => Some((
+                            REMOTE_GIT_STATUS,
+                            git_status_payload(
+                                project_id.as_str(),
+                                project_path.as_str(),
                                 codux_git::wire::status(&project_path),
                             ),
-                        }),
-                    ))
-                } else {
-                    match codux_git::wire::read(&project_path, op, &args) {
-                        Ok(result) => {
-                            Some((REMOTE_GIT_READ, json!({ "op": op, "result": result })))
-                        }
+                        )),
                         Err(error) => Some((REMOTE_ERROR, json!({ "message": error }))),
                     }
+                }
+                Err(error) => Some((REMOTE_ERROR, json!({ "message": error }))),
+            },
+            REMOTE_GIT_READ => {
+                match git_project_target(&payload) {
+                    Ok((project_id, project_path)) => {
+                        let op = payload.get("op").and_then(Value::as_str).unwrap_or("");
+                        let args = payload.get("args").cloned().unwrap_or(Value::Null);
+                        // `stored_state` is a full status payload (needs the project
+                        // envelope); every other read op shares the engine table.
+                        if op == "stored_state" {
+                            Some((
+                                REMOTE_GIT_READ,
+                                json!({
+                                    "op": op,
+                                    "result": git_status_payload(
+                                        project_id.as_str(),
+                                        project_path.as_str(),
+                                        codux_git::wire::status(&project_path),
+                                    ),
+                                }),
+                            ))
+                        } else {
+                            match codux_git::wire::read(&project_path, op, &args) {
+                                Ok(result) => {
+                                    Some((REMOTE_GIT_READ, json!({ "op": op, "result": result })))
+                                }
+                                Err(error) => Some((REMOTE_ERROR, json!({ "message": error }))),
+                            }
+                        }
+                    }
+                    Err(error) => Some((REMOTE_ERROR, json!({ "message": error }))),
                 }
             }
             REMOTE_WORKTREE_LIST => {
@@ -767,14 +756,15 @@ fn make_handler(
                     .get("projectId")
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                let stored = AgentProjectStore::new().list().unwrap_or_default();
-                let project = stored
-                    .iter()
-                    .find(|item| item.id == project_id)
-                    .or_else(|| stored.first())
-                    .cloned();
+                let project = AgentProjectStore::new().list().map(|stored| {
+                    stored
+                        .iter()
+                        .find(|item| item.id == project_id)
+                        .or_else(|| stored.first())
+                        .cloned()
+                });
                 match project {
-                    Some(project) => {
+                    Ok(Some(project)) => {
                         // Register the requesting device as a watcher (one project
                         // per device) so the poller re-pushes on runtime change.
                         if let Some(device_id) = device_id.filter(|value| !value.trim().is_empty())
@@ -802,10 +792,11 @@ fn make_handler(
                             ),
                         ))
                     }
-                    None => Some((
+                    Ok(None) => Some((
                         REMOTE_ERROR,
                         json!({ "message": "Unable to load AI stats." }),
                     )),
+                    Err(error) => Some((REMOTE_ERROR, json!({ "message": error }))),
                 }
             }
             REMOTE_MEMORY_READ => {
@@ -897,7 +888,14 @@ fn is_project_subscription(kind: &str, payload: &Value) -> bool {
 
 /// Resolve the git target project: id → stored path, path → stored id, then
 /// the raw payload values (mirrors the desktop host's resolution).
-fn git_project_target(payload: &Value) -> (String, String) {
+fn git_project_target(payload: &Value) -> Result<(String, String), String> {
+    git_project_target_from(&AgentProjectStore::new(), payload)
+}
+
+fn git_project_target_from(
+    store: &AgentProjectStore,
+    payload: &Value,
+) -> Result<(String, String), String> {
     let project_id = payload
         .get("projectId")
         .and_then(Value::as_str)
@@ -908,11 +906,11 @@ fn git_project_target(payload: &Value) -> (String, String) {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .trim();
-    let items = AgentProjectStore::new().list().unwrap_or_default();
+    let items = store.list()?;
     if !project_id.is_empty()
         && let Some(item) = items.iter().find(|item| item.id == project_id)
     {
-        return (item.id.clone(), item.path.clone());
+        return Ok((item.id.clone(), item.path.clone()));
     }
     if !project_path.is_empty()
         && let Some(item) = items.iter().find(|item| {
@@ -922,9 +920,9 @@ fn git_project_target(payload: &Value) -> (String, String) {
             )
         })
     {
-        return (item.id.clone(), item.path.clone());
+        return Ok((item.id.clone(), item.path.clone()));
     }
-    (project_id.to_string(), project_path.to_string())
+    Ok((project_id.to_string(), project_path.to_string()))
 }
 
 /// A fresh identity for this host process, so a controller can tell a restarted
@@ -1056,19 +1054,12 @@ async fn connect_serving_host(
             }),
             on_upload: Arc::new(|_| Ok(())),
             on_state: {
-                let driver = Arc::clone(&driver);
                 let fanout = fanout.clone();
                 let ai_stats_watchers = Arc::clone(&ai_stats_watchers);
                 let projects = Arc::clone(&projects);
                 Arc::new(move |device_id, state| {
                     if matches!(state.as_str(), "closed" | "failed" | "disconnected") {
-                        remove_device_state(
-                            &device_id,
-                            &driver,
-                            &fanout,
-                            &ai_stats_watchers,
-                            &projects,
-                        );
+                        remove_device_state(&device_id, &fanout, &ai_stats_watchers, &projects);
                     }
                 })
             },
@@ -1105,7 +1096,9 @@ async fn connect_serving_host(
                     authorize_web_tunnel_tcp_connect(&pairing, request)
                 }))
             },
-            on_log: None,
+            on_log: Some(Arc::new(|message| {
+                eprintln!("Agent transport: {message}");
+            })),
         },
     )
     .await?;
@@ -1147,10 +1140,25 @@ fn spawn_ai_stats_poller(
         use codux_protocol::RemoteAICurrentSession;
         use codux_runtime_core::ai_stats::RemoteAICurrentSessionProvider;
         let mut last: HashMap<String, Vec<RemoteAICurrentSession>> = HashMap::new();
+        let mut catalog_error = None;
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(1000));
         loop {
             ticker.tick().await;
-            let projects = AgentProjectStore::new().list().unwrap_or_default();
+            let projects = match AgentProjectStore::new().list() {
+                Ok(projects) => {
+                    if catalog_error.take().is_some() {
+                        eprintln!("Project catalog recovered; AI stats polling resumed.");
+                    }
+                    projects
+                }
+                Err(error) => {
+                    if catalog_error.as_deref() != Some(error.as_str()) {
+                        eprintln!("AI stats polling paused: {error}");
+                    }
+                    catalog_error = Some(error);
+                    continue;
+                }
+            };
             let project_ids = projects
                 .iter()
                 .map(|project| project.id.as_str())
@@ -1601,9 +1609,9 @@ pub async fn run_serve_smoke_async() -> Result<String, String> {
         )?;
         let created = expect(&mut reply_rx, REMOTE_TERMINAL_CREATED).await?;
         let terminal_id = created
-            .get("sessionId")
+            .get("id")
             .and_then(Value::as_str)
-            .ok_or_else(|| "terminal.create returned no sessionId".to_string())?
+            .ok_or_else(|| "terminal.create returned no id".to_string())?
             .to_string();
         request(
             REMOTE_TERMINAL_INPUT,
@@ -1859,6 +1867,28 @@ mod tests {
             "a restarted agent must look like a new runtime instance so clients \
              reset their resource-version guard"
         );
+    }
+
+    #[test]
+    fn git_target_loading_surfaces_a_broken_project_catalog() {
+        let path = std::env::temp_dir().join(format!(
+            "codux-agent-broken-projects-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "{broken").unwrap();
+
+        let error = git_project_target_from(
+            &AgentProjectStore::with_path(path.clone()),
+            &json!({ "projectId": "project-1", "projectPath": "/srv/project" }),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("is not valid JSON"));
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

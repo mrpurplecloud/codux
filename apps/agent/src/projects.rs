@@ -84,15 +84,42 @@ impl AgentProjectStore {
                 ));
             }
         };
-        if text.trim().is_empty() {
-            return Ok(Vec::new());
-        }
-        serde_json::from_str::<Vec<ProjectListItem>>(&text).map_err(|error| {
+        let items = serde_json::from_str::<Vec<ProjectListItem>>(&text).map_err(|error| {
             format!(
                 "Project catalog {} is not valid JSON: {error}. Repair or move the file, then retry.",
                 self.path.display()
             )
-        })
+        })?;
+        let invalid = |reason: String| {
+            format!(
+                "Project catalog {} is invalid: {reason}. Repair or move the file, then retry.",
+                self.path.display()
+            )
+        };
+        for (index, item) in items.iter().enumerate() {
+            let id = item.id.trim();
+            if id.is_empty() || id != item.id {
+                return Err(invalid(
+                    "project id is empty or has outer whitespace".to_string(),
+                ));
+            }
+            let path = item.path.trim();
+            if path.is_empty() || path != item.path {
+                return Err(invalid(
+                    "project path is empty or has outer whitespace".to_string(),
+                ));
+            }
+            if items[..index].iter().any(|previous| previous.id == item.id) {
+                return Err(invalid(format!("duplicate project id {:?}", item.id)));
+            }
+            if items[..index]
+                .iter()
+                .any(|previous| paths_equal(&previous.path, &item.path))
+            {
+                return Err(invalid(format!("duplicate project path {:?}", item.path)));
+            }
+        }
+        Ok(items)
     }
 
     /// Register `path`. Idempotent by host-native path: an existing entry keeps
@@ -239,6 +266,17 @@ fn default_project_name(path: &str) -> String {
 mod tests {
     use super::*;
 
+    fn temp_catalog_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "codux-agent-projects-{label}-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
     #[test]
     fn project_ids_and_names_follow_target_path_syntax() {
         #[cfg(windows)]
@@ -255,5 +293,88 @@ mod tests {
             project_id_for_path("/repo/Project"),
             project_id_for_path("/repo/project")
         );
+    }
+
+    #[test]
+    fn an_existing_empty_catalog_is_an_error_and_is_not_overwritten() {
+        let path = temp_catalog_path("empty");
+        fs::write(&path, "  \n").unwrap();
+        let store = AgentProjectStore::with_path(path.clone());
+
+        let error = match store.add("/srv/project", Some("Project")) {
+            Ok(_) => panic!("an empty existing file must be malformed JSON"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("is not valid JSON"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "  \n");
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn duplicate_project_ids_are_rejected() {
+        let path = temp_catalog_path("duplicate-id");
+        fs::write(
+            &path,
+            serde_json::to_string(&serde_json::json!([
+                { "id": "p-1", "name": "Alpha", "path": "/srv/alpha" },
+                { "id": "p-1", "name": "Beta", "path": "/srv/beta" }
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        let store = AgentProjectStore::with_path(path.clone());
+
+        let error = store
+            .list()
+            .expect_err("duplicate ids make routing ambiguous");
+
+        assert!(error.contains("duplicate project id"));
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn duplicate_project_paths_are_rejected() {
+        let path = temp_catalog_path("duplicate-path");
+        fs::write(
+            &path,
+            serde_json::to_string(&serde_json::json!([
+                { "id": "p-1", "name": "Alpha", "path": "/srv/alpha" },
+                { "id": "p-2", "name": "Duplicate", "path": "/srv/alpha" }
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        let store = AgentProjectStore::with_path(path.clone());
+
+        let error = store
+            .list()
+            .expect_err("duplicate paths make catalog membership ambiguous");
+
+        assert!(error.contains("duplicate project path"));
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn empty_project_identity_fields_are_rejected() {
+        let path = temp_catalog_path("empty-fields");
+        let store = AgentProjectStore::with_path(path.clone());
+        for (field, item) in [
+            (
+                "project id",
+                serde_json::json!({ "id": " ", "name": "Alpha", "path": "/srv/alpha" }),
+            ),
+            (
+                "project path",
+                serde_json::json!({ "id": "p-1", "name": "Alpha", "path": " " }),
+            ),
+        ] {
+            fs::write(&path, serde_json::to_string(&vec![item]).unwrap()).unwrap();
+
+            let error = store.list().expect_err("empty identity must be rejected");
+
+            assert!(error.contains(field));
+        }
+        fs::remove_file(path).ok();
     }
 }

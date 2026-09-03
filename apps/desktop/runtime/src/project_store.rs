@@ -44,8 +44,11 @@ impl ProjectStore {
         crate::config::raw_state_snapshot(&self.state_file)
     }
 
-    pub(super) fn save_raw_snapshot(&self, snapshot: &Map<String, Value>) -> Result<(), String> {
-        crate::config::save_raw_state_snapshot(&self.state_file, snapshot)
+    pub(super) fn update_raw_snapshot<R>(
+        &self,
+        update: impl FnOnce(&mut Map<String, Value>) -> Result<R, String>,
+    ) -> Result<R, String> {
+        crate::config::update_raw_state_snapshot(&self.state_file, update)
     }
 
     pub(super) fn state_cache_file(&self) -> PathBuf {

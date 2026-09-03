@@ -68,14 +68,19 @@ fn translate(payload: &mut Value, table: &HashMap<String, String>) {
     }
     match payload {
         Value::Object(fields) => {
-            // A record listed under a project can be identified BY that project:
-            // the default worktree's own `id` is the project id. Only such a
-            // record's `id` is a candidate, so a session or file id listed
-            // beside a `projectId` is left alone by the lookup below.
-            let identifies_a_project = fields.contains_key("projectId");
+            // Default worktree's own `id` is project id. No other record id is:
+            // terminals and tasks also sit beside `projectId`, and their ids
+            // must survive even if one happens to equal a project id.
+            let default_worktree_project_id = fields
+                .get("isDefault")
+                .and_then(Value::as_bool)
+                .filter(|is_default| *is_default)
+                .and_then(|_| fields.get("projectId"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
             for (key, value) in fields.iter_mut() {
                 let is_identity = PROJECT_ID_FIELDS.contains(&key.as_str())
-                    || (identifies_a_project && key == "id");
+                    || (key == "id" && value.as_str() == default_worktree_project_id.as_deref());
                 if is_identity && let Some(translated) = value.as_str().and_then(|id| table.get(id))
                 {
                     *value = Value::String(translated.clone());
@@ -161,6 +166,21 @@ mod tests {
         assert_eq!(payload["worktrees"][0]["id"], json!("desktop-1"));
         assert_eq!(payload["worktrees"][1]["id"], json!("worktree-2"));
         assert_eq!(payload["terminals"][0]["id"], json!("session-1"));
+    }
+
+    #[test]
+    fn a_colliding_non_worktree_id_is_not_a_project_identity() {
+        let mut payload = json!({
+            "terminals": [{ "id": "p-host-1", "projectId": "p-host-1" }],
+            "tasks": [{ "id": "p-host-1", "projectId": "p-host-1" }]
+        });
+
+        bridge().to_local(&mut payload);
+
+        assert_eq!(payload["terminals"][0]["id"], json!("p-host-1"));
+        assert_eq!(payload["terminals"][0]["projectId"], json!("desktop-1"));
+        assert_eq!(payload["tasks"][0]["id"], json!("p-host-1"));
+        assert_eq!(payload["tasks"][0]["projectId"], json!("desktop-1"));
     }
 
     #[test]

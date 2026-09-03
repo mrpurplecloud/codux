@@ -10,8 +10,8 @@
 use crate::projects::{AgentProjectStore, ProjectCommit};
 use codux_protocol::{
     REMOTE_ERROR, REMOTE_PROJECT_ADD, REMOTE_PROJECT_EDIT, REMOTE_PROJECT_LIST,
-    REMOTE_PROJECT_REMOVE, REMOTE_PROJECT_UPDATED, REMOTE_RESOURCE_PROJECTS,
-    REMOTE_RESOURCE_SUBSCRIBE, REMOTE_RESOURCE_UNSUBSCRIBE,
+    REMOTE_PROJECT_REMOVE, REMOTE_PROJECT_SELECT, REMOTE_PROJECT_SELECTED, REMOTE_PROJECT_UPDATED,
+    REMOTE_RESOURCE_PROJECTS, REMOTE_RESOURCE_SUBSCRIBE, REMOTE_RESOURCE_UNSUBSCRIBE,
 };
 use codux_runtime_core::{
     project::project_list_payload,
@@ -56,7 +56,11 @@ impl ProjectCatalogService {
     pub fn handles(kind: &str) -> bool {
         matches!(
             kind,
-            REMOTE_PROJECT_LIST | REMOTE_PROJECT_ADD | REMOTE_PROJECT_EDIT | REMOTE_PROJECT_REMOVE
+            REMOTE_PROJECT_LIST
+                | REMOTE_PROJECT_SELECT
+                | REMOTE_PROJECT_ADD
+                | REMOTE_PROJECT_EDIT
+                | REMOTE_PROJECT_REMOVE
         )
     }
 
@@ -79,6 +83,28 @@ impl ProjectCatalogService {
                 Ok(payload) => reply(REMOTE_PROJECT_LIST, payload),
                 Err(message) => error(&message),
             },
+            REMOTE_PROJECT_SELECT => {
+                let Some(project_id) = project_id_of(payload) else {
+                    return error("Project id is required.");
+                };
+                match self.store.list() {
+                    Ok(items) => {
+                        let Some(project) = items.iter().find(|item| item.id == project_id) else {
+                            return error("Project not found.");
+                        };
+                        let worktree_id = crate::worktree::resolve_worktree_id(
+                            project_id,
+                            &project.path,
+                            payload.get("worktreeId").and_then(Value::as_str),
+                        );
+                        reply(
+                            REMOTE_PROJECT_SELECTED,
+                            json!({ "projectId": project_id, "worktreeId": worktree_id }),
+                        )
+                    }
+                    Err(message) => error(&message),
+                }
+            }
             REMOTE_PROJECT_ADD => {
                 let Some(path) = payload.get("path").and_then(Value::as_str) else {
                     return error("Project path is required.");
@@ -352,6 +378,56 @@ mod tests {
                 "{device_id} receives a newer resource version"
             );
         }
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn select_acknowledges_a_stored_project() {
+        let dir = temp_dir("select");
+        let service = service(&dir);
+        let project = project_dir(&dir, "repo");
+        let added = service.handle(
+            REMOTE_PROJECT_ADD,
+            &json!({ "path": project, "name": "Repo" }),
+            Some("device-a"),
+        );
+        let project_id = reply_of(&added, REMOTE_PROJECT_UPDATED).unwrap().payload["projectId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        assert!(ProjectCatalogService::handles(REMOTE_PROJECT_SELECT));
+        let selected = service.handle(
+            REMOTE_PROJECT_SELECT,
+            &json!({ "projectId": project_id, "worktreeId": project_id }),
+            Some("device-a"),
+        );
+        let acknowledgement = reply_of(&selected, REMOTE_PROJECT_SELECTED).unwrap();
+        assert_eq!(acknowledgement.payload["projectId"], json!(project_id));
+        assert_eq!(acknowledgement.payload["worktreeId"], json!(project_id));
+
+        let stale_worktree = service.handle(
+            REMOTE_PROJECT_SELECT,
+            &json!({ "projectId": project_id, "worktreeId": "stale-worktree" }),
+            Some("device-a"),
+        );
+        assert_eq!(
+            reply_of(&stale_worktree, REMOTE_PROJECT_SELECTED)
+                .unwrap()
+                .payload["worktreeId"],
+            json!(project_id)
+        );
+
+        let missing = service.handle(
+            REMOTE_PROJECT_SELECT,
+            &json!({ "projectId": "missing" }),
+            Some("device-a"),
+        );
+        assert_eq!(
+            reply_of(&missing, REMOTE_ERROR).unwrap().payload["message"],
+            "Project not found."
+        );
 
         std::fs::remove_dir_all(dir).ok();
     }

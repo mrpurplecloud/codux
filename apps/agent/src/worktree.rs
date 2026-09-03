@@ -30,16 +30,7 @@ pub fn worktree_list_payload(project_id: &str, project_path: &str) -> Value {
         .iter()
         .map(|entry| worktree_entry(project_id, entry))
         .collect();
-    let items: Vec<RuntimeWorktreeItem> = scanned
-        .iter()
-        .map(|entry| RuntimeWorktreeItem {
-            id: entry_id(project_id, entry),
-            project_id: project_id.to_string(),
-            path: entry.path.clone(),
-            is_default: entry.is_default,
-            exists: Path::new(&entry.path).exists(),
-        })
-        .collect();
+    let items = runtime_worktree_items(project_id, &scanned);
     let selected = selected_runtime_worktree_id(project_id, None, &items);
     // Base branches come from the project's git branches (same source the
     // desktop host uses), so the worktree create dialog offers real options.
@@ -56,6 +47,42 @@ pub fn worktree_list_payload(project_id: &str, project_path: &str) -> Value {
         default_base_branch,
         error: None,
     })
+}
+
+/// Resolve a controller's requested worktree against this project's current
+/// git worktrees. A stale id falls back to the root worktree.
+pub(crate) fn resolve_worktree_id(
+    project_id: &str,
+    project_path: &str,
+    requested_worktree_id: Option<&str>,
+) -> String {
+    let Some(requested_worktree_id) = requested_worktree_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return project_id.to_string();
+    };
+    if requested_worktree_id == project_id {
+        return project_id.to_string();
+    }
+    let scanned = scan_worktrees(project_path);
+    let items = runtime_worktree_items(project_id, &scanned);
+    selected_runtime_worktree_id(project_id, Some(requested_worktree_id), &items)
+        .filter(|selected| selected == requested_worktree_id)
+        .unwrap_or_else(|| project_id.to_string())
+}
+
+fn runtime_worktree_items(project_id: &str, scanned: &[ScannedEntry]) -> Vec<RuntimeWorktreeItem> {
+    scanned
+        .iter()
+        .map(|entry| RuntimeWorktreeItem {
+            id: entry_id(project_id, entry),
+            project_id: project_id.to_string(),
+            path: entry.path.clone(),
+            is_default: entry.is_default,
+            exists: Path::new(&entry.path).exists(),
+        })
+        .collect()
 }
 
 /// Scan the project's real git worktrees via `git worktree list --porcelain`.
@@ -211,9 +238,26 @@ mod tests {
                     .find(|worktree| !worktree["isDefault"].as_bool().unwrap_or(false))
             })
             .expect("created worktree");
+        let created_id = created["id"].as_str().expect("created worktree id");
 
         assert_eq!(payload["selectedWorktreeId"], created["id"]);
         assert_eq!(created["branch"], "feature/selected");
+        assert_eq!(
+            resolve_worktree_id(
+                "project-1",
+                repo.to_string_lossy().as_ref(),
+                Some(created_id),
+            ),
+            created_id
+        );
+        assert_eq!(
+            resolve_worktree_id(
+                "project-1",
+                repo.to_string_lossy().as_ref(),
+                Some("stale-worktree"),
+            ),
+            "project-1"
+        );
 
         fs::remove_dir_all(repo).ok();
     }

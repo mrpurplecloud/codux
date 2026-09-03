@@ -34,6 +34,7 @@ impl RuntimeService {
         &self,
         request: ProjectCreateRequest,
     ) -> Result<ProjectListSnapshot, String> {
+        ProjectStore::validate_project_environment_variables(&request.environment_variables)?;
         // A project on a host that owns its catalog is the host's to create:
         // commit there first, then adopt the catalog it committed. An
         // unreachable owner fails instead of writing locally — that record could
@@ -62,21 +63,84 @@ impl RuntimeService {
         &self,
         request: ProjectUpdateRequest,
     ) -> Result<ProjectListSnapshot, String> {
+        ProjectStore::validate_project_environment_variables(&request.environment_variables)?;
+        let store = ProjectStore::new(self.support_dir.clone());
+        let target_remote_device_id = request
+            .runtime_target
+            .remote_device_id()
+            .map(str::to_string);
+        // A legacy remote record can become a projection asynchronously. Finish
+        // that host's migration before deciding whether this edit is local;
+        // otherwise edit/close can race registration and diverge from the host.
+        let existing_remote_device_id = store
+            .projects_snapshot()
+            .into_iter()
+            .find(|project| project.id == request.project_id)
+            .and_then(|project| {
+                project
+                    .runtime_target
+                    .remote_device_id()
+                    .map(str::to_string)
+            });
+        let existing_catalog_controller = match existing_remote_device_id.as_deref() {
+            Some(device_id) => self.remote_project_catalog_host_if_any(device_id)?,
+            None => None,
+        };
         // A projection of a host's catalog is the host's to rename or re-path:
         // it commits there first, and the snapshot it publishes is what moves
         // the shared fields here and on every other connected controller. An
-        // edit that moves the record to another runtime target is not a catalog
-        // edit at all — it takes the record off this host, and the local path
-        // below drops the host id with it.
-        if let Some((device_id, host_project_id)) = ProjectStore::new(self.support_dir.clone())
-            .remote_catalog_projection(&request.project_id)
-            && request.runtime_target.remote_device_id() == Some(device_id.as_str())
+        // edit that changes owners creates an independent project through the
+        // new target's normal flow. Rewriting this projection in place would
+        // orphan the original host's catalog entry, sessions, and bridge state.
+        if let Some((device_id, host_project_id)) =
+            store.remote_catalog_projection(&request.project_id)
         {
-            let controller = self.required_remote_project_catalog_host(&device_id)?;
-            return self.edit_remote_project(&device_id, &host_project_id, &controller, request);
+            if target_remote_device_id.as_deref() == Some(device_id.as_str()) {
+                let controller = existing_catalog_controller.as_ref().ok_or_else(|| {
+                    format!("Remote host {device_id} is unavailable.")
+                })?;
+                return self.edit_remote_project(
+                    &device_id,
+                    &host_project_id,
+                    controller.as_ref(),
+                    request,
+                );
+            }
+            return self.project_create(ProjectCreateRequest {
+                name: request.name,
+                path: request.path,
+                badge_text: request.badge_text,
+                badge_symbol: request.badge_symbol,
+                badge_color_hex: request.badge_color_hex,
+                environment_variables: request.environment_variables,
+                runtime_target: request.runtime_target,
+            });
         }
-        let snapshot =
-            ProjectStore::new(self.support_dir.clone()).update_project_from_request(request)?;
+        if let Some(device_id) = target_remote_device_id {
+            let catalog_controller = if existing_remote_device_id.as_deref()
+                == Some(device_id.as_str())
+            {
+                existing_catalog_controller
+            } else {
+                self.remote_project_catalog_host_if_any(&device_id)?
+            };
+            if let Some(controller) = catalog_controller {
+                return self.create_remote_project(
+                    &device_id,
+                    &controller,
+                    ProjectCreateRequest {
+                        name: request.name,
+                        path: request.path,
+                        badge_text: request.badge_text,
+                        badge_symbol: request.badge_symbol,
+                        badge_color_hex: request.badge_color_hex,
+                        environment_variables: request.environment_variables,
+                        runtime_target: request.runtime_target,
+                    },
+                );
+            }
+        }
+        let snapshot = store.update_project_from_request(request)?;
         if let Some(project_id) = snapshot.selected_project_id.as_deref() {
             let _ = self.mark_project_active_with_watch(project_id);
         }
@@ -170,13 +234,28 @@ impl RuntimeService {
 
     pub fn close_project(&self, project_id: &str) -> Result<Option<String>, String> {
         let store = ProjectStore::new(self.support_dir.clone());
+        let remote_device_id = store
+            .projects_snapshot()
+            .into_iter()
+            .find(|project| project.id == project_id)
+            .and_then(|project| {
+                project
+                    .runtime_target
+                    .remote_device_id()
+                    .map(str::to_string)
+            });
+        let catalog_controller = match remote_device_id.as_deref() {
+            Some(device_id) => self.remote_project_catalog_host_if_any(device_id)?,
+            None => None,
+        };
         // Removing a projection removes catalog membership, which only the host
         // can do; the snapshot it publishes prunes this projection and every
         // other controller's. Reconciling that snapshot runs the lifecycle
         // below, so this path stops here. The host's directory and sessions are
         // untouched.
         if let Some((device_id, host_project_id)) = store.remote_catalog_projection(project_id) {
-            let controller = self.required_remote_project_catalog_host(&device_id)?;
+            let controller = catalog_controller
+                .ok_or_else(|| format!("Remote host {device_id} is unavailable."))?;
             return self.remove_remote_project(&device_id, &host_project_id, &controller);
         }
         let workspace_ids = self.project_workspace_ids_for_root(project_id);

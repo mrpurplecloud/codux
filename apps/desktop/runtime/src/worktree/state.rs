@@ -309,6 +309,9 @@ pub(super) fn raw_snapshot(path: &Path) -> Map<String, Value> {
     crate::config::raw_state_snapshot(path)
 }
 
-pub(super) fn save_raw_snapshot(path: &Path, snapshot: &Map<String, Value>) -> Result<(), String> {
-    crate::config::save_raw_state_snapshot(path, snapshot)
+pub(super) fn update_raw_snapshot<R>(
+    path: &Path,
+    update: impl FnOnce(&mut Map<String, Value>) -> Result<R, String>,
+) -> Result<R, String> {
+    crate::config::update_raw_state_snapshot(path, update)
 }

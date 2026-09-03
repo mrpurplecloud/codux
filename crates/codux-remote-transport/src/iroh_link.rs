@@ -63,6 +63,9 @@ const UPLOAD_QUEUE_CAPACITY: usize = 2;
 /// next one connects in ~18ms), so we want to give up on a stalled dial quickly
 /// and re-dial the same already-online endpoint rather than wait out a long hang.
 const IROH_DIAL_BASE_TIMEOUT: Duration = Duration::from_secs(4);
+/// QUIC is already connected here; both application streams should complete
+/// their kind ACKs promptly. Expiry returns control to the reconnect loop.
+const IROH_STREAM_READY_TIMEOUT: Duration = Duration::from_secs(4);
 /// How many times to re-dial on the same warm endpoint before surfacing an error
 /// to the reconnect loop (which then cold-starts a fresh endpoint). Each attempt
 /// gets `BASE + 2s * attempt`, so 4s + 6s + 8s = 18s of dialling on one online().
@@ -74,9 +77,50 @@ static HOST_PEER_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone)]
 struct PeerSenders {
     id: u64,
+    connection: Connection,
     control: IrohSender,
     terminal: IrohSender,
     closed: Arc<AtomicBool>,
+}
+
+/// Holds one connection's streams until both outbound queues have real writers.
+/// Publishing a peer before this pair is complete lets `send_terminal` report
+/// success while its receiver still sits unread in the accept loop.
+struct PendingPeerStreams<T> {
+    control: Option<T>,
+    terminal: Option<T>,
+    started: bool,
+}
+
+impl<T> PendingPeerStreams<T> {
+    fn new() -> Self {
+        Self {
+            control: None,
+            terminal: None,
+            started: false,
+        }
+    }
+
+    fn stage(&mut self, kind: u8, stream: T) -> Result<(), T> {
+        let slot = match kind {
+            STREAM_KIND_CONTROL => &mut self.control,
+            STREAM_KIND_TERMINAL => &mut self.terminal,
+            _ => return Err(stream),
+        };
+        if self.started || slot.is_some() {
+            return Err(stream);
+        }
+        *slot = Some(stream);
+        Ok(())
+    }
+
+    fn take_ready(&mut self) -> Option<(T, T)> {
+        if self.started || self.control.is_none() || self.terminal.is_none() {
+            return None;
+        }
+        self.started = true;
+        Some((self.control.take()?, self.terminal.take()?))
+    }
 }
 
 pub struct RemoteIrohHostTransport {
@@ -231,89 +275,121 @@ impl RemoteIrohHostTransport {
         let (terminal_tx, terminal_rx) = mpsc::channel::<Vec<u8>>(TERMINAL_QUEUE_CAPACITY);
         let peer_senders = PeerSenders {
             id: HOST_PEER_ID.fetch_add(1, Ordering::Relaxed),
+            connection: connection.clone(),
             control: control_tx,
             terminal: terminal_tx,
             closed: Arc::new(AtomicBool::new(false)),
         };
         let mut control_rx = Some(control_rx);
         let mut terminal_rx = Some(terminal_rx);
-        self.insert_peer(peer_key.clone(), peer_senders.clone());
-        (self.on_state)(peer_key.clone(), "connected".to_string());
+        let mut streams = PendingPeerStreams::new();
+        let ready_deadline = tokio::time::Instant::now() + IROH_STREAM_READY_TIMEOUT;
         loop {
-            let (send, mut recv) = match connection.accept_bi().await {
-                Ok(streams) => streams,
-                Err(error) => {
+            let (mut send, mut recv) =
+                match tokio::time::timeout_at(ready_deadline, connection.accept_bi()).await {
+                    Ok(Ok(streams)) => streams,
+                    Ok(Err(error)) => {
+                        self.log(format!(
+                            "iroh_host_accept_stream failed peer={peer_key} error={error}"
+                        ));
+                        break;
+                    }
+                    Err(_) => {
+                        self.log(format!("iroh_host_stream_ready timeout peer={peer_key}"));
+                        connection.close(0u32.into(), b"stream readiness timeout");
+                        break;
+                    }
+                };
+            let kind =
+                match tokio::time::timeout_at(ready_deadline, read_stream_kind(&mut recv)).await {
+                    Ok(Ok(kind)) => kind,
+                    Ok(Err(error)) => {
+                        self.log(format!(
+                            "iroh_host_stream_kind failed peer={peer_key} error={error}"
+                        ));
+                        continue;
+                    }
+                    Err(_) => {
+                        self.log(format!("iroh_host_stream_kind timeout peer={peer_key}"));
+                        connection.close(0u32.into(), b"stream kind timeout");
+                        break;
+                    }
+                };
+            let label = match kind {
+                STREAM_KIND_CONTROL => "control",
+                STREAM_KIND_TERMINAL => "terminal",
+                _ => {
                     self.log(format!(
-                        "iroh_host_accept_stream failed peer={peer_key} error={error}"
-                    ));
-                    break;
-                }
-            };
-            let kind = match read_stream_kind(&mut recv).await {
-                Ok(kind) => kind,
-                Err(error) => {
-                    self.log(format!(
-                        "iroh_host_stream_kind failed peer={peer_key} error={error}"
+                        "unsupported iroh stream kind {kind} peer={peer_key}"
                     ));
                     continue;
                 }
             };
-            match kind {
-                STREAM_KIND_CONTROL => {
-                    let Some(rx) = control_rx.take() else {
-                        self.log(format!(
-                            "iroh_host_duplicate_control_stream peer={peer_key}"
-                        ));
-                        continue;
-                    };
-                    let mut send = send;
-                    if let Err(error) = write_stream_kind(&mut send, STREAM_KIND_CONTROL).await {
-                        self.log(format!(
-                            "iroh_host_control_init failed peer={peer_key} error={error}"
-                        ));
-                        continue;
-                    }
-                    spawn_writer(send, rx, self.on_log.clone(), {
-                        let transport = Arc::clone(&self);
-                        let peer_key = peer_key.clone();
-                        let peer_id = peer_senders.id;
-                        let closed = Arc::clone(&peer_senders.closed);
-                        move || transport.close_peer(peer_id, &peer_key, "control_write", &closed)
-                    });
-                    self.spawn_peer_reader(recv, peer_key.clone(), peer_senders.clone(), "control");
+            match tokio::time::timeout_at(ready_deadline, write_stream_kind(&mut send, kind)).await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    self.log(format!(
+                        "iroh_host_{label}_init failed peer={peer_key} error={error}"
+                    ));
+                    continue;
                 }
-                STREAM_KIND_TERMINAL => {
-                    let Some(rx) = terminal_rx.take() else {
-                        self.log(format!(
-                            "iroh_host_duplicate_terminal_stream peer={peer_key}"
-                        ));
-                        continue;
-                    };
-                    let mut send = send;
-                    if let Err(error) = write_stream_kind(&mut send, STREAM_KIND_TERMINAL).await {
-                        self.log(format!(
-                            "iroh_host_terminal_init failed peer={peer_key} error={error}"
-                        ));
-                        continue;
-                    }
-                    spawn_writer(send, rx, self.on_log.clone(), {
-                        let transport = Arc::clone(&self);
-                        let peer_key = peer_key.clone();
-                        let peer_id = peer_senders.id;
-                        let closed = Arc::clone(&peer_senders.closed);
-                        move || transport.close_peer(peer_id, &peer_key, "terminal_write", &closed)
-                    });
-                    self.spawn_peer_reader(
-                        recv,
-                        peer_key.clone(),
-                        peer_senders.clone(),
-                        "terminal",
-                    );
+                Err(_) => {
+                    self.log(format!("iroh_host_{label}_ack timeout peer={peer_key}"));
+                    connection.close(0u32.into(), b"stream ack timeout");
+                    break;
                 }
-                _ => self.log(format!(
-                    "unsupported iroh stream kind {kind} peer={peer_key}"
-                )),
             }
+            if streams.stage(kind, (send, recv)).is_err() {
+                self.log(format!(
+                    "iroh_host_duplicate_{label}_stream peer={peer_key}"
+                ));
+                continue;
+            }
+            let Some(((control_send, control_recv), (terminal_send, terminal_recv))) =
+                streams.take_ready()
+            else {
+                continue;
+            };
+            let (Some(control_rx), Some(terminal_rx)) = (control_rx.take(), terminal_rx.take())
+            else {
+                break;
+            };
+
+            // Writers own both receivers before the peer becomes reachable.
+            // From this point, every successful queue send has a live consumer.
+            spawn_writer(control_send, control_rx, self.on_log.clone(), {
+                let transport = Arc::clone(&self);
+                let peer_key = peer_key.clone();
+                let peer_id = peer_senders.id;
+                let closed = Arc::clone(&peer_senders.closed);
+                move || transport.close_peer(peer_id, &peer_key, "control_write", &closed)
+            });
+            spawn_writer(terminal_send, terminal_rx, self.on_log.clone(), {
+                let transport = Arc::clone(&self);
+                let peer_key = peer_key.clone();
+                let peer_id = peer_senders.id;
+                let closed = Arc::clone(&peer_senders.closed);
+                move || transport.close_peer(peer_id, &peer_key, "terminal_write", &closed)
+            });
+            if !self.insert_peer(peer_key.clone(), peer_senders.clone()) {
+                connection.close(0u32.into(), b"superseded connection");
+                break;
+            }
+            (self.on_state)(peer_key.clone(), "connected".to_string());
+            self.spawn_peer_reader(
+                control_recv,
+                peer_key.clone(),
+                peer_senders.clone(),
+                "control",
+            );
+            self.spawn_peer_reader(
+                terminal_recv,
+                peer_key.clone(),
+                peer_senders.clone(),
+                "terminal",
+            );
+            return;
         }
         self.close_peer(
             peer_senders.id,
@@ -451,6 +527,12 @@ impl RemoteIrohHostTransport {
         fallback_device_id: String,
         data: Vec<u8>,
     ) {
+        if senders.closed.load(Ordering::SeqCst) || !self.peer_is_current(peer_key, senders.id) {
+            self.log(format!(
+                "iroh_host_recv drop peer={peer_key} reason=stale_connection"
+            ));
+            return;
+        }
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(&data) else {
             self.log("iroh_host_recv drop reason=decode".to_string());
             return;
@@ -476,7 +558,12 @@ impl RemoteIrohHostTransport {
             };
             let pairing_device_id = pairing_device_id.unwrap_or(device_id);
             if !pairing_device_id.trim().is_empty() {
-                self.bind_peer_alias(peer_key, &pairing_device_id, senders);
+                if !self.bind_peer_alias(peer_key, &pairing_device_id, senders) {
+                    self.log(format!(
+                        "iroh_host_recv drop peer={peer_key} reason=stale_pairing_connection"
+                    ));
+                    return;
+                }
                 (self.on_state)(pairing_device_id.clone(), "connected".to_string());
             }
             let mut response = serde_json::json!({
@@ -501,7 +588,12 @@ impl RemoteIrohHostTransport {
             return;
         }
         if !device_id.trim().is_empty() {
-            self.bind_peer_alias(peer_key, &device_id, senders);
+            if !self.bind_peer_alias(peer_key, &device_id, senders) {
+                self.log(format!(
+                    "iroh_host_recv drop peer={peer_key} reason=stale_authorized_connection"
+                ));
+                return;
+            }
             (self.on_state)(device_id.clone(), "connected".to_string());
         }
         if let Some(pong) = crate::control_messages::transport_pong_for_ping(&raw, Some(&device_id))
@@ -571,18 +663,94 @@ impl RemoteIrohHostTransport {
         }
     }
 
-    fn insert_peer(&self, device_id: String, senders: PeerSenders) {
-        if let Ok(mut peers) = self.peers.lock() {
-            peers.insert(device_id, senders);
+    fn insert_peer(&self, peer_key: String, senders: PeerSenders) -> bool {
+        let replaced = {
+            let Ok(mut peers) = self.peers.lock() else {
+                return false;
+            };
+            let current = peers.get(&peer_key).cloned();
+            if current
+                .as_ref()
+                .is_some_and(|current| current.id > senders.id)
+            {
+                senders.closed.store(true, Ordering::SeqCst);
+                senders
+                    .connection
+                    .close(0u32.into(), b"superseded connection");
+                return false;
+            }
+            let replaced = current.filter(|current| current.id != senders.id);
+            let aliases = replaced.as_ref().map(|current| {
+                current.closed.store(true, Ordering::SeqCst);
+                remove_peer_aliases_by_id(&mut peers, current.id)
+            });
+            peers.insert(peer_key, senders.clone());
+            replaced.zip(aliases)
+        };
+        if let Some((replaced, aliases)) = replaced {
+            self.notify_replaced_peer(replaced, senders.id, aliases);
         }
+        true
     }
 
-    fn bind_peer_alias(&self, peer_key: &str, device_id: &str, senders: &PeerSenders) {
-        if peer_key == device_id {
-            return;
-        }
-        if let Ok(mut peers) = self.peers.lock() {
+    fn bind_peer_alias(&self, peer_key: &str, device_id: &str, senders: &PeerSenders) -> bool {
+        let replaced = {
+            let Ok(mut peers) = self.peers.lock() else {
+                return false;
+            };
+            if senders.closed.load(Ordering::SeqCst)
+                || peers.get(peer_key).map(|peer| peer.id) != Some(senders.id)
+            {
+                return false;
+            }
+            let current = peers.get(device_id).cloned();
+            if current
+                .as_ref()
+                .is_some_and(|current| current.id > senders.id)
+            {
+                senders.closed.store(true, Ordering::SeqCst);
+                let aliases = remove_peer_aliases_by_id(&mut peers, senders.id);
+                drop(peers);
+                senders
+                    .connection
+                    .close(0u32.into(), b"superseded connection");
+                for alias in aliases {
+                    (self.on_state)(alias, "closed".to_string());
+                }
+                return false;
+            }
+            let replaced = current.filter(|current| current.id != senders.id);
+            let aliases = replaced.as_ref().map(|current| {
+                current.closed.store(true, Ordering::SeqCst);
+                remove_peer_aliases_by_id(&mut peers, current.id)
+            });
             peers.insert(device_id.to_string(), senders.clone());
+            replaced.zip(aliases)
+        };
+        if let Some((replaced, aliases)) = replaced {
+            self.notify_replaced_peer(replaced, senders.id, aliases);
+        }
+        true
+    }
+
+    fn peer_is_current(&self, peer_key: &str, peer_id: u64) -> bool {
+        self.peers
+            .lock()
+            .ok()
+            .and_then(|peers| peers.get(peer_key).map(|peer| peer.id))
+            == Some(peer_id)
+    }
+
+    fn notify_replaced_peer(&self, replaced: PeerSenders, new_id: u64, aliases: Vec<String>) {
+        replaced
+            .connection
+            .close(0u32.into(), b"superseded connection");
+        let old_id = replaced.id;
+        self.log(format!(
+            "iroh_host_peer_replaced old_id={old_id} new_id={new_id}"
+        ));
+        for alias in aliases {
+            (self.on_state)(alias, "closed".to_string());
         }
     }
 
@@ -952,14 +1120,22 @@ impl RemoteIrohControllerTransport {
             evict_controller_endpoint(endpoint_generation).await;
             return Err(last_dial_error);
         };
-        let (send, recv) = connection
-            .open_bi()
-            .await
-            .map_err(|error| format!("iroh controller open stream failed: {error}"))?;
-        let (terminal_send, terminal_recv) = connection
-            .open_bi()
-            .await
-            .map_err(|error| format!("iroh controller open terminal stream failed: {error}"))?;
+        let ready = tokio::time::timeout(
+            IROH_STREAM_READY_TIMEOUT,
+            initialize_controller_streams(&connection),
+        )
+        .await;
+        let ((send, recv), (terminal_send, terminal_recv)) = match ready {
+            Ok(Ok(streams)) => streams,
+            Ok(Err(error)) => {
+                connection.close(0u32.into(), b"stream handshake failed");
+                return Err(error);
+            }
+            Err(_) => {
+                connection.close(0u32.into(), b"stream readiness timeout");
+                return Err("iroh controller stream readiness timeout".to_string());
+            }
+        };
         let (tx, rx) = mpsc::channel::<Vec<u8>>(CONTROL_QUEUE_CAPACITY);
         let (terminal_tx, terminal_rx) = mpsc::channel::<Vec<u8>>(TERMINAL_QUEUE_CAPACITY);
         let (upload_tx, upload_rx) = mpsc::channel::<RemoteTransportUpload>(UPLOAD_QUEUE_CAPACITY);
@@ -978,8 +1154,6 @@ impl RemoteIrohControllerTransport {
             closed: Arc::new(AtomicBool::new(false)),
             credentials: Arc::clone(&credentials),
         });
-        publish_path_state(&connection, &on_state);
-        spawn_path_watcher(connection.clone(), Arc::clone(&on_state));
         // Blobs are now served by the pool-level Router (see
         // acquire_controller_endpoint), so there's no per-transport accept loop.
         spawn_upload_writer(
@@ -1008,6 +1182,8 @@ impl RemoteIrohControllerTransport {
             Arc::clone(&close_controller),
         );
         spawn_control_stream(send, recv, rx, on_message, on_log.clone(), close_controller);
+        publish_path_state(&connection, &on_state);
+        spawn_path_watcher(connection.clone(), Arc::clone(&on_state));
         Ok(transport)
     }
 
@@ -1296,32 +1472,62 @@ fn spawn_writer(
     });
 }
 
-fn spawn_control_stream(
+async fn initialize_controller_stream(
     mut send: SendStream,
     mut recv: RecvStream,
+    kind: u8,
+    label: &'static str,
+) -> Result<(SendStream, RecvStream), String> {
+    write_stream_kind(&mut send, kind)
+        .await
+        .map_err(|error| format!("iroh controller {label} init failed: {error}"))?;
+    let acknowledged = read_stream_kind(&mut recv)
+        .await
+        .map_err(|error| format!("iroh controller {label} ACK failed: {error}"))?;
+    if acknowledged != kind {
+        return Err(format!(
+            "iroh controller {label} ACK used unexpected stream kind {acknowledged}"
+        ));
+    }
+    Ok((send, recv))
+}
+
+async fn initialize_controller_streams(
+    connection: &Connection,
+) -> Result<((SendStream, RecvStream), (SendStream, RecvStream)), String> {
+    let (send, recv) = connection
+        .open_bi()
+        .await
+        .map_err(|error| format!("iroh controller open stream failed: {error}"))?;
+    let (terminal_send, terminal_recv) = connection
+        .open_bi()
+        .await
+        .map_err(|error| format!("iroh controller open terminal stream failed: {error}"))?;
+    tokio::try_join!(
+        initialize_controller_stream(send, recv, STREAM_KIND_CONTROL, "control"),
+        initialize_controller_stream(
+            terminal_send,
+            terminal_recv,
+            STREAM_KIND_TERMINAL,
+            "terminal",
+        )
+    )
+}
+
+fn spawn_control_stream(
+    send: SendStream,
+    recv: RecvStream,
     rx: mpsc::Receiver<Vec<u8>>,
     on_message: RemoteTransportMessageHandler,
     on_log: Option<RemoteTransportLogHandler>,
     on_close: Arc<dyn Fn() + Send + Sync + 'static>,
 ) {
     tokio::spawn(async move {
-        let write_result = write_stream_kind(&mut send, STREAM_KIND_CONTROL).await;
-        if let Err(error) = write_result {
-            if let Some(on_log) = on_log.as_ref() {
-                on_log(format!("iroh_controller_control_init failed error={error}"));
-            }
-            on_close();
-            return;
-        }
         spawn_writer(send, rx, on_log.clone(), {
             let on_close = Arc::clone(&on_close);
             move || on_close()
         });
-        let result = match read_stream_kind(&mut recv).await {
-            Ok(STREAM_KIND_CONTROL) => read_loop(recv, String::new(), on_message).await,
-            Ok(kind) => Err(format!("unexpected controller stream kind {kind}")),
-            Err(error) => Err(error),
-        };
+        let result = read_loop(recv, String::new(), on_message).await;
         if let Err(error) = result
             && let Some(on_log) = on_log.as_ref()
         {
@@ -1332,32 +1538,19 @@ fn spawn_control_stream(
 }
 
 fn spawn_terminal_stream(
-    mut send: SendStream,
-    mut recv: RecvStream,
+    send: SendStream,
+    recv: RecvStream,
     rx: mpsc::Receiver<Vec<u8>>,
     on_message: RemoteTransportMessageHandler,
     on_log: Option<RemoteTransportLogHandler>,
     on_close: Arc<dyn Fn() + Send + Sync + 'static>,
 ) {
     tokio::spawn(async move {
-        if let Err(error) = write_stream_kind(&mut send, STREAM_KIND_TERMINAL).await {
-            if let Some(on_log) = on_log.as_ref() {
-                on_log(format!(
-                    "iroh_controller_terminal_init failed error={error}"
-                ));
-            }
-            on_close();
-            return;
-        }
         spawn_writer(send, rx, on_log.clone(), {
             let on_close = Arc::clone(&on_close);
             move || on_close()
         });
-        let result = match read_stream_kind(&mut recv).await {
-            Ok(STREAM_KIND_TERMINAL) => read_loop(recv, String::new(), on_message).await,
-            Ok(kind) => Err(format!("unexpected terminal stream kind {kind}")),
-            Err(error) => Err(error),
-        };
+        let result = read_loop(recv, String::new(), on_message).await;
         if let Err(error) = result
             && let Some(on_log) = on_log.as_ref()
         {
@@ -1791,15 +1984,334 @@ fn parse_relay_url(value: &str) -> Result<RelayUrl, String> {
 mod tests {
     use super::*;
 
-    fn peer(id: u64) -> PeerSenders {
-        let (control, _control_rx) = mpsc::channel::<Vec<u8>>(CONTROL_QUEUE_CAPACITY);
-        let (terminal, _terminal_rx) = mpsc::channel::<Vec<u8>>(TERMINAL_QUEUE_CAPACITY);
-        PeerSenders {
-            id,
-            control,
-            terminal,
-            closed: Arc::new(AtomicBool::new(false)),
+    struct TestHost {
+        transport: Arc<RemoteIrohHostTransport>,
+        states: mpsc::UnboundedReceiver<(String, String)>,
+        messages: mpsc::UnboundedReceiver<(String, Vec<u8>)>,
+        logs: mpsc::UnboundedReceiver<String>,
+    }
+
+    struct TestPeer {
+        endpoint: Endpoint,
+        connection: Connection,
+        control_send: SendStream,
+        _control_recv: RecvStream,
+        _terminal_send: SendStream,
+        terminal_recv: RecvStream,
+    }
+
+    async fn direct_endpoint(alpns: Vec<Vec<u8>>) -> Endpoint {
+        crate::install_rustls_crypto_provider();
+        Endpoint::builder(presets::N0)
+            .alpns(alpns)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .expect("bind direct iroh endpoint")
+    }
+
+    async fn test_host() -> TestHost {
+        let endpoint = direct_endpoint(vec![CODUX_REMOTE_ALPN.to_vec()]).await;
+        let (state_tx, states) = mpsc::unbounded_channel();
+        let (message_tx, messages) = mpsc::unbounded_channel();
+        let (log_tx, logs) = mpsc::unbounded_channel();
+        let transport = Arc::new(RemoteIrohHostTransport {
+            node_id: endpoint.id().to_string(),
+            endpoint: endpoint.clone(),
+            blob_store: new_blob_store(),
+            relay_url: String::new(),
+            peers: Mutex::new(HashMap::new()),
+            on_message: Arc::new(move |device_id, data| {
+                let _ = message_tx.send((device_id, data));
+            }),
+            on_upload: Arc::new(|_| Ok(())),
+            on_state: Arc::new(move |device_id, state| {
+                let _ = state_tx.send((device_id, state));
+            }),
+            on_pairing: Arc::new(|_| None),
+            on_authorize: Arc::new(|_, _| true),
+            on_web_tunnel_tcp_connect: None,
+            on_log: Some(Arc::new(move |message| {
+                let _ = log_tx.send(message);
+            })),
+            router: OnceLock::new(),
+        });
+        let weak = Arc::downgrade(&transport);
+        tokio::spawn(async move {
+            while let Some(incoming) = endpoint.accept().await {
+                let Ok(connection) = incoming.await else {
+                    continue;
+                };
+                let Some(transport) = weak.upgrade() else {
+                    break;
+                };
+                tokio::spawn(transport.handle_connection(connection));
+            }
+        });
+        TestHost {
+            transport,
+            states,
+            messages,
+            logs,
         }
+    }
+
+    async fn test_peer(host: &RemoteIrohHostTransport) -> TestPeer {
+        let endpoint = direct_endpoint(Vec::new()).await;
+        let connection = endpoint
+            .connect(host.endpoint.addr(), CODUX_REMOTE_ALPN)
+            .await
+            .expect("connect direct iroh peer");
+        let ((control_send, control_recv), (terminal_send, terminal_recv)) = tokio::time::timeout(
+            Duration::from_secs(1),
+            initialize_controller_streams(&connection),
+        )
+        .await
+        .expect("stream handshake timeout")
+        .expect("stream handshake");
+        TestPeer {
+            endpoint,
+            connection,
+            control_send,
+            _control_recv: control_recv,
+            _terminal_send: terminal_send,
+            terminal_recv,
+        }
+    }
+
+    async fn assert_missing_stream_times_out(kind: u8, label: &'static str) {
+        let mut host = test_host().await;
+        let endpoint = direct_endpoint(Vec::new()).await;
+        let connection = endpoint
+            .connect(host.transport.endpoint.addr(), CODUX_REMOTE_ALPN)
+            .await
+            .expect("connect direct iroh peer");
+        let (send, recv) = connection.open_bi().await.expect("open stream");
+        let _stream = tokio::time::timeout(
+            Duration::from_secs(1),
+            initialize_controller_stream(send, recv, kind, label),
+        )
+        .await
+        .expect("stream ACK timeout")
+        .expect("stream ACK");
+
+        assert!(!host.transport.send_terminal(vec![1], None));
+        let timeout_log =
+            tokio::time::timeout(IROH_STREAM_READY_TIMEOUT + Duration::from_secs(1), async {
+                loop {
+                    let log = host.logs.recv().await.expect("host log channel");
+                    if log.contains("iroh_host_stream_ready timeout") {
+                        return log;
+                    }
+                }
+            })
+            .await
+            .expect("host stream readiness timeout log");
+        assert!(timeout_log.contains("timeout"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), host.states.recv())
+                .await
+                .is_err()
+        );
+
+        connection.close(0u32.into(), b"test complete");
+        endpoint.close().await;
+        host.transport.shutdown().await;
+    }
+
+    async fn send_device_message(peer: &mut TestPeer, sequence: u64) -> Result<(), String> {
+        let data = serde_json::to_vec(&serde_json::json!({
+            "type": "test.message",
+            "deviceId": "device-1",
+            "deviceToken": "token-1",
+            "payload": { "sequence": sequence },
+        }))
+        .unwrap();
+        write_frame(&mut peer.control_send, &data).await
+    }
+
+    #[test]
+    fn peer_streams_are_not_ready_until_control_and_terminal_are_staged() {
+        let mut streams = PendingPeerStreams::new();
+
+        streams.stage(STREAM_KIND_CONTROL, "control").unwrap();
+        assert!(streams.take_ready().is_none());
+
+        streams.stage(STREAM_KIND_TERMINAL, "terminal").unwrap();
+        assert_eq!(streams.take_ready(), Some(("control", "terminal")));
+        assert!(streams.stage(STREAM_KIND_TERMINAL, "duplicate").is_err());
+    }
+
+    #[test]
+    fn peer_streams_can_arrive_terminal_first() {
+        let mut streams = PendingPeerStreams::new();
+
+        streams.stage(STREAM_KIND_TERMINAL, "terminal").unwrap();
+        assert!(streams.take_ready().is_none());
+        streams.stage(STREAM_KIND_CONTROL, "control").unwrap();
+
+        assert_eq!(streams.take_ready(), Some(("control", "terminal")));
+    }
+
+    #[tokio::test]
+    async fn host_times_out_when_terminal_stream_is_missing() {
+        assert_missing_stream_times_out(STREAM_KIND_CONTROL, "control").await;
+    }
+
+    #[tokio::test]
+    async fn host_times_out_when_control_stream_is_missing() {
+        assert_missing_stream_times_out(STREAM_KIND_TERMINAL, "terminal").await;
+    }
+
+    #[tokio::test]
+    async fn host_times_out_when_stream_kind_stalls() {
+        let mut host = test_host().await;
+        let endpoint = direct_endpoint(Vec::new()).await;
+        let connection = endpoint
+            .connect(host.transport.endpoint.addr(), CODUX_REMOTE_ALPN)
+            .await
+            .expect("connect direct iroh peer");
+        let _stalled_stream = connection.open_bi().await.expect("open stalled stream");
+        let (mut trigger_send, _trigger_recv) =
+            connection.open_bi().await.expect("open trigger stream");
+        write_stream_kind(&mut trigger_send, STREAM_KIND_CONTROL)
+            .await
+            .expect("make stalled stream visible");
+
+        let timeout_log =
+            tokio::time::timeout(IROH_STREAM_READY_TIMEOUT + Duration::from_secs(1), async {
+                loop {
+                    let log = host.logs.recv().await.expect("host log channel");
+                    if log.contains("iroh_host_stream_kind timeout") {
+                        return log;
+                    }
+                }
+            })
+            .await
+            .expect("host stream kind timeout log");
+        assert!(timeout_log.contains("timeout"));
+        assert!(!host.transport.send_terminal(vec![1], None));
+
+        connection.close(0u32.into(), b"test complete");
+        endpoint.close().await;
+        host.transport.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn controller_streams_are_not_ready_before_both_acks() {
+        let server = direct_endpoint(vec![CODUX_REMOTE_ALPN.to_vec()]).await;
+        let client = direct_endpoint(Vec::new()).await;
+        let (terminal_seen_tx, mut terminal_seen_rx) = mpsc::channel(1);
+        let (terminal_ack_tx, mut terminal_ack_rx) = mpsc::channel(1);
+        let server_endpoint = server.clone();
+        let server_task = tokio::spawn(async move {
+            let connection = server_endpoint
+                .accept()
+                .await
+                .expect("incoming connection")
+                .await
+                .expect("accept connection");
+            let (mut control_send, mut control_recv) =
+                connection.accept_bi().await.expect("accept control stream");
+            assert_eq!(
+                read_stream_kind(&mut control_recv).await.unwrap(),
+                STREAM_KIND_CONTROL
+            );
+            write_stream_kind(&mut control_send, STREAM_KIND_CONTROL)
+                .await
+                .unwrap();
+            let (mut terminal_send, mut terminal_recv) = connection
+                .accept_bi()
+                .await
+                .expect("accept terminal stream");
+            assert_eq!(
+                read_stream_kind(&mut terminal_recv).await.unwrap(),
+                STREAM_KIND_TERMINAL
+            );
+            terminal_seen_tx.send(()).await.unwrap();
+            terminal_ack_rx.recv().await.expect("terminal ACK release");
+            write_stream_kind(&mut terminal_send, STREAM_KIND_TERMINAL)
+                .await
+                .unwrap();
+            connection.closed().await;
+        });
+        let connection = client
+            .connect(server.addr(), CODUX_REMOTE_ALPN)
+            .await
+            .expect("connect direct iroh peer");
+        let ready_connection = connection.clone();
+        let mut ready_task =
+            tokio::spawn(async move { initialize_controller_streams(&ready_connection).await });
+
+        terminal_seen_rx.recv().await.expect("terminal stream kind");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut ready_task)
+                .await
+                .is_err()
+        );
+        terminal_ack_tx.send(()).await.unwrap();
+        let _streams = tokio::time::timeout(Duration::from_secs(1), ready_task)
+            .await
+            .expect("controller readiness timeout")
+            .expect("controller readiness task")
+            .expect("controller stream handshake");
+
+        connection.close(0u32.into(), b"test complete");
+        server_task.await.unwrap();
+        client.close().await;
+        server.close().await;
+    }
+
+    #[tokio::test]
+    async fn newer_connection_keeps_device_alias_from_old_connection() {
+        let mut host = test_host().await;
+        let mut old = test_peer(&host.transport).await;
+        send_device_message(&mut old, 1).await.unwrap();
+        let (_, first) = tokio::time::timeout(Duration::from_secs(1), host.messages.recv())
+            .await
+            .expect("first host message timeout")
+            .expect("first host message");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&first).unwrap()["payload"]["sequence"],
+            1
+        );
+
+        let mut new = test_peer(&host.transport).await;
+        send_device_message(&mut new, 2).await.unwrap();
+        let (_, second) = tokio::time::timeout(Duration::from_secs(1), host.messages.recv())
+            .await
+            .expect("second host message timeout")
+            .expect("second host message");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&second).unwrap()["payload"]["sequence"],
+            2
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), old.connection.closed())
+            .await
+            .expect("old connection was not closed");
+        let _ = send_device_message(&mut old, 3).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), host.messages.recv())
+                .await
+                .is_err()
+        );
+        assert!(
+            host.transport
+                .send_terminal(b"new-owner".to_vec(), Some("device-1"))
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), read_frame(&mut new.terminal_recv))
+                .await
+                .expect("new owner receive timeout")
+                .expect("new owner receive")
+                .expect("new owner frame"),
+            b"new-owner"
+        );
+        new.connection.close(0u32.into(), b"test complete");
+        old.endpoint.close().await;
+        new.endpoint.close().await;
+        host.transport.shutdown().await;
     }
 
     #[test]
@@ -1809,38 +2321,6 @@ mod tests {
         assert!(sender.try_send(vec![1]).is_ok());
         assert!(sender.try_send(vec![2]).is_err());
         assert_eq!(receiver.try_recv().unwrap(), vec![1]);
-    }
-
-    #[test]
-    fn remove_peer_aliases_by_id_returns_all_aliases() {
-        let mut peers = HashMap::new();
-        peers.insert("node-id".to_string(), peer(7));
-        peers.insert("device-id".to_string(), peer(7));
-        peers.insert("other".to_string(), peer(8));
-
-        let mut aliases = remove_peer_aliases_by_id(&mut peers, 7);
-        aliases.sort();
-
-        assert_eq!(
-            aliases,
-            vec!["device-id".to_string(), "node-id".to_string()]
-        );
-        assert!(!peers.contains_key("node-id"));
-        assert!(!peers.contains_key("device-id"));
-        assert!(peers.contains_key("other"));
-    }
-
-    #[test]
-    fn remove_peer_aliases_by_id_keeps_rebound_aliases() {
-        let mut peers = HashMap::new();
-        peers.insert("node-id".to_string(), peer(8));
-        peers.insert("device-id".to_string(), peer(8));
-
-        let aliases = remove_peer_aliases_by_id(&mut peers, 7);
-
-        assert!(aliases.is_empty());
-        assert_eq!(peers.get("node-id").map(|peer| peer.id), Some(8));
-        assert_eq!(peers.get("device-id").map(|peer| peer.id), Some(8));
     }
 
     #[test]

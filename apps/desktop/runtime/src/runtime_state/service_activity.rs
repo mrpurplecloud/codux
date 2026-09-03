@@ -64,6 +64,9 @@ impl RuntimeService {
             .as_ref()
             .and_then(|id| snapshot.projects.iter().find(|project| &project.id == id))
             .or_else(|| snapshot.projects.first())?;
+        if project.runtime_target.is_hosted() {
+            return None;
+        }
         let selected_worktree_id = snapshot
             .selected_worktree_id_by_project
             .get(&project.id)
