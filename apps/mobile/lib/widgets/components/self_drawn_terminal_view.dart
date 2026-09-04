@@ -50,6 +50,7 @@ class SelfDrawnTerminalView extends StatefulWidget {
     required this.controller,
     required this.repaintSignal,
     required this.fontSize,
+    required this.canForwardScroll,
     this.onResize,
     this.onInput,
     this.onSendKey,
@@ -68,6 +69,7 @@ class SelfDrawnTerminalView extends StatefulWidget {
   /// re-reads the snapshot (gated by render generation) and repaints.
   final Listenable repaintSignal;
   final double fontSize;
+  final bool canForwardScroll;
   final void Function(int cols, int rows)? onResize;
 
   /// Raw typed text (batched by the host send path, same as the native view).
@@ -76,11 +78,11 @@ class SelfDrawnTerminalView extends StatefulWidget {
   /// Pre-encoded key bytes (enter, backspace, ...), sent immediately.
   final ValueChanged<String>? onSendKey;
 
-  /// Pre-encoded scroll bytes for an app that owns scrolling. Returns false
-  /// when this device does not hold the viewport: scrolling is a read and must
-  /// not take the session from whoever is driving it (the handoff reflows the
-  /// host grid), so the view scrolls its own buffer instead.
-  final bool Function(String data)? onSendScroll;
+  /// Pre-encoded scroll bytes for an app that owns scrolling. Only sent while
+  /// [canForwardScroll] holds: scrolling is a read and must not take the
+  /// session from whoever is driving it, because the handoff reflows the host
+  /// grid.
+  final ValueChanged<String>? onSendScroll;
   final ValueChanged<TerminalCursorMetrics?>? onCursorMetrics;
 
   /// Selected text (null when the selection is cleared), for the copy action.
@@ -520,13 +522,16 @@ class _SelfDrawnTerminalViewState extends State<SelfDrawnTerminalView>
     // A refused forward (this device does not hold the viewport) falls through
     // to the local buffer rather than taking the session away from its owner.
     if (mode != null) {
-      if (mode.mouseTracking && _forwardScroll(pixels, mode, useWheel: true)) {
-        return;
-      }
-      if (mode.alternateScreen &&
-          mode.alternateScroll &&
-          _forwardScroll(pixels, mode, useWheel: false)) {
-        return;
+      if (mode.mouseTracking) {
+        if (widget.canForwardScroll &&
+            _forwardScroll(pixels, mode, useWheel: true)) {
+          return;
+        }
+      } else if (mode.alternateScreen && mode.alternateScroll) {
+        if (widget.canForwardScroll &&
+            _forwardScroll(pixels, mode, useWheel: false)) {
+          return;
+        }
       }
     }
     widget.controller.scrollScreenPixels(
@@ -537,8 +542,9 @@ class _SelfDrawnTerminalViewState extends State<SelfDrawnTerminalView>
     _refresh(force: true);
   }
 
-  /// Returns whether the gesture reached the app; `false` leaves it for the
-  /// local buffer.
+  /// Returns whether the gesture belongs to the app; `false` (no session
+  /// snapshot or no sink) leaves it for the local buffer. Sub-cell movement
+  /// belongs to the app too — it stays accumulated until it makes a full tick.
   bool _forwardScroll(
     double pixels,
     TerminalScreenInputMode mode, {
@@ -547,9 +553,7 @@ class _SelfDrawnTerminalViewState extends State<SelfDrawnTerminalView>
     final snapshot = _snapshot;
     final send = widget.onSendScroll;
     if (snapshot == null || send == null) return false;
-    final accumBeforeGesture = _wheelAccum;
     _wheelAccum += pixels;
-    var forwarded = false;
     // One tick per cell-height of drag; dragging down (positive) reveals older
     // content, i.e. a wheel-up / up-arrow.
     while (_wheelAccum.abs() >= _cellHeight) {
@@ -571,13 +575,7 @@ class _SelfDrawnTerminalViewState extends State<SelfDrawnTerminalView>
               applicationCursor: mode.applicationCursor,
             );
       if (bytes.isEmpty) continue;
-      if (!send(bytes)) {
-        // Not ours to drive. Hand the whole gesture back so the local scroll
-        // moves by the full drag instead of swallowing part of it.
-        if (!forwarded) _wheelAccum = accumBeforeGesture;
-        return forwarded;
-      }
-      forwarded = true;
+      send(bytes);
     }
     return true;
   }
@@ -1368,6 +1366,7 @@ class _TerminalGridPainter extends CustomPainter {
       final underlineColor = TerminalTheme.resolveUnderlineColor(
         cell.underlineColor,
         colors.fg,
+        colors.bg,
       );
       if (span != 1 || _isFallbackSymbol(cell.text)) {
         if (current != null) {

@@ -39,6 +39,7 @@ class RemoteTerminalPane extends StatefulWidget {
     required this.onResize,
     required this.onSelectionChanged,
     required this.onSendKey,
+    required this.canForwardScroll,
     required this.onSendScroll,
     required this.onToggleKeyboard,
     required this.onRequestKeyboard,
@@ -75,10 +76,11 @@ class RemoteTerminalPane extends StatefulWidget {
   final void Function(int cols, int rows) onResize;
   final ValueChanged<String?> onSelectionChanged;
   final ValueChanged<String> onSendKey;
+  final bool canForwardScroll;
 
-  /// Scroll bytes for an app that owns scrolling; false when this device does
-  /// not hold the viewport, so the view scrolls its own buffer instead.
-  final bool Function(String data) onSendScroll;
+  /// Scroll bytes for an app that owns scrolling; forwarded only while
+  /// [canForwardScroll] holds.
+  final ValueChanged<String> onSendScroll;
   final VoidCallback onToggleKeyboard;
   final VoidCallback onRequestKeyboard;
   final VoidCallback onPaste;
@@ -235,6 +237,7 @@ class _RemoteTerminalPaneState extends State<RemoteTerminalPane> {
                                 onResize: widget.onResize,
                                 onInput: widget.onInput,
                                 onSendKey: widget.onSendKey,
+                                canForwardScroll: widget.canForwardScroll,
                                 onSendScroll: widget.onSendScroll,
                                 onSelectionChanged: widget.onSelectionChanged,
                                 onRequestKeyboard: widget.onRequestKeyboard,

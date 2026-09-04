@@ -44,6 +44,7 @@ void main() {
               controller: controller,
               repaintSignal: signal,
               fontSize: 14,
+              canForwardScroll: false,
               onResize: (cols, rows) {
                 reportedCols = cols;
                 reportedRows = rows;
@@ -107,6 +108,7 @@ void main() {
               controller: controller,
               repaintSignal: signal,
               fontSize: 14,
+              canForwardScroll: false,
               onSelectionChanged: (text) => selected = text,
             ),
           ),
@@ -164,6 +166,7 @@ void main() {
               controller: controller,
               repaintSignal: signal,
               fontSize: 14,
+              canForwardScroll: false,
             ),
           ),
         ),
@@ -205,28 +208,24 @@ void main() {
     final forwarded = <String>[];
     var owned = false;
 
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: SizedBox(
-            width: 320,
-            height: 480,
-            child: SelfDrawnTerminalView(
-              sessionId: 'session-1',
-              controller: controller,
-              repaintSignal: signal,
-              fontSize: 14,
-              onSendKey: (data) => forwarded.add('key:$data'),
-              onSendScroll: (data) {
-                if (!owned) return false;
-                forwarded.add('scroll:$data');
-                return true;
-              },
-            ),
+    Widget buildView() => MaterialApp(
+      home: Scaffold(
+        body: SizedBox(
+          width: 320,
+          height: 480,
+          child: SelfDrawnTerminalView(
+            sessionId: 'session-1',
+            controller: controller,
+            repaintSignal: signal,
+            fontSize: 14,
+            canForwardScroll: owned,
+            onSendKey: (data) => forwarded.add('key:$data'),
+            onSendScroll: (data) => forwarded.add('scroll:$data'),
           ),
         ),
       ),
     );
+    await tester.pumpWidget(buildView());
     await tester.pump();
     await tester.pump();
 
@@ -236,9 +235,14 @@ void main() {
     await tester.drag(find.byType(SelfDrawnTerminalView), const Offset(0, 120));
     await tester.pump();
     expect(forwarded, isEmpty);
-    expect(controller.screenSnapshot('session-1')!.displayOffset, greaterThan(0));
+    expect(
+      controller.screenSnapshot('session-1')!.displayOffset,
+      greaterThan(0),
+    );
 
     owned = true;
+    await tester.pumpWidget(buildView());
+    await tester.pump();
     final localOffset = controller.screenSnapshot('session-1')!.displayOffset;
     await tester.drag(find.byType(SelfDrawnTerminalView), const Offset(0, 120));
     await tester.pump();
@@ -250,6 +254,70 @@ void main() {
       reason: 'a forwarded scroll belongs to the app, not the local buffer',
     );
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a sub-cell scroll refused by the viewport owner stays local', (
+    tester,
+  ) async {
+    final controller = RemoteTerminalOutputController();
+    addTearDown(controller.dispose);
+    controller.bindSession('session-1', requireBaseline: true);
+    controller.accept(
+      RelayEnvelope(
+        type: 'terminal.output',
+        sessionId: 'session-1',
+        payload: {
+          'data': _mouseTrackingHistory,
+          'screenData': '\u001b[2J\u001b[H\u001b[?1000hline-0119',
+          'buffer': true,
+          'offset': 0,
+          'bufferLength': 1200,
+          'tail': true,
+          'outputSeq': 1,
+        },
+      ),
+      activeSessionId: 'session-1',
+    );
+
+    final signal = ValueNotifier<int>(0);
+    addTearDown(signal.dispose);
+    final forwarded = <String>[];
+    controller.resizeScreen('session-1', cols: 80, rows: 4);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 320,
+            height: 480,
+            child: SelfDrawnTerminalView(
+              sessionId: 'session-1',
+              controller: controller,
+              repaintSignal: signal,
+              fontSize: 40,
+              canForwardScroll: false,
+              onSendScroll: forwarded.add,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    final origin = tester.getCenter(find.byType(SelfDrawnTerminalView));
+    final gesture = await tester.startGesture(origin);
+    await gesture.moveBy(const Offset(0, 25));
+    await tester.pump();
+    await gesture.moveBy(const Offset(0, 10));
+    await tester.pump();
+
+    expect(forwarded, isEmpty);
+    expect(
+      controller.screenSnapshot('session-1')!.scrollPixelOffset,
+      greaterThan(0),
+    );
+    await gesture.up();
   });
 }
 
