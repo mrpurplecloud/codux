@@ -113,6 +113,7 @@ RemoteTerminalPane _pane({ValueChanged<String>? onSendKey}) {
     onResize: (_, _) {},
     onSelectionChanged: (_) {},
     onSendKey: onSendKey ?? (_) {},
+    onSendScroll: (_) => false,
     onToggleKeyboard: () {},
     onRequestKeyboard: () {},
     onPaste: () {},

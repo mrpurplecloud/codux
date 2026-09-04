@@ -175,4 +175,85 @@ void main() {
     expect(find.byType(CustomPaint), findsWidgets);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('a scroll the viewport owner refuses stays local', (
+    tester,
+  ) async {
+    final controller = RemoteTerminalOutputController();
+    addTearDown(controller.dispose);
+    controller.bindSession('session-1', requireBaseline: true);
+    controller.accept(
+      RelayEnvelope(
+        type: 'terminal.output',
+        sessionId: 'session-1',
+        payload: {
+          // Mouse tracking on: an app that owns scrolling (Claude Code, vim).
+          'data': _mouseTrackingHistory,
+          'screenData': '\u001b[2J\u001b[H\u001b[?1000hline-0119',
+          'buffer': true,
+          'offset': 0,
+          'bufferLength': 1200,
+          'tail': true,
+          'outputSeq': 1,
+        },
+      ),
+      activeSessionId: 'session-1',
+    );
+
+    final signal = ValueNotifier<int>(0);
+    addTearDown(signal.dispose);
+    final forwarded = <String>[];
+    var owned = false;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 320,
+            height: 480,
+            child: SelfDrawnTerminalView(
+              sessionId: 'session-1',
+              controller: controller,
+              repaintSignal: signal,
+              fontSize: 14,
+              onSendKey: (data) => forwarded.add('key:$data'),
+              onSendScroll: (data) {
+                if (!owned) return false;
+                forwarded.add('scroll:$data');
+                return true;
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    // Not the viewport owner: the gesture must not reach the app (taking the
+    // session to deliver it reflows the host grid) and must scroll locally
+    // instead of being swallowed.
+    await tester.drag(find.byType(SelfDrawnTerminalView), const Offset(0, 120));
+    await tester.pump();
+    expect(forwarded, isEmpty);
+    expect(controller.screenSnapshot('session-1')!.displayOffset, greaterThan(0));
+
+    owned = true;
+    final localOffset = controller.screenSnapshot('session-1')!.displayOffset;
+    await tester.drag(find.byType(SelfDrawnTerminalView), const Offset(0, 120));
+    await tester.pump();
+    expect(forwarded, isNotEmpty);
+    expect(forwarded.every((entry) => entry.startsWith('scroll:')), isTrue);
+    expect(
+      controller.screenSnapshot('session-1')!.displayOffset,
+      localOffset,
+      reason: 'a forwarded scroll belongs to the app, not the local buffer',
+    );
+    expect(tester.takeException(), isNull);
+  });
 }
+
+/// Mouse tracking on (an app that owns scrolling) plus enough history for the
+/// local buffer to have somewhere to scroll.
+final String _mouseTrackingHistory =
+    '\u001b[?1000h${List.generate(120, (index) => 'line-${index.toString().padLeft(4, '0')}').join('\r\n')}';

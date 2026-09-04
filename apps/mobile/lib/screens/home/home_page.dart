@@ -431,6 +431,7 @@ class _CoduxHomePageState extends State<CoduxHomePage>
         c._applyState(() => c._terminalSelectedText = text);
       },
       onSendKey: c._sendTerminalKey,
+      onSendScroll: c._sendTerminalScroll,
       onToggleKeyboard: c._toggleTerminalKeyboard,
       onRequestKeyboard: c._requestTerminalKeyboard,
       onPaste: c._pasteToTerminal,

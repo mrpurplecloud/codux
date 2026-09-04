@@ -579,6 +579,20 @@ extension _HomePageTerminal on HomeController {
     _sendInputNow(data, source: 'key');
   }
 
+  /// Forward a scroll gesture to the app that owns scrolling. Unlike a key,
+  /// scrolling is a read: it must not claim the viewport, because the handoff
+  /// resizes the host PTY to this device's grid and the reflow costs the top of
+  /// the scrollback. Returns false when this device is not the owner, and the
+  /// terminal view then scrolls its own buffer instead.
+  bool _sendTerminalScroll(String data) {
+    if (data.isEmpty || !_terminalViewportInteractive) return false;
+    final id = _sessionId;
+    if (id == null) return false;
+    _terminalInputBatcher.flush();
+    _sendInputNow(data, source: 'scroll', claimViewport: false);
+    return true;
+  }
+
   void _insertTerminalText(String text) {
     if (text.isEmpty) return;
     _terminalInputBatcher.flush();
@@ -588,7 +602,11 @@ extension _HomePageTerminal on HomeController {
     );
   }
 
-  void _sendInputNow(String data, {required String source}) {
+  void _sendInputNow(
+    String data, {
+    required String source,
+    bool claimViewport = true,
+  }) {
     if (data.isEmpty) return;
     var id = _sessionId;
     if (id == null) {
@@ -602,8 +620,10 @@ extension _HomePageTerminal on HomeController {
       _applyState(() => _status = _t('terminal.createOrSelectFirst'));
       return;
     }
-    _claimTerminalViewport(sessionId: id);
-    _flushPendingTerminalResize(force: true, sessionId: id);
+    if (claimViewport) {
+      _claimTerminalViewport(sessionId: id);
+      _flushPendingTerminalResize(force: true, sessionId: id);
+    }
     _terminalInputSender.send(
       sessionId: id,
       data: data,
