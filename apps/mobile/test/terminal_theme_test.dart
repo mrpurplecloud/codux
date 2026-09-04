@@ -157,7 +157,22 @@ void main() {
       inverse: false,
     );
 
-    expect(_contrast(colors.fg, AppColors.terminalBg), greaterThanOrEqualTo(3.0));
+    expect(
+      _contrast(colors.fg, AppColors.terminalBg),
+      greaterThanOrEqualTo(3.0),
+    );
+  });
+
+  test('light terminal theme darkens unreadable rgb underline colors', () {
+    CoduxTheme.brightness = Brightness.light;
+
+    final color = TerminalTheme.resolveUnderlineColor(
+      {'kind': 'rgb', 'r': 105, 'g': 219, 'b': 124},
+      AppColors.terminalText,
+      AppColors.terminalBg,
+    );
+
+    expect(_contrast(color, AppColors.terminalBg), greaterThanOrEqualTo(3.0));
   });
 
   test('mono terminal palette collapses hues onto a readable gray ramp', () {
@@ -181,6 +196,21 @@ void main() {
 
     expect(shades.length, lessThanOrEqualTo(3));
     expect(AppColors.terminalBg, const Color(0xFFFFFFFF));
+  });
+
+  test('mono terminal palette also collapses underline colors', () {
+    CoduxTheme.brightness = Brightness.light;
+    CoduxTheme.terminalMono = true;
+
+    final color = TerminalTheme.resolveUnderlineColor(
+      {'kind': 'indexed', 'index': 1},
+      AppColors.terminalText,
+      AppColors.terminalBg,
+    );
+
+    expect(color.r, color.g);
+    expect(color.g, color.b);
+    expect(_contrast(color, AppColors.terminalBg), greaterThanOrEqualTo(4.5));
   });
 
   test('resolved cells are not cached across a palette switch', () {

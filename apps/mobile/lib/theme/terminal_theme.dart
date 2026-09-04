@@ -65,9 +65,18 @@ class TerminalTheme {
   static Color resolveUnderlineColor(
     Map<String, dynamic>? value,
     Color fallback,
+    Color background,
   ) {
     if (value == null) return fallback;
-    return _resolveScreenColor(value, fallback).color;
+    final resolved = _resolveScreenColor(value, fallback);
+    if (resolved.isDefault) return fallback;
+    if (CoduxTheme.terminalMono) {
+      return _monoInk(resolved.color, background);
+    }
+    if (resolved.isRgb && CoduxTheme.isLight) {
+      return _darkenForContrast(resolved.color, background);
+    }
+    return _ensureReadable(resolved.color, background);
   }
 
   static TerminalPaintColors _resolveCellColors({
@@ -81,7 +90,8 @@ class TerminalTheme {
     var background = _resolveScreenColor(bg, AppColors.terminalBg);
     var fgColor = foreground.color;
     var bgColor = background.color;
-    var drawBackground = !background.isDefault && bgColor != AppColors.terminalBg;
+    var drawBackground =
+        !background.isDefault && bgColor != AppColors.terminalBg;
 
     if (background.isClashingSurface) {
       bgColor = AppColors.terminalElevated;
@@ -134,7 +144,11 @@ class TerminalTheme {
     bool inverted = false,
   }) {
     if (!CoduxTheme.terminalMono) {
-      return TerminalPaintColors(fg: fg, bg: bg, drawBackground: drawBackground);
+      return TerminalPaintColors(
+        fg: fg,
+        bg: bg,
+        drawBackground: drawBackground,
+      );
     }
     if (inverted) {
       // A true highlight block: solid ink behind canvas-colored text.
@@ -342,11 +356,7 @@ const _monoLightRamp = [
   Color(0xFF3D3D3D),
   Color(0xFF6B6B6B),
 ];
-const _monoDarkRamp = [
-  Color(0xFFFFFFFF),
-  Color(0xFFC2C2C2),
-  Color(0xFF8A8A8A),
-];
+const _monoDarkRamp = [Color(0xFFFFFFFF), Color(0xFFC2C2C2), Color(0xFF8A8A8A)];
 
 /// Quantize by contrast against the canvas, not by raw luminance: that keeps the
 /// mapping correct for both the dark- and light-tuned palettes (in each, a color
@@ -365,7 +375,9 @@ Color _monoBand() =>
 
 Color _ensureReadable(Color fg, Color bg) {
   if (_contrastRatio(fg, bg) >= 3.0 || !_isNeutral(fg)) return fg;
-  return bg.computeLuminance() > 0.5 ? AppColors.terminalBg : AppColors.terminalText;
+  return bg.computeLuminance() > 0.5
+      ? AppColors.terminalBg
+      : AppColors.terminalText;
 }
 
 double _contrastRatio(Color a, Color b) {
