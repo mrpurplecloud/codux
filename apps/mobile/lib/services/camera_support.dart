@@ -13,8 +13,8 @@ enum CameraAvailability {
   /// The device reports no camera at all (e-ink readers, kiosk tablets).
   missingHardware,
 
-  /// A previous start never finished — the camera took the process with it.
-  blockedAfterCrash,
+  /// A previous start failed or never finished.
+  blockedAfterFailure,
 }
 
 /// Decides whether the QR scanner may touch the camera at all.
@@ -56,7 +56,7 @@ class CameraSupport {
         CoduxLog.warn(
           '[codux-flutter-camera] previous camera start never finished; keeping the camera off',
         );
-        return CameraAvailability.blockedAfterCrash;
+        return CameraAvailability.blockedAfterFailure;
       }
       final info = await DeviceInfoPlugin().androidInfo;
       if (info.systemFeatures.contains(_anyCameraFeature)) {

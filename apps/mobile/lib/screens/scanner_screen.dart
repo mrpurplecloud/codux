@@ -37,6 +37,8 @@ class _ScannerScreenState extends State<ScannerScreen>
   // null while the hardware probe is in flight.
   CameraAvailability? _availability;
   bool _startPending = false;
+  Future<void>? _stopInFlight;
+  bool _scannerWanted = true;
   bool _handledPayload = false;
   bool _recognized = false;
   bool _showManualConnect = false;
@@ -95,19 +97,55 @@ class _ScannerScreenState extends State<ScannerScreen>
   Future<void> _startScanner() async {
     if (widget.scannerBuilder != null) return;
     if (_availability != CameraAvailability.available) return;
-    if (_startPending || _handledPayload || _controller.value.isRunning) {
+    if (!_scannerWanted ||
+        _startPending ||
+        _handledPayload ||
+        _controller.value.isRunning) {
       return;
     }
     _startPending = true;
+    final stopInFlight = _stopInFlight;
+    if (stopInFlight != null) {
+      try {
+        await stopInFlight;
+      } catch (error) {
+        CoduxLog.warn('[codux-flutter-camera] scanner stop failed: $error');
+        if (mounted) {
+          setState(
+            () => _availability = CameraAvailability.blockedAfterFailure,
+          );
+        }
+        _startPending = false;
+        return;
+      }
+    }
+    if (!mounted ||
+        _availability != CameraAvailability.available ||
+        !_scannerWanted ||
+        _handledPayload ||
+        _controller.value.isRunning) {
+      _startPending = false;
+      return;
+    }
     // Written before the start and cleared after it returns, so a start that
     // never returns marks the camera as unsafe for the next launch.
     await _cameraSupport.markStartAttempt();
     try {
+      if (!mounted || !_scannerWanted) return;
       await _controller.start();
+      if (_controller.value.error != null) {
+        if (mounted) {
+          setState(
+            () => _availability = CameraAvailability.blockedAfterFailure,
+          );
+        }
+        return;
+      }
+      if (!_scannerWanted) await _stopScanner();
     } catch (error) {
       CoduxLog.warn('[codux-flutter-camera] scanner start failed: $error');
       if (mounted) {
-        setState(() => _availability = CameraAvailability.missingHardware);
+        setState(() => _availability = CameraAvailability.blockedAfterFailure);
       }
     } finally {
       await _cameraSupport.markStartSettled();
@@ -116,9 +154,20 @@ class _ScannerScreenState extends State<ScannerScreen>
   }
 
   Future<void> _stopScanner() async {
+    _scannerWanted = false;
     if (widget.scannerBuilder != null) return;
-    if (_controller.value.isRunning) {
-      await _controller.stop();
+    final existing = _stopInFlight;
+    if (existing != null) {
+      await existing;
+      return;
+    }
+    if (!_controller.value.isRunning) return;
+    final stop = _controller.stop();
+    _stopInFlight = stop;
+    try {
+      await stop;
+    } finally {
+      if (identical(_stopInFlight, stop)) _stopInFlight = null;
     }
   }
 
@@ -188,6 +237,7 @@ class _ScannerScreenState extends State<ScannerScreen>
     if (!mounted || _handledPayload) return;
     switch (state) {
       case AppLifecycleState.resumed:
+        _scannerWanted = true;
         _startScanner();
       case AppLifecycleState.inactive:
       case AppLifecycleState.hidden:
@@ -199,6 +249,7 @@ class _ScannerScreenState extends State<ScannerScreen>
 
   @override
   void dispose() {
+    _scannerWanted = false;
     WidgetsBinding.instance.removeObserver(this);
     _pairingTokenController.dispose();
     _controller.dispose();
@@ -299,7 +350,8 @@ class _ScannerScreenState extends State<ScannerScreen>
                       ),
                       // Offered only when a past native failure — not absent
                       // hardware — is what turned the camera off.
-                      if (_availability == CameraAvailability.blockedAfterCrash)
+                      if (_availability ==
+                          CameraAvailability.blockedAfterFailure)
                         _ScannerAction(
                           label: prefs.t('pair.retryCamera'),
                           onTap: _retryCamera,
