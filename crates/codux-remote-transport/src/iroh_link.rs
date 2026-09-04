@@ -606,7 +606,15 @@ impl RemoteIrohHostTransport {
             self.log("iroh_host_recv drop reason=decode".to_string());
             return;
         };
-        let Ok(raw) = serde_json::from_value::<RemoteEnvelope>(value.clone()) else {
+        // `deviceToken` is the only field the envelope struct does not carry, so
+        // lift it out first and then MOVE the tree into `from_value`. Keeping
+        // `value` alive afterwards would force a deep clone of the whole frame
+        // (payloads reach 16 KB) on every inbound message from every peer.
+        let device_token = value
+            .get("deviceToken")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let Ok(raw) = serde_json::from_value::<RemoteEnvelope>(value) else {
             self.log("iroh_host_recv drop reason=envelope".to_string());
             return;
         };
@@ -640,18 +648,15 @@ impl RemoteIrohHostTransport {
                 "deviceId": pairing_device_id,
                 "payload": response_payload,
             });
-            if let Some(request_id) = value.get("requestId") {
-                response["requestId"] = request_id.clone();
+            if let Some(request_id) = raw.request_id.as_deref() {
+                response["requestId"] = serde_json::Value::String(request_id.to_string());
             }
             if let Ok(response) = serde_json::to_vec(&response) {
                 let _ = senders.control.try_send(response);
             }
             return;
         }
-        let device_token = value
-            .get("deviceToken")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+        let device_token = device_token.as_deref().unwrap_or_default();
         if !(self.on_authorize)(&device_id, device_token) {
             self.send_transport_rejection(senders, &raw, false);
             return;
