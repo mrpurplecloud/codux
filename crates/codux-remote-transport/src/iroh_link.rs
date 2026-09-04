@@ -65,7 +65,16 @@ const UPLOAD_QUEUE_CAPACITY: usize = 2;
 const IROH_DIAL_BASE_TIMEOUT: Duration = Duration::from_secs(4);
 /// QUIC is already connected here; both application streams should complete
 /// their kind ACKs promptly. Expiry returns control to the reconnect loop.
-const IROH_STREAM_READY_TIMEOUT: Duration = Duration::from_secs(4);
+///
+/// Generous on purpose: a relay-routed handshake carries the stream opens and
+/// both ACKs, and giving up on one that is merely slow costs a full re-dial —
+/// which delays the direct-path upgrade that would have made it fast. Kept
+/// under `IROH_ONLINE_TIMEOUT` so a genuinely wedged handshake still surfaces.
+#[cfg(not(test))]
+const IROH_STREAM_READY_TIMEOUT: Duration = Duration::from_secs(10);
+/// The timeout tests wait this out; the behaviour is the same at any length.
+#[cfg(test)]
+const IROH_STREAM_READY_TIMEOUT: Duration = Duration::from_secs(1);
 /// How many times to re-dial on the same warm endpoint before surfacing an error
 /// to the reconnect loop (which then cold-starts a fresh endpoint). Each attempt
 /// gets `BASE + 2s * attempt`, so 4s + 6s + 8s = 18s of dialling on one online().
@@ -283,6 +292,7 @@ impl RemoteIrohHostTransport {
         let mut control_rx = Some(control_rx);
         let mut terminal_rx = Some(terminal_rx);
         let mut streams = PendingPeerStreams::new();
+        let accepted_at = std::time::Instant::now();
         let ready_deadline = tokio::time::Instant::now() + IROH_STREAM_READY_TIMEOUT;
         loop {
             let (mut send, mut recv) =
@@ -295,7 +305,10 @@ impl RemoteIrohHostTransport {
                         break;
                     }
                     Err(_) => {
-                        self.log(format!("iroh_host_stream_ready timeout peer={peer_key}"));
+                        self.log(format!(
+                            "iroh_host_stream_ready timeout peer={peer_key} ms={}",
+                            accepted_at.elapsed().as_millis()
+                        ));
                         connection.close(0u32.into(), b"stream readiness timeout");
                         break;
                     }
@@ -310,7 +323,10 @@ impl RemoteIrohHostTransport {
                         continue;
                     }
                     Err(_) => {
-                        self.log(format!("iroh_host_stream_kind timeout peer={peer_key}"));
+                        self.log(format!(
+                            "iroh_host_stream_kind timeout peer={peer_key} ms={}",
+                            accepted_at.elapsed().as_millis()
+                        ));
                         connection.close(0u32.into(), b"stream kind timeout");
                         break;
                     }
@@ -382,7 +398,12 @@ impl RemoteIrohHostTransport {
                 connection.close(0u32.into(), b"superseded connection");
                 break;
             }
+            self.log(format!(
+                "iroh_host_streams_ready peer={peer_key} ms={}",
+                accepted_at.elapsed().as_millis()
+            ));
             (self.on_state)(peer_key.clone(), "connected".to_string());
+            self.spawn_peer_path_logger(connection.clone(), peer_key.clone());
             self.spawn_peer_reader(
                 control_recv,
                 peer_key.clone(),
@@ -488,6 +509,43 @@ impl RemoteIrohHostTransport {
             .await
             .map_err(|error| error.to_string())?;
         Ok(())
+    }
+
+    /// Log how a peer is actually reached, and again whenever the path changes.
+    ///
+    /// Without it a "connected but slow" report cannot be told apart from
+    /// "never upgraded off the relay": the host knew which path QUIC selected
+    /// and said nothing. The controller already reports this to its UI; the
+    /// headless host only had a log.
+    fn spawn_peer_path_logger(self: &Arc<Self>, connection: Connection, peer_key: String) {
+        let transport = Arc::clone(self);
+        tokio::spawn(async move {
+            transport.log_peer_path(&connection, &peer_key);
+            let mut events = connection.path_events();
+            while let Some(event) = events.next().await {
+                match event {
+                    PathEvent::Selected { .. } | PathEvent::Lagged { .. } => {
+                        transport.log_peer_path(&connection, &peer_key);
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+
+    fn log_peer_path(&self, connection: &Connection, peer_key: &str) {
+        for path in connection.paths().iter() {
+            if path.is_selected() {
+                self.log(format!(
+                    "iroh_host_path peer={peer_key} path={} addr={} rtt_ms={}",
+                    transport_path_kind(path.remote_addr()),
+                    transport_addr_label(path.remote_addr()),
+                    path.rtt().as_millis(),
+                ));
+                return;
+            }
+        }
+        self.log(format!("iroh_host_path peer={peer_key} path=unknown"));
     }
 
     fn spawn_peer_reader(
@@ -1146,18 +1204,37 @@ impl RemoteIrohControllerTransport {
             evict_controller_endpoint(endpoint_generation).await;
             return Err(last_dial_error);
         };
+        // Time the handshake on every outcome: it is the one span between "QUIC
+        // is up" and "the link is usable", and the budget above can only be
+        // tuned against measurements of it.
+        let handshake_started = std::time::Instant::now();
         let ready = tokio::time::timeout(
             IROH_STREAM_READY_TIMEOUT,
             initialize_controller_streams(&connection),
         )
         .await;
+        let handshake_ms = handshake_started.elapsed().as_millis();
         let ((send, recv), (terminal_send, terminal_recv)) = match ready {
-            Ok(Ok(streams)) => streams,
+            Ok(Ok(streams)) => {
+                log_transport(
+                    &on_log,
+                    format!("iroh_controller_streams_ready ms={handshake_ms}"),
+                );
+                streams
+            }
             Ok(Err(error)) => {
+                log_transport(
+                    &on_log,
+                    format!("iroh_controller_streams_failed ms={handshake_ms} error={error}"),
+                );
                 connection.close(0u32.into(), b"stream handshake failed");
                 return Err(error);
             }
             Err(_) => {
+                log_transport(
+                    &on_log,
+                    format!("iroh_controller_streams_timeout ms={handshake_ms}"),
+                );
                 connection.close(0u32.into(), b"stream readiness timeout");
                 return Err("iroh controller stream readiness timeout".to_string());
             }
@@ -1844,13 +1921,7 @@ fn publish_transport_state_for_addr(
     remote_addr: &TransportAddr,
     rtt: Option<std::time::Duration>,
 ) {
-    let path = if remote_addr.is_relay() {
-        "relay"
-    } else if remote_addr.is_ip() {
-        "direct"
-    } else {
-        "unknown"
-    };
+    let path = transport_path_kind(remote_addr);
     let addr = transport_addr_label(remote_addr);
     let relay_url = match remote_addr {
         TransportAddr::Relay(url) => Some(url.to_string()),
@@ -1875,6 +1946,18 @@ fn publish_transport_state_for_addr(
         String::new(),
         format!("connected:path={path};addr={}{}", addr, relay_url_detail),
     );
+}
+
+/// How a peer is reached right now. The host logs it and the controller reports
+/// it to the UI, so both read the same rule.
+fn transport_path_kind(remote_addr: &TransportAddr) -> &'static str {
+    if remote_addr.is_relay() {
+        "relay"
+    } else if remote_addr.is_ip() {
+        "direct"
+    } else {
+        "unknown"
+    }
 }
 
 fn transport_addr_label(remote_addr: &TransportAddr) -> String {
@@ -2286,6 +2369,33 @@ mod tests {
         server_task.await.unwrap();
         client.close().await;
         server.close().await;
+    }
+
+    #[tokio::test]
+    async fn host_reports_how_a_peer_is_reached() {
+        // "Connected but slow" and "never upgraded off the relay" look the same
+        // from the outside; the host knows which path QUIC picked, so it says.
+        let mut host = test_host().await;
+        let mut peer = test_peer(&host.transport).await;
+        send_device_message(&mut peer, 1).await.unwrap();
+
+        let path_log = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let log = host.logs.recv().await.expect("host log channel");
+                if log.contains("iroh_host_path") {
+                    return log;
+                }
+            }
+        })
+        .await
+        .expect("host path log");
+
+        assert!(path_log.contains("path=direct"), "unexpected: {path_log}");
+        assert!(path_log.contains("rtt_ms="), "unexpected: {path_log}");
+
+        peer.connection.close(0u32.into(), b"test complete");
+        peer.endpoint.close().await;
+        host.transport.shutdown().await;
     }
 
     #[tokio::test]
