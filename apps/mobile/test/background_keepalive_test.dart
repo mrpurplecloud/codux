@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:codux_flutter/services/background_keepalive.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -121,6 +123,26 @@ void main() {
       await keepAlive.stop();
 
       expect(calls, isEmpty);
+    });
+
+    test('stop wins while a start response is pending', () async {
+      final startResult = Completer<bool>();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            calls.add(call);
+            if (call.method == 'start') return startResult.future;
+            return null;
+          });
+      final keepAlive = BackgroundKeepAlive(channel: channel, supported: true);
+
+      final starting = keepAlive.start(title: 'Codux', body: 'holding');
+      await Future<void>.delayed(Duration.zero);
+      await keepAlive.stop();
+      startResult.complete(true);
+      await starting;
+
+      expect(calls.map((call) => call.method).toList(), ['start', 'stop']);
+      expect(keepAlive.isRunning, isFalse);
     });
   });
 }

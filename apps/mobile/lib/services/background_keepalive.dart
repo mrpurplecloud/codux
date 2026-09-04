@@ -35,6 +35,8 @@ class BackgroundKeepAlive {
   final MethodChannel _channel;
   final bool _supported;
   bool _running = false;
+  int _commandSerial = 0;
+  int _pendingStarts = 0;
 
   bool get isRunning => _running;
 
@@ -46,25 +48,33 @@ class BackgroundKeepAlive {
     required String body,
   }) async {
     if (!_supported) return false;
+    final commandSerial = ++_commandSerial;
+    _pendingStarts += 1;
+    var started = false;
     try {
-      final started = await _channel.invokeMethod<bool>('start', {
-        'title': title,
-        'body': body,
-      });
-      _running = started ?? false;
+      started =
+          await _channel.invokeMethod<bool>('start', {
+            'title': title,
+            'body': body,
+          }) ??
+          false;
     } on PlatformException catch (error) {
       CoduxLog.warn(
         '[codux-flutter-keepalive] start failed code=${error.code} message=${error.message ?? ''}',
       );
-      _running = false;
     } on MissingPluginException {
-      _running = false;
+      // A build without the native side cannot hold the process.
+    } finally {
+      _pendingStarts -= 1;
     }
+    if (commandSerial != _commandSerial) return false;
+    _running = started;
     return _running;
   }
 
   Future<void> stop() async {
-    if (!_supported || !_running) return;
+    if (!_supported || (!_running && _pendingStarts == 0)) return;
+    final commandSerial = ++_commandSerial;
     _running = false;
     try {
       await _channel.invokeMethod<void>('stop');
@@ -72,6 +82,7 @@ class BackgroundKeepAlive {
       CoduxLog.warn(
         '[codux-flutter-keepalive] stop failed code=${error.code} message=${error.message ?? ''}',
       );
+      if (commandSerial == _commandSerial) _running = true;
     } on MissingPluginException {
       // Nothing to stop on a build without the native side.
     }

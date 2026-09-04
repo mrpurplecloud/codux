@@ -37,6 +37,7 @@
         <service
             android:name=".ConnectionKeepAliveService"
             android:exported="false"
+            android:stopWithTask="true"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
