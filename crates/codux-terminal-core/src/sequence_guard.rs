@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 pub struct RemoteSequenceGuard {
     max_entries_per_channel: usize,
@@ -31,10 +31,16 @@ impl RemoteSequenceGuard {
     }
 }
 
+/// Sliding duplicate-detection window. `seen` answers "have we taken this
+/// sequence already"; `order` remembers insertion order so the oldest entry can
+/// be evicted once the window is full. Every inbound message hits this, so both
+/// halves are O(1) -- a single `Vec` would make each message pay a linear scan
+/// plus a linear shift off the front.
 #[derive(Debug, Clone)]
 struct RemoteSequenceWindow {
     max_entries: usize,
-    seen: Vec<i64>,
+    seen: HashSet<i64>,
+    order: VecDeque<i64>,
     max_sequence: i64,
 }
 
@@ -42,7 +48,8 @@ impl RemoteSequenceWindow {
     fn new(max_entries: usize) -> Self {
         Self {
             max_entries,
-            seen: Vec::new(),
+            seen: HashSet::new(),
+            order: VecDeque::new(),
             max_sequence: 0,
         }
     }
@@ -56,15 +63,17 @@ impl RemoteSequenceWindow {
         if monotonic && sequence < self.max_sequence {
             return false;
         }
-        if self.seen.contains(&sequence) {
+        if !self.seen.insert(sequence) {
             return false;
         }
-        self.seen.push(sequence);
+        self.order.push_back(sequence);
         if sequence > self.max_sequence {
             self.max_sequence = sequence;
         }
-        while self.seen.len() > self.max_entries {
-            self.seen.remove(0);
+        while self.order.len() > self.max_entries {
+            if let Some(evicted) = self.order.pop_front() {
+                self.seen.remove(&evicted);
+            }
         }
         true
     }
