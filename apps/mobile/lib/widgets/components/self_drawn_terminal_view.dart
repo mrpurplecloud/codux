@@ -360,6 +360,9 @@ class _SelfDrawnTerminalViewState extends State<SelfDrawnTerminalView>
     } else {
       _glyphBaseline = (_cellHeight + widget.fontSize) / 2;
     }
+    // Measurement only -- this paragraph is never drawn, so releasing it here is
+    // unambiguously safe (unlike the cached run paragraphs in the painter).
+    paragraph.dispose();
   }
 
   // ---- input ---------------------------------------------------------------
@@ -640,6 +643,16 @@ class _SelfDrawnTerminalViewState extends State<SelfDrawnTerminalView>
     return -(maxPan - pan);
   }
 
+  // Memo for [_bottomWindowStartRows], keyed by snapshot identity + row count.
+  // The scan is O(cells) and the result is read several times per frame (build,
+  // cursor metrics, every scroll delta, every fling tick), so recomputing it
+  // per call scanned the whole grid a handful of times for one unchanged
+  // answer. A snapshot is replaced wholesale on refresh, so identity is a
+  // sufficient key -- the same test `shouldRepaint` already relies on.
+  TerminalScreenSnapshot? _startRowsSnapshot;
+  int _startRowsViewportRows = -1;
+  int _startRowsCached = 0;
+
   // Rows clipped above the visible window. The grid can be taller than the
   // viewport AND its content can sit anywhere in it: a TUI fills to the bottom
   // (input box on the last rows), but a fresh shell prints a few lines at the
@@ -650,12 +663,19 @@ class _SelfDrawnTerminalViewState extends State<SelfDrawnTerminalView>
   int _bottomWindowStartRows() {
     final snapshot = _snapshot;
     if (snapshot == null || _rows <= 0) return 0;
+    if (identical(snapshot, _startRowsSnapshot) &&
+        _rows == _startRowsViewportRows) {
+      return _startRowsCached;
+    }
     var lastRow = snapshot.cursor.visible ? snapshot.cursor.row : 0;
     for (final cell in snapshot.cells) {
       if (cell.row > lastRow) lastRow = cell.row;
     }
     final start = lastRow - _rows + 1;
-    return start > 0 ? start : 0;
+    _startRowsSnapshot = snapshot;
+    _startRowsViewportRows = _rows;
+    _startRowsCached = start > 0 ? start : 0;
+    return _startRowsCached;
   }
 
   /// Lines-from-bottom of a viewport row (row 0 = top). Stable under scrolling.
@@ -853,7 +873,7 @@ class _SelfDrawnTerminalViewState extends State<SelfDrawnTerminalView>
           col += 1;
         }
       }
-      buffer.write(line.toString().replaceAll(RegExp(r'[ \t]+$'), ''));
+      buffer.write(line.toString().replaceAll(_trailingBlanks, ''));
       if (lfb > end.lfb) buffer.write('\n');
     }
     return buffer.toString();
@@ -1218,7 +1238,9 @@ class _TerminalGridPainter extends CustomPainter {
     }
 
     _paintSelection(canvas, snapshot);
-    _paintCursor(canvas, snapshot);
+    // Hand the cursor the row grouping built above: finding its cell in one row
+    // beats rescanning every cell in the grid.
+    _paintCursor(canvas, snapshot, rows);
     canvas.restore();
   }
 
@@ -1270,7 +1292,11 @@ class _TerminalGridPainter extends CustomPainter {
     }
   }
 
-  void _paintCursor(Canvas canvas, TerminalScreenSnapshot snapshot) {
+  void _paintCursor(
+    Canvas canvas,
+    TerminalScreenSnapshot snapshot,
+    Map<int, List<TerminalScreenCell>> rows,
+  ) {
     final cursor = snapshot.cursor;
     if (!cursor.visible) return;
     if (cursor.row < 0 || cursor.row >= snapshot.rows) return;
@@ -1280,7 +1306,7 @@ class _TerminalGridPainter extends CustomPainter {
 
     // The cell under the cursor may be double-width (e.g. CJK), so the cursor
     // must span the full glyph, not a single column.
-    final cell = _cursorCell(snapshot, cursor.row, cursor.col);
+    final cell = _cursorCell(rows, cursor.row, cursor.col);
     final span = (cell != null && cell.width > 1) ? cell.width : 1;
     final width = cellWidth * span;
 
@@ -1425,12 +1451,12 @@ class _TerminalGridPainter extends CustomPainter {
   }
 
   TerminalScreenCell? _cursorCell(
-    TerminalScreenSnapshot snapshot,
+    Map<int, List<TerminalScreenCell>> rows,
     int row,
     int col,
   ) {
-    for (final cell in snapshot.cells) {
-      if (cell.row == row && cell.col == col) return cell;
+    for (final cell in rows[row] ?? const <TerminalScreenCell>[]) {
+      if (cell.col == col) return cell;
     }
     return null;
   }
@@ -1485,7 +1511,19 @@ class _TerminalGridPainter extends CustomPainter {
     final paragraph = builder.build()
       ..layout(const ui.ParagraphConstraints(width: double.infinity));
 
-    if (glyphCache.length > 4096) glyphCache.clear();
+    // Bounded FIFO rather than "full flush when full": the key carries the whole
+    // run text, so a screenful of long unique lines used to hit the ceiling and
+    // drop EVERY cached glyph, re-laying out the entire viewport on the next
+    // frame. Dart map literals keep insertion order, so the first key is the
+    // oldest entry.
+    //
+    // Evicted paragraphs are deliberately NOT disposed: one already handed to
+    // `drawParagraph` may still be referenced by the recorded layer, and dart:ui
+    // makes no promise that releasing it before rasterization is safe. They are
+    // reclaimed by the engine's finalizer instead.
+    while (glyphCache.length >= _glyphCacheLimit) {
+      glyphCache.remove(glyphCache.keys.first);
+    }
     glyphCache[key] = paragraph;
     return paragraph;
   }
@@ -1504,6 +1542,14 @@ class _TerminalGridPainter extends CustomPainter {
         old.mono != mono;
   }
 }
+
+/// Trailing blanks stripped from each copied line. Compiled once: a multi-screen
+/// selection runs this over every line.
+final RegExp _trailingBlanks = RegExp(r'[ \t]+$');
+
+/// Laid-out run paragraphs kept between frames. Sized for a few screenfuls of
+/// distinct runs.
+const int _glyphCacheLimit = 4096;
 
 /// True when a 1-cell glyph is likely shaped by a fallback (proportional) font
 /// rather than the primary monospace -- symbols, arrows, dingbats, box drawing,
