@@ -284,6 +284,15 @@ impl<T> RemotePtySession<T> {
 /// fully repopulating the emulator.
 const MAX_CACHED_LINES: usize = 600;
 
+/// How far past [`MAX_CACHED_LINES`] the cache may grow before a trim runs.
+///
+/// Trimming means `String::drain` from the front, which memmoves the entire
+/// retained window (~600 lines). Cutting the instant the budget is exceeded
+/// would pay that memmove on every output frame that carries a newline. Letting
+/// the buffer overshoot and then cutting back to the budget in one go amortizes
+/// it over roughly this many appended lines instead.
+const LINE_TRIM_SLACK: usize = MAX_CACHED_LINES / 8;
+
 /// Append `data` to `buffer`, then trim the front to the cache budget. Appends
 /// in place (no per-frame reallocation of the whole buffer).
 fn push_cache_buffer(buffer: &mut String, data: &str, max_chars: usize) {
@@ -291,15 +300,23 @@ fn push_cache_buffer(buffer: &mut String, data: &str, max_chars: usize) {
     trim_cache_buffer(buffer, max_chars);
 }
 
-/// Trim the front of `buffer` in place so it keeps at most [`MAX_CACHED_LINES`]
+/// Trim the front of `buffer` in place so it keeps roughly [`MAX_CACHED_LINES`]
 /// trailing newline-delimited lines and at most `max_chars` characters.
 ///
 /// The line budget is the primary bound -- it matches the native emulator's
 /// scrollback so a restore re-feeds only what the emulator can hold.
 /// `max_chars` is a safety ceiling that also bounds pathologically long lines.
-/// Both scans are bounded by the size of the retained window (~600 lines), not
-/// the whole buffer, so the steady-state live path stays amortized O(appended
-/// bytes) rather than O(buffer length) per frame.
+///
+/// Both bounds are hysteretic: the buffer is allowed to overshoot (by
+/// [`LINE_TRIM_SLACK`] lines, or by 1/8 of the char ceiling) before a cut runs,
+/// and each cut goes all the way back to the budget. Every scan is bounded by
+/// the retained window rather than the whole buffer, and the `drain` memmove is
+/// amortized over the overshoot, so the steady-state live path costs O(appended
+/// bytes) per frame instead of O(buffer length).
+///
+/// The retained window is therefore in
+/// `[MAX_CACHED_LINES, MAX_CACHED_LINES + LINE_TRIM_SLACK]` lines, not exactly
+/// at the budget.
 fn trim_cache_buffer(buffer: &mut String, max_chars: usize) {
     if max_chars == 0 {
         buffer.clear();
@@ -308,18 +325,22 @@ fn trim_cache_buffer(buffer: &mut String, max_chars: usize) {
     let bytes = buffer.as_bytes();
     let len = bytes.len();
 
-    // Line budget: walk back from the end until we have passed
-    // MAX_CACHED_LINES newlines, then cut just after that newline (always a
-    // UTF-8 and line boundary, so the kept stream starts at a clean line).
+    // Line budget: walk back from the end recording where a cut to
+    // MAX_CACHED_LINES lines would land, but only commit it once the buffer has
+    // also run past the slack. Cutting just after a newline is always a UTF-8
+    // and line boundary, so the kept stream starts at a clean line.
     let mut cut = 0usize;
+    let mut cut_to_budget = 0usize;
     let mut seen = 0usize;
     let mut i = len;
     while i > 0 {
         i -= 1;
         if bytes[i] == b'\n' {
             seen += 1;
-            if seen > MAX_CACHED_LINES {
-                cut = i + 1;
+            if seen == MAX_CACHED_LINES + 1 {
+                cut_to_budget = i + 1;
+            } else if seen > MAX_CACHED_LINES + LINE_TRIM_SLACK {
+                cut = cut_to_budget;
                 break;
             }
         }

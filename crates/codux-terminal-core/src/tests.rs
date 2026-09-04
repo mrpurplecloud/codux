@@ -626,6 +626,41 @@ fn caches_only_the_trailing_line_budget() {
 }
 
 #[test]
+fn line_budget_trim_runs_once_per_slack_window_not_once_per_frame() {
+    // Regression: the line budget used to cut the instant it was exceeded, so
+    // every output frame carrying a newline memmoved the whole retained window
+    // (~600 lines) off the front. Trimming is hysteretic now -- the buffer may
+    // overshoot the 600-line budget by the slack (600/8 = 75) before one cut
+    // takes it back to the budget.
+    let mut session = RemotePtySession::<String>::new(10_000_000);
+    let mut seed = String::new();
+    for index in 0..600 {
+        seed.push_str(&format!("line {index}\n"));
+    }
+    session.append_live(&seed, None, None, None);
+    assert_eq!(session.content().matches('\n').count(), 600);
+
+    // Filling the slack one line at a time must not trim: the oldest line is
+    // still there after 75 more frames.
+    for index in 600..675 {
+        session.append_live(&format!("line {index}\n"), None, None, None);
+    }
+    assert_eq!(session.content().matches('\n').count(), 675);
+    assert!(
+        session.content().contains("line 0\n"),
+        "trimmed inside the slack window"
+    );
+
+    // The frame that crosses the slack cuts back to the budget in one go.
+    session.append_live("line 675\n", None, None, None);
+    let content = session.content();
+    assert_eq!(content.matches('\n').count(), 600);
+    assert!(!content.contains("line 0\n"));
+    assert!(content.contains("line 76\n"));
+    assert!(content.contains("line 675\n"));
+}
+
+#[test]
 fn output_sequencer_drops_duplicates_and_tracks_buffers() {
     let mut sequencer = TerminalOutputSequencer::new();
 
