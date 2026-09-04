@@ -32,6 +32,10 @@ pub enum TerminalScreenEvent {
 pub type TerminalScreenEventSink = Arc<dyn Fn(TerminalScreenEvent) + Send + Sync>;
 
 const PROCESS_CHUNK_BYTES: usize = 64 * 1024;
+/// How far the scrollback row budget may grow when the grid narrows. A phone
+/// pane is roughly a third of a desktop pane; the headroom covers a handoff to
+/// an even narrower one without letting an extreme resize multiply memory.
+const MAX_SCROLLBACK_WIDTH_SCALE: usize = 8;
 const TERMINAL_CELL_WIDTH_PX: u32 = 10;
 const TERMINAL_CELL_HEIGHT_PX: u32 = 20;
 
@@ -654,6 +658,13 @@ struct TerminalScreenWorker {
     cols: usize,
     rows: usize,
     scrollback: usize,
+    /// Scrollback the caller asked for, and the grid width it meant it at.
+    /// Alacritty measures history in visual rows, so the same content occupies
+    /// more rows on a narrower grid: a handoff to a phone would silently drop
+    /// the top of the scrollback. The budget is scaled by the width ratio on
+    /// resize so the retained *content* stays put.
+    scrollback_budget: usize,
+    scrollback_budget_cols: usize,
     responder: Option<TerminalPtyResponder>,
     event_sink: Option<TerminalScreenEventSink>,
     title: Option<String>,
@@ -718,6 +729,8 @@ impl TerminalScreenWorker {
             cols,
             rows,
             scrollback,
+            scrollback_budget: scrollback,
+            scrollback_budget_cols: cols,
             responder,
             event_sink: None,
             title: None,
@@ -1177,6 +1190,9 @@ impl TerminalScreenWorker {
         }
         self.cols = cols;
         self.rows = rows;
+        // Grow the row budget for the new width BEFORE reflowing: the resize
+        // itself is what drops rows past the cap.
+        self.apply_scrollback_budget();
         self.term.resize(HeadlessTermSize::new(cols, rows));
     }
 
@@ -1203,6 +1219,19 @@ impl TerminalScreenWorker {
     }
 
     fn set_scrollback(&mut self, scrollback: usize) {
+        self.scrollback_budget = scrollback;
+        self.scrollback_budget_cols = self.cols;
+        self.apply_scrollback_budget();
+    }
+
+    /// Rows needed to hold the budgeted content at the current width. Bounded
+    /// so a very narrow grid cannot multiply memory without limit.
+    fn apply_scrollback_budget(&mut self) {
+        let width_scale = self
+            .scrollback_budget_cols
+            .div_ceil(self.cols.max(1))
+            .clamp(1, MAX_SCROLLBACK_WIDTH_SCALE);
+        let scrollback = self.scrollback_budget.saturating_mul(width_scale);
         if self.scrollback == scrollback {
             return;
         }
@@ -2720,6 +2749,35 @@ mod tests {
 
         assert_eq!(snapshot.wrapped_rows.len(), snapshot.rows);
         assert!(snapshot.wrapped_rows.iter().any(|wrapped| *wrapped));
+    }
+
+    #[test]
+    fn narrowing_the_grid_keeps_the_scrolled_back_content() {
+        // A phone claiming the viewport reflows the host grid to its width.
+        // History is measured in visual rows, so without a wider budget the
+        // same content no longer fits and the top is lost for good.
+        let mut screen = HeadlessTerminalScreen::new(80, 24, 200);
+        for index in 0..300 {
+            screen.process(format!("{index:04}-{}\r\n", "x".repeat(70)).as_bytes());
+        }
+        let rows_before = screen
+            .remote_viewport_snapshot_request(0, 0, 0)
+            .snapshot()
+            .total_lines;
+
+        screen.resize(20, 24);
+
+        // Each 75-column line now wraps into four rows, so the same history is
+        // roughly four times as many rows. Anything near `rows_before` means
+        // the reflow threw the top of the scrollback away.
+        let rows_after = screen
+            .remote_viewport_snapshot_request(0, 0, 0)
+            .snapshot()
+            .total_lines;
+        assert!(
+            rows_after >= rows_before * 3,
+            "narrow reflow lost history: {rows_before} rows became {rows_after}"
+        );
     }
 
     #[test]
