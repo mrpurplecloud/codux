@@ -363,14 +363,20 @@ impl RemoteIrohHostTransport {
                 let peer_key = peer_key.clone();
                 let peer_id = peer_senders.id;
                 let closed = Arc::clone(&peer_senders.closed);
-                move || transport.close_peer(peer_id, &peer_key, "control_write", &closed)
+                let connection = peer_senders.connection.clone();
+                move || {
+                    transport.close_peer(peer_id, &peer_key, "control_write", &closed, &connection)
+                }
             });
             spawn_writer(terminal_send, terminal_rx, self.on_log.clone(), {
                 let transport = Arc::clone(&self);
                 let peer_key = peer_key.clone();
                 let peer_id = peer_senders.id;
                 let closed = Arc::clone(&peer_senders.closed);
-                move || transport.close_peer(peer_id, &peer_key, "terminal_write", &closed)
+                let connection = peer_senders.connection.clone();
+                move || {
+                    transport.close_peer(peer_id, &peer_key, "terminal_write", &closed, &connection)
+                }
             });
             if !self.insert_peer(peer_key.clone(), peer_senders.clone()) {
                 connection.close(0u32.into(), b"superseded connection");
@@ -396,6 +402,7 @@ impl RemoteIrohHostTransport {
             &peer_key,
             "accept_loop",
             &peer_senders.closed,
+            &peer_senders.connection,
         );
     }
 
@@ -497,6 +504,7 @@ impl RemoteIrohHostTransport {
             let senders_for_frame = senders.clone();
             let peer_id = senders.id;
             let closed = Arc::clone(&senders.closed);
+            let connection = senders.connection.clone();
             let read_result = read_loop(
                 recv,
                 peer_key.clone(),
@@ -516,7 +524,7 @@ impl RemoteIrohHostTransport {
                     peer_key
                 ));
             }
-            transport.close_peer(peer_id, &peer_key, label, &closed);
+            transport.close_peer(peer_id, &peer_key, label, &closed, &connection);
         });
     }
 
@@ -528,6 +536,9 @@ impl RemoteIrohHostTransport {
         data: Vec<u8>,
     ) {
         if senders.closed.load(Ordering::SeqCst) || !self.peer_is_current(peer_key, senders.id) {
+            // End the connection rather than dropping frame after frame: a
+            // client whose messages vanish has nothing to react to.
+            senders.connection.close(0u32.into(), b"stale connection");
             self.log(format!(
                 "iroh_host_recv drop peer={peer_key} reason=stale_connection"
             ));
@@ -761,11 +772,26 @@ impl RemoteIrohHostTransport {
         remove_peer_aliases_by_id(&mut peers, peer_id)
     }
 
-    fn close_peer(&self, peer_id: u64, peer_key: &str, reason: &str, closed: &Arc<AtomicBool>) {
+    /// Retire a peer: one stream ending takes the whole connection with it.
+    ///
+    /// The two streams share one `closed` flag and one alias set, so a peer
+    /// whose connection stays open after this is half dead — the surviving
+    /// reader can only drop what it receives, and the client keeps talking into
+    /// a host that answers nothing. Closing the connection here is what tells
+    /// it to reconnect instead.
+    fn close_peer(
+        &self,
+        peer_id: u64,
+        peer_key: &str,
+        reason: &str,
+        closed: &Arc<AtomicBool>,
+        connection: &Connection,
+    ) {
         if closed.swap(true, Ordering::SeqCst) {
             return;
         }
         let aliases = self.remove_peer_aliases_by_id(peer_id);
+        connection.close(0u32.into(), b"peer closed");
         self.log(format!(
             "iroh_host_peer_closed peer={peer_key} reason={reason}"
         ));
@@ -2260,6 +2286,32 @@ mod tests {
         server_task.await.unwrap();
         client.close().await;
         server.close().await;
+    }
+
+    #[tokio::test]
+    async fn losing_one_stream_closes_the_whole_peer() {
+        // The two streams share one peer record. Retiring the peer while its
+        // connection stays open leaves the surviving reader dropping frames the
+        // client believes were delivered, so the client never learns to
+        // reconnect. Ending the connection is what tells it.
+        let mut host = test_host().await;
+        let mut peer = test_peer(&host.transport).await;
+        send_device_message(&mut peer, 1).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), host.messages.recv())
+            .await
+            .expect("first host message timeout")
+            .expect("first host message");
+
+        // The terminal stream dies on its own; the control stream is untouched.
+        peer._terminal_send.reset(0u32.into()).ok();
+
+        tokio::time::timeout(Duration::from_secs(5), peer.connection.closed())
+            .await
+            .expect("host closes the connection after a stream ends");
+        assert!(!host.transport.send(vec![2], None));
+
+        peer.endpoint.close().await;
+        host.transport.shutdown().await;
     }
 
     #[tokio::test]
