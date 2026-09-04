@@ -68,9 +68,7 @@ void main() {
       TestWidgetsFlutterBinding.ensureInitialized();
       calls = [];
       channel = const MethodChannel(BackgroundKeepAlive.channelName);
-      TestDefaultBinaryMessengerBinding
-          .instance
-          .defaultBinaryMessenger
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(channel, (call) async {
             calls.add(call);
             return call.method == 'start' ? true : null;
@@ -94,19 +92,23 @@ void main() {
       expect(calls.first.arguments, {'title': 'Codux', 'body': 'holding'});
     });
 
-    test('a refused start leaves the caller unprotected, not crashed', () async {
-      TestDefaultBinaryMessengerBinding
-          .instance
-          .defaultBinaryMessenger
-          .setMockMethodCallHandler(channel, (call) async {
-            calls.add(call);
-            throw PlatformException(code: 'refused');
-          });
-      final keepAlive = BackgroundKeepAlive(channel: channel, supported: true);
+    test(
+      'a refused start leaves the caller unprotected, not crashed',
+      () async {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, (call) async {
+              calls.add(call);
+              throw PlatformException(code: 'refused');
+            });
+        final keepAlive = BackgroundKeepAlive(
+          channel: channel,
+          supported: true,
+        );
 
-      expect(await keepAlive.start(title: 'Codux', body: 'holding'), isFalse);
-      expect(keepAlive.isRunning, isFalse);
-    });
+        expect(await keepAlive.start(title: 'Codux', body: 'holding'), isFalse);
+        expect(keepAlive.isRunning, isFalse);
+      },
+    );
 
     test('does nothing off Android', () async {
       final keepAlive = BackgroundKeepAlive(channel: channel, supported: false);
@@ -143,6 +145,27 @@ void main() {
 
       expect(calls.map((call) => call.method).toList(), ['start', 'stop']);
       expect(keepAlive.isRunning, isFalse);
+    });
+
+    test('concurrent starts share one platform request', () async {
+      final startResult = Completer<bool>();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            calls.add(call);
+            if (call.method == 'start') return startResult.future;
+            return null;
+          });
+      final keepAlive = BackgroundKeepAlive(channel: channel, supported: true);
+
+      final first = keepAlive.start(title: 'Codux', body: 'holding');
+      final second = keepAlive.start(title: 'Codux', body: 'holding');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(calls.map((call) => call.method).toList(), ['start']);
+      startResult.complete(true);
+      expect(await first, isTrue);
+      expect(await second, isTrue);
+      expect(keepAlive.isRunning, isTrue);
     });
   });
 }

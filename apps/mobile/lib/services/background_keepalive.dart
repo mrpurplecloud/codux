@@ -36,20 +36,29 @@ class BackgroundKeepAlive {
   final bool _supported;
   bool _running = false;
   int _commandSerial = 0;
-  int _pendingStarts = 0;
+  Future<bool>? _startInFlight;
 
   bool get isRunning => _running;
 
   /// Start (or refresh) the service. Returns whether it is running afterwards;
   /// a refused start leaves the pre-change behaviour — the link drops and the
   /// app reconnects on resume.
-  Future<bool> start({
-    required String title,
-    required String body,
-  }) async {
+  Future<bool> start({required String title, required String body}) async {
     if (!_supported) return false;
+    if (_running) return true;
+    final pending = _startInFlight;
+    if (pending != null) return pending;
+    final operation = _start(title: title, body: body);
+    _startInFlight = operation;
+    try {
+      return await operation;
+    } finally {
+      if (identical(_startInFlight, operation)) _startInFlight = null;
+    }
+  }
+
+  Future<bool> _start({required String title, required String body}) async {
     final commandSerial = ++_commandSerial;
-    _pendingStarts += 1;
     var started = false;
     try {
       started =
@@ -64,8 +73,6 @@ class BackgroundKeepAlive {
       );
     } on MissingPluginException {
       // A build without the native side cannot hold the process.
-    } finally {
-      _pendingStarts -= 1;
     }
     if (commandSerial != _commandSerial) return false;
     _running = started;
@@ -73,7 +80,7 @@ class BackgroundKeepAlive {
   }
 
   Future<void> stop() async {
-    if (!_supported || (!_running && _pendingStarts == 0)) return;
+    if (!_supported || (!_running && _startInFlight == null)) return;
     final commandSerial = ++_commandSerial;
     _running = false;
     try {
