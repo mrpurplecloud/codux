@@ -1188,12 +1188,18 @@ impl TerminalScreenWorker {
         if self.cols == cols && self.rows == rows {
             return;
         }
+        let shrinking_budget = cols > self.cols;
         self.cols = cols;
         self.rows = rows;
-        // Grow the row budget for the new width BEFORE reflowing: the resize
-        // itself is what drops rows past the cap.
-        self.apply_scrollback_budget();
+        // Grow the row budget before a narrow reflow can drop rows. Shrink it
+        // only after a wide reflow has reduced the rows needed by the content.
+        if !shrinking_budget {
+            self.apply_scrollback_budget();
+        }
         self.term.resize(HeadlessTermSize::new(cols, rows));
+        if shrinking_budget {
+            self.apply_scrollback_budget();
+        }
     }
 
     fn restore_visible_wrapped_rows(&mut self, wrapped_rows: &[bool]) {
@@ -2764,7 +2770,6 @@ mod tests {
             .remote_viewport_snapshot_request(0, 0, 0)
             .snapshot()
             .total_lines;
-
         screen.resize(20, 24);
 
         // Each 75-column line now wraps into four rows, so the same history is
@@ -2778,6 +2783,30 @@ mod tests {
             rows_after >= rows_before * 3,
             "narrow reflow lost history: {rows_before} rows became {rows_after}"
         );
+
+        let oldest_before = screen
+            .remote_viewport_snapshot_request(usize::MAX, 0, 0)
+            .snapshot()
+            .cells
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect::<String>();
+        let oldest_before = (0..300)
+            .find(|index| oldest_before.contains(&format!("{index:04}-")))
+            .expect("numbered line in oldest narrow viewport");
+
+        screen.resize(80, 24);
+        let oldest_after = screen
+            .remote_viewport_snapshot_request(usize::MAX, 0, 0)
+            .snapshot()
+            .cells
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect::<String>();
+        let oldest_after = (0..300)
+            .find(|index| oldest_after.contains(&format!("{index:04}-")))
+            .expect("numbered line in oldest wide viewport");
+        assert_eq!(oldest_after, oldest_before, "wide reflow lost history");
     }
 
     #[test]
