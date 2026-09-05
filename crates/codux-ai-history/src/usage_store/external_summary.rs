@@ -1,7 +1,6 @@
 fn migrate_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE TRANSACTION;")?;
     let result = (|| -> Result<()> {
-        ensure_usage_event_columns(conn)?;
         conn.execute_batch(
             r#"
         INSERT OR IGNORE INTO ai_history_file_usage_event (
@@ -243,30 +242,14 @@ fn canonicalize_usage_event_paths(conn: &Connection) -> Result<()> {
 }
 
 fn usage_event_schema_is_current(conn: &Connection) -> Result<bool> {
-    let columns = usage_event_columns(conn)?;
+    let columns = table_columns(conn, "ai_history_file_usage_event")?;
     Ok(["project_id", "request_count", "active_duration_seconds"]
         .iter()
         .all(|name| columns.contains(*name)))
 }
 
-fn ensure_usage_event_columns(conn: &Connection) -> Result<()> {
-    let columns = usage_event_columns(conn)?;
-    for (name, definition) in [
-        ("project_id", "TEXT NOT NULL DEFAULT ''"),
-        ("request_count", "INTEGER NOT NULL DEFAULT 0"),
-        ("active_duration_seconds", "INTEGER NOT NULL DEFAULT 0"),
-    ] {
-        if !columns.contains(name) {
-            conn.execute_batch(&format!(
-                "ALTER TABLE ai_history_file_usage_event ADD COLUMN {name} {definition};"
-            ))?;
-        }
-    }
-    Ok(())
-}
-
-fn usage_event_columns(conn: &Connection) -> Result<HashSet<String>> {
-    let mut statement = conn.prepare("PRAGMA table_info(ai_history_file_usage_event);")?;
+fn table_columns(conn: &Connection, table: &str) -> Result<HashSet<String>> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table});"))?;
     let columns = statement
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<Result<HashSet<_>, _>>()?;

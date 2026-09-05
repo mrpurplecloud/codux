@@ -84,6 +84,90 @@ mod tests {
     }
 
     #[test]
+    fn schema_10_upgrade_backfills_buckets_that_predate_active_duration() {
+        // Regression: a schema-10 database has an `ai_history_file_usage_bucket`
+        // without `active_duration_seconds`, and `CREATE TABLE IF NOT EXISTS`
+        // never added it. The backfill read that column, the migration
+        // transaction failed, and the rollback restored the old schema version
+        // -- so every later launch failed the same way and the usage tables
+        // stayed empty. The stats UI showed nothing, with no error anywhere.
+        let root = std::env::temp_dir().join(format!("codux-ai-usage-store-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let database_path = root.join("ai-usage.sqlite3");
+        let conn = Connection::open(&database_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE ai_history_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO ai_history_meta VALUES ('normalized_history_schema_version', '10');
+            CREATE TABLE ai_history_file_usage_bucket (
+                source TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                project_path TEXT NOT NULL,
+                session_key TEXT NOT NULL,
+                model TEXT NOT NULL,
+                bucket_start REAL NOT NULL,
+                bucket_end REAL NOT NULL,
+                input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                total_tokens INTEGER NOT NULL,
+                cached_input_tokens INTEGER NOT NULL,
+                request_count INTEGER NOT NULL,
+                PRIMARY KEY (source, file_path, project_path, session_key, model, bucket_start)
+            );
+            INSERT INTO ai_history_file_usage_bucket VALUES
+                ('codex', 'a.jsonl', '/old/path', 'session', 'gpt', 100, 200, 30, 12, 42, 0, 3);
+            CREATE TABLE ai_history_project_index_state (
+                project_path TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                project_name TEXT NOT NULL,
+                indexed_at REAL NOT NULL
+            );
+            INSERT INTO ai_history_project_index_state
+                VALUES ('/old/path', 'project-a', 'Project A', 100);
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = AIUsageStore::at_path(database_path);
+        let conn = store.connect().unwrap();
+
+        // The migration ran to completion rather than rolling back.
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM ai_history_meta WHERE key = 'normalized_history_schema_version';",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, NORMALIZED_HISTORY_SCHEMA_VERSION);
+
+        // ...and the tokens already on disk survived it.
+        assert_eq!(
+            store
+                .normalized_tokens_in_intervals(
+                    &conn,
+                    &[AIUsageInterval {
+                        project_path: "/old/path".to_string(),
+                        included_at: 0,
+                        excluded_at: None,
+                    }],
+                )
+                .unwrap(),
+            42
+        );
+        let requests: i64 = conn
+            .query_row(
+                "SELECT SUM(request_count) FROM ai_history_file_usage_event;",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(requests, 3, "the request-count pass must run too");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn schema_upgrade_preserves_source_fallback_timestamp() {
         let root = std::env::temp_dir().join(format!("codux-ai-usage-store-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
