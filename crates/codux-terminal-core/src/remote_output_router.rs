@@ -453,12 +453,12 @@ impl RemoteTerminalOutputRouter {
         active_session_id: Option<&str>,
         replaying_held_live: bool,
     ) -> Vec<RemoteTerminalOutputEffect> {
-        let mut payload = match message.get("payload") {
+        let payload = match message.get("payload") {
             Some(payload)
                 if payload.is_object()
                     && payload.get("data").is_some_and(|value| !value.is_null()) =>
             {
-                payload.clone()
+                payload
             }
             _ => return Vec::new(),
         };
@@ -548,28 +548,25 @@ impl RemoteTerminalOutputRouter {
             }
         }
 
-        // Only chunked baselines need reassembly; everything else (all live
-        // output) passes straight through. Mirroring the assembler's own guard
-        // here keeps the common path from deep-cloning the payload just to have
-        // it handed back unchanged.
-        if is_buffer_flag && payload.get("chunked").and_then(Value::as_bool) == Some(true) {
-            let assembly = self.assembler.accept(session_id, payload.clone());
-            if !assembly.ready {
-                if assembly.progress.is_none() {
-                    return Vec::new();
-                }
-                if !is_active_session {
-                    return Vec::new();
-                }
-                return vec![RemoteTerminalOutputEffect::loading(
-                    true,
-                    RemoteTerminalBufferPhase::Receiving,
-                    assembly.progress,
-                )];
+        let assembly = self.assembler.accept(session_id, payload);
+        if !assembly.ready {
+            if assembly.progress.is_none() {
+                return Vec::new();
             }
-            payload = assembly.payload.unwrap_or(payload);
+            if !is_active_session {
+                return Vec::new();
+            }
+            return vec![RemoteTerminalOutputEffect::loading(
+                true,
+                RemoteTerminalBufferPhase::Receiving,
+                assembly.progress,
+            )];
         }
-        let decoded = decode_terminal_output_payload(&payload);
+        // Only a chunked transfer yields a replacement; every live frame keeps
+        // the payload it arrived with, so nothing is copied on the hot path.
+        let assembled = assembly.payload;
+        let payload = assembled.as_ref().unwrap_or(payload);
+        let decoded = decode_terminal_output_payload(payload);
         let raw = decoded.data.clone();
         let is_buffer = decoded.is_buffer;
         let output_seq = payload_int(&payload, "outputSeq");
@@ -606,17 +603,15 @@ impl RemoteTerminalOutputRouter {
         }
 
         // Hold live output that arrives before the baseline is restored.
-        // `is_restoring_baseline` gates the serialization: `message.to_string()`
-        // is an argument, so it would otherwise run for every live frame (a full
-        // re-serialization of an envelope carrying up to a 16 KB payload) only
-        // for `hold_live` to reject it on the steady-state streaming path.
+        // Serializing the frame is deferred into the closure: `hold_live` only
+        // calls it while the session is actually restoring, so streaming output
+        // never pays for a frame nobody keeps.
         if !replaying_held_live
             && !is_buffer
             && decoded.screen_data.is_none()
-            && self.session(session_id).is_restoring_baseline()
             && self
                 .session(session_id)
-                .hold_live(output_seq, message.to_string())
+                .hold_live(output_seq, || message.to_string())
         {
             return vec![RemoteTerminalOutputEffect::ack(
                 session_id,

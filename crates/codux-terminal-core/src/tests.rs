@@ -365,8 +365,8 @@ fn restores_baseline_before_replaying_held_live_output() {
     let mut session = RemotePtySession::new(64);
     session.require_baseline();
 
-    assert!(session.hold_live(Some(11), "stale"));
-    assert!(session.hold_live(Some(12), "new"));
+    assert!(session.hold_live(Some(11), || "stale"));
+    assert!(session.hold_live(Some(12), || "new"));
 
     let replay = session.replace_from_baseline("abcd", None, None, Some(8), None, Some(11));
     assert_eq!(session.content(), "abcd");
@@ -894,7 +894,7 @@ fn terminal_buffer_assembler_assembles_out_of_order_chunks() {
         !assembler
             .accept(
                 "term-1",
-                chunk_payload("snapshot-1", "request-1", 2, "cd", 3)
+                &chunk_payload("snapshot-1", "request-1", 2, "cd", 3)
             )
             .ready
     );
@@ -902,13 +902,13 @@ fn terminal_buffer_assembler_assembles_out_of_order_chunks() {
         !assembler
             .accept(
                 "term-1",
-                chunk_payload("snapshot-1", "request-1", 0, "ab", 3)
+                &chunk_payload("snapshot-1", "request-1", 0, "ab", 3)
             )
             .ready
     );
     let result = assembler.accept(
         "term-1",
-        chunk_payload("snapshot-1", "request-1", 1, "你好", 3),
+        &chunk_payload("snapshot-1", "request-1", 1, "你好", 3),
     );
 
     assert!(result.ready);
@@ -929,13 +929,13 @@ fn terminal_buffer_assembler_preserves_screen_baseline_metadata() {
         !assembler
             .accept(
                 "term-1",
-                chunk_payload("snapshot-1", "request-1", 1, "history-tail", 2)
+                &chunk_payload("snapshot-1", "request-1", 1, "history-tail", 2)
             )
             .ready
     );
     let result = assembler.accept(
         "term-1",
-        chunk_payload("snapshot-1", "request-1", 0, "raw-", 2),
+        &chunk_payload("snapshot-1", "request-1", 0, "raw-", 2),
     );
 
     assert!(result.ready);
@@ -954,15 +954,15 @@ fn terminal_buffer_assembler_ignores_duplicate_chunks_and_limits_size() {
 
     let first = assembler.accept(
         "term-1",
-        chunk_payload("snapshot-1", "request-1", 0, "abcd", 2),
+        &chunk_payload("snapshot-1", "request-1", 0, "abcd", 2),
     );
     let duplicate = assembler.accept(
         "term-1",
-        chunk_payload("snapshot-1", "request-1", 0, "abcd", 2),
+        &chunk_payload("snapshot-1", "request-1", 0, "abcd", 2),
     );
     let too_large = assembler.accept(
         "term-1",
-        chunk_payload("snapshot-1", "request-1", 1, "ef", 2),
+        &chunk_payload("snapshot-1", "request-1", 1, "ef", 2),
     );
 
     assert_eq!(first.progress, Some(0.5));
@@ -976,9 +976,9 @@ fn terminal_buffer_assembler_ignores_duplicate_chunks_and_limits_size() {
 fn terminal_buffer_assembler_replaces_stale_snapshot_per_request() {
     let mut assembler = TerminalBufferAssembler::new(200_000);
 
-    assembler.accept("term-1", chunk_payload("old", "request-1", 0, "old-", 2));
-    assembler.accept("term-1", chunk_payload("new", "request-1", 0, "new-", 2));
-    let result = assembler.accept("term-1", chunk_payload("new", "request-1", 1, "data", 2));
+    assembler.accept("term-1", &chunk_payload("old", "request-1", 0, "old-", 2));
+    assembler.accept("term-1", &chunk_payload("new", "request-1", 0, "new-", 2));
+    let result = assembler.accept("term-1", &chunk_payload("new", "request-1", 1, "data", 2));
 
     assert!(result.ready);
     assert_eq!(result.payload.unwrap()["data"], "new-data");

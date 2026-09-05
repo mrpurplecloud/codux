@@ -4,6 +4,9 @@ use std::collections::HashMap;
 pub struct TerminalBufferAssemblyResult {
     pub ready: bool,
     pub progress: Option<f64>,
+    /// The reassembled payload, or `None` when the caller's own payload is
+    /// already the whole thing. Ready plus `None` means "carry on with what you
+    /// passed in".
     pub payload: Option<serde_json::Value>,
 }
 
@@ -20,10 +23,18 @@ impl TerminalBufferAssembler {
         }
     }
 
+    /// Feed one inbound payload through reassembly.
+    ///
+    /// Deciding whether a payload needs reassembling at all belongs here, not
+    /// at the call site: only a chunked buffer transfer does, and every live
+    /// output frame does not. A payload that needs nothing is reported ready
+    /// with no replacement, so the caller keeps using the one it already holds.
+    /// Taking it by reference means the common path -- which is every frame of
+    /// streaming output -- never copies a payload just to have it handed back.
     pub fn accept(
         &mut self,
         session_id: &str,
-        payload: serde_json::Value,
+        payload: &serde_json::Value,
     ) -> TerminalBufferAssemblyResult {
         if payload.get("buffer").and_then(|value| value.as_bool()) != Some(true)
             || payload.get("chunked").and_then(|value| value.as_bool()) != Some(true)
@@ -31,7 +42,7 @@ impl TerminalBufferAssembler {
             return TerminalBufferAssemblyResult {
                 ready: true,
                 progress: None,
-                payload: Some(payload),
+                payload: None,
             };
         }
 
@@ -73,6 +84,8 @@ impl TerminalBufferAssembler {
                 .entry(key.clone())
                 .or_insert_with(|| TerminalBufferAssembly {
                     chunk_count: chunk_count as usize,
+                    // Only a chunked transfer keeps a payload around, so this is
+                    // the one place a copy is actually needed.
                     base_payload: payload.clone(),
                     max_chars: self.max_chars,
                     chunks: HashMap::new(),
@@ -82,7 +95,7 @@ impl TerminalBufferAssembler {
             self.assemblies.remove(&key);
             return TerminalBufferAssemblyResult::pending();
         }
-        assembly.merge_metadata(&payload);
+        assembly.merge_metadata(payload);
 
         let data = payload
             .get("data")

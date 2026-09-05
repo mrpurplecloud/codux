@@ -98,10 +98,25 @@ impl<T> RemotePtySession<T> {
         }
     }
 
-    pub fn hold_live(&mut self, sequence: Option<TerminalSequence>, output: T) -> bool {
+    /// Park a live frame until the baseline that precedes it arrives. Returns
+    /// whether the frame was taken; a session that is not restoring keeps
+    /// nothing.
+    ///
+    /// `output` is a closure rather than a value because building the frame is
+    /// itself expensive -- the caller has to re-serialize an envelope carrying
+    /// up to a 16 KB payload -- and the steady-state streaming path is not
+    /// restoring, so nothing would be held. Owning that decision here means no
+    /// caller has to re-derive "am I restoring" to avoid the cost, and a caller
+    /// that forgets cannot silently pay it.
+    pub fn hold_live(
+        &mut self,
+        sequence: Option<TerminalSequence>,
+        output: impl FnOnce() -> T,
+    ) -> bool {
         if !self.awaiting_baseline {
             return false;
         }
+        let output = output();
         if let Some(sequence) = sequence {
             self.held_sequenced_live.entry(sequence).or_insert(output);
             // Drop the oldest held frames past the cap. The baseline replay and

@@ -662,7 +662,13 @@ class _SelfDrawnTerminalViewState extends State<SelfDrawnTerminalView>
   // the top. Returns 0 when the content already fits the viewport.
   int _bottomWindowStartRows() {
     final snapshot = _snapshot;
-    if (snapshot == null || _rows <= 0) return 0;
+    if (snapshot == null || _rows <= 0) {
+      // Drop the memo's reference too: holding it would pin a discarded grid
+      // (thousands of cells) for as long as the view stays mounted without a
+      // session.
+      _startRowsSnapshot = null;
+      return 0;
+    }
     if (identical(snapshot, _startRowsSnapshot) &&
         _rows == _startRowsViewportRows) {
       return _startRowsCached;
