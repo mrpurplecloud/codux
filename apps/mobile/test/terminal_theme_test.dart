@@ -1,3 +1,4 @@
+import 'package:codux_protocol_ffi/codux_protocol_ffi.dart';
 import 'package:codux_flutter/theme/app_theme.dart';
 import 'package:codux_flutter/theme/terminal_theme.dart';
 import 'package:flutter/material.dart';
@@ -24,8 +25,8 @@ void main() {
 
   test('dark terminal theme remaps unreadable neutral foregrounds', () {
     final colors = TerminalTheme.resolveCellColors(
-      fg: {'kind': 'named', 'name': 'Black'},
-      bg: {'kind': 'default'},
+      fg: const TerminalScreenColor.named('Black'),
+      bg: TerminalScreenColor.defaults,
       inverse: false,
     );
 
@@ -36,8 +37,8 @@ void main() {
 
   test('dark terminal theme keeps readable ansi colors intact', () {
     final colors = TerminalTheme.resolveCellColors(
-      fg: {'kind': 'named', 'name': 'Green'},
-      bg: {'kind': 'default'},
+      fg: const TerminalScreenColor.named('Green'),
+      bg: TerminalScreenColor.defaults,
       inverse: false,
     );
 
@@ -46,13 +47,13 @@ void main() {
 
   test('dark terminal theme preserves explicit rgb gradients', () {
     final first = TerminalTheme.resolveCellColors(
-      fg: {'kind': 'rgb', 'r': 68, 'g': 72, 'b': 78},
-      bg: {'kind': 'default'},
+      fg: TerminalScreenColor.rgb(68, 72, 78),
+      bg: TerminalScreenColor.defaults,
       inverse: false,
     );
     final second = TerminalTheme.resolveCellColors(
-      fg: {'kind': 'rgb', 'r': 88, 'g': 92, 'b': 98},
-      bg: {'kind': 'default'},
+      fg: TerminalScreenColor.rgb(88, 92, 98),
+      bg: TerminalScreenColor.defaults,
       inverse: false,
     );
 
@@ -63,14 +64,14 @@ void main() {
 
   test('dark terminal theme dims faint foregrounds toward background', () {
     final normal = TerminalTheme.resolveCellColors(
-      fg: {'kind': 'rgb', 'r': 230, 'g': 237, 'b': 243},
-      bg: {'kind': 'default'},
+      fg: TerminalScreenColor.rgb(230, 237, 243),
+      bg: TerminalScreenColor.defaults,
       inverse: false,
       dim: false,
     );
     final dimmed = TerminalTheme.resolveCellColors(
-      fg: {'kind': 'rgb', 'r': 230, 'g': 237, 'b': 243},
-      bg: {'kind': 'default'},
+      fg: TerminalScreenColor.rgb(230, 237, 243),
+      bg: TerminalScreenColor.defaults,
       inverse: false,
       dim: true,
     );
@@ -88,8 +89,8 @@ void main() {
 
   test('dark terminal theme normalizes host light cell backgrounds', () {
     final colors = TerminalTheme.resolveCellColors(
-      fg: {'kind': 'named', 'name': 'Black'},
-      bg: {'kind': 'named', 'name': 'White'},
+      fg: const TerminalScreenColor.named('Black'),
+      bg: const TerminalScreenColor.named('White'),
       inverse: false,
     );
 
@@ -103,8 +104,8 @@ void main() {
 
     for (final index in [1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14]) {
       final colors = TerminalTheme.resolveCellColors(
-        fg: {'kind': 'indexed', 'index': index},
-        bg: {'kind': 'default'},
+        fg: TerminalScreenColor.indexed(index),
+        bg: TerminalScreenColor.defaults,
         inverse: false,
       );
 
@@ -120,13 +121,13 @@ void main() {
     CoduxTheme.brightness = Brightness.light;
 
     final named = TerminalTheme.resolveCellColors(
-      fg: {'kind': 'named', 'name': 'BrightBlack'},
-      bg: {'kind': 'default'},
+      fg: const TerminalScreenColor.named('BrightBlack'),
+      bg: TerminalScreenColor.defaults,
       inverse: false,
     );
     final indexed = TerminalTheme.resolveCellColors(
-      fg: {'kind': 'indexed', 'index': 8},
-      bg: {'kind': 'default'},
+      fg: const TerminalScreenColor.indexed(8),
+      bg: TerminalScreenColor.defaults,
       inverse: false,
     );
 
@@ -137,8 +138,8 @@ void main() {
     CoduxTheme.brightness = Brightness.light;
 
     final colors = TerminalTheme.resolveCellColors(
-      fg: {'kind': 'named', 'name': 'White'},
-      bg: {'kind': 'rgb', 'r': 18, 'g': 18, 'b': 18},
+      fg: const TerminalScreenColor.named('White'),
+      bg: TerminalScreenColor.rgb(18, 18, 18),
       inverse: false,
     );
 
@@ -152,8 +153,8 @@ void main() {
 
     final colors = TerminalTheme.resolveCellColors(
       // A pastel straight from a dark-tuned host palette.
-      fg: {'kind': 'rgb', 'r': 105, 'g': 219, 'b': 124},
-      bg: {'kind': 'default'},
+      fg: TerminalScreenColor.rgb(105, 219, 124),
+      bg: TerminalScreenColor.defaults,
       inverse: false,
     );
 
@@ -167,7 +168,7 @@ void main() {
     CoduxTheme.brightness = Brightness.light;
 
     final color = TerminalTheme.resolveUnderlineColor(
-      {'kind': 'rgb', 'r': 105, 'g': 219, 'b': 124},
+      TerminalScreenColor.rgb(105, 219, 124),
       AppColors.terminalText,
       AppColors.terminalBg,
     );
@@ -182,8 +183,8 @@ void main() {
     final shades = <Color>{};
     for (final index in [1, 2, 3, 4, 5, 6, 8, 15]) {
       final colors = TerminalTheme.resolveCellColors(
-        fg: {'kind': 'indexed', 'index': index},
-        bg: {'kind': 'default'},
+        fg: TerminalScreenColor.indexed(index),
+        bg: TerminalScreenColor.defaults,
         inverse: false,
       );
       shades.add(colors.fg);
@@ -203,7 +204,7 @@ void main() {
     CoduxTheme.terminalMono = true;
 
     final color = TerminalTheme.resolveUnderlineColor(
-      {'kind': 'indexed', 'index': 1},
+      const TerminalScreenColor.indexed(1),
       AppColors.terminalText,
       AppColors.terminalBg,
     );
@@ -215,15 +216,15 @@ void main() {
 
   test('resolved cells are not cached across a palette switch', () {
     final dark = TerminalTheme.resolveCellColors(
-      fg: {'kind': 'indexed', 'index': 2},
-      bg: {'kind': 'default'},
+      fg: const TerminalScreenColor.indexed(2),
+      bg: TerminalScreenColor.defaults,
       inverse: false,
     );
 
     CoduxTheme.brightness = Brightness.light;
     final light = TerminalTheme.resolveCellColors(
-      fg: {'kind': 'indexed', 'index': 2},
-      bg: {'kind': 'default'},
+      fg: const TerminalScreenColor.indexed(2),
+      bg: TerminalScreenColor.defaults,
       inverse: false,
     );
 

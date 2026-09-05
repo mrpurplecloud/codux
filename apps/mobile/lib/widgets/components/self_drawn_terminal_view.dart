@@ -647,8 +647,12 @@ class _SelfDrawnTerminalViewState extends State<SelfDrawnTerminalView>
   // The scan is O(cells) and the result is read several times per frame (build,
   // cursor metrics, every scroll delta, every fling tick), so recomputing it
   // per call scanned the whole grid a handful of times for one unchanged
-  // answer. A snapshot is replaced wholesale on refresh, so identity is a
-  // sufficient key -- the same test `shouldRepaint` already relies on.
+  // answer.
+  //
+  // Identity is a sufficient key because a snapshot is a value: the snapshot,
+  // its cursor and its cells hold only final fields, so the numbers read below
+  // cannot change without the whole object being replaced -- which `_refresh`
+  // does. `shouldRepaint` relies on the same property.
   TerminalScreenSnapshot? _startRowsSnapshot;
   int _startRowsViewportRows = -1;
   int _startRowsCached = 0;
@@ -1183,11 +1187,16 @@ class _TerminalGridPainter extends CustomPainter {
           bottomShift,
     );
 
+    // Every background is drawn before any glyph, and deliberately so: a tall
+    // fallback glyph overflows its cell into the row below, and painting that
+    // row's background afterwards would clip it. So the passes stay separate
+    // and each cell carries the colours resolved here -- resolving costs far
+    // more than carrying, and the run builder and the builtin-graphics pass
+    // both need the same answer.
     final bgPaint = Paint();
-    final rows = SplayTreeMap<int, List<TerminalScreenCell>>();
+    final rows = SplayTreeMap<int, List<_ShadedCell>>();
     for (final cell in snapshot.cells) {
       if (cell.row < 0) continue;
-      rows.putIfAbsent(cell.row, () => <TerminalScreenCell>[]).add(cell);
       final colors = TerminalTheme.resolveCellColors(
         fg: cell.fg,
         bg: cell.bg,
@@ -1195,6 +1204,10 @@ class _TerminalGridPainter extends CustomPainter {
         bold: cell.bold,
         dim: cell.dim,
       );
+      rows.putIfAbsent(cell.row, () => <_ShadedCell>[]).add((
+        cell: cell,
+        colors: colors,
+      ));
       final span = cell.width < 1 ? 1 : cell.width;
       final x = cell.col * cellWidth;
       final y = cell.row * cellHeight;
@@ -1209,7 +1222,9 @@ class _TerminalGridPainter extends CustomPainter {
     }
 
     for (final entry in rows.entries) {
-      entry.value.sort((left, right) => left.col.compareTo(right.col));
+      entry.value.sort(
+        (left, right) => left.cell.col.compareTo(right.cell.col),
+      );
       _paintBuiltinGraphics(canvas, entry.value);
       for (final run in _rowRuns(entry.value)) {
         final paragraph = _paragraph(
@@ -1250,18 +1265,13 @@ class _TerminalGridPainter extends CustomPainter {
     canvas.restore();
   }
 
-  void _paintBuiltinGraphics(Canvas canvas, List<TerminalScreenCell> cells) {
-    for (final cell in cells) {
+  void _paintBuiltinGraphics(Canvas canvas, List<_ShadedCell> cells) {
+    for (final shaded in cells) {
+      final cell = shaded.cell;
       if (cell.hidden || cell.text.isEmpty) continue;
       final graphic = terminalBuiltinGraphicForText(cell.text);
       if (graphic == null) continue;
-      final colors = TerminalTheme.resolveCellColors(
-        fg: cell.fg,
-        bg: cell.bg,
-        inverse: cell.inverse,
-        bold: cell.bold,
-        dim: cell.dim,
-      );
+      final colors = shaded.colors;
       final span = cell.width < 1 ? 1 : cell.width;
       paintTerminalBuiltinGraphic(
         canvas,
@@ -1301,7 +1311,7 @@ class _TerminalGridPainter extends CustomPainter {
   void _paintCursor(
     Canvas canvas,
     TerminalScreenSnapshot snapshot,
-    Map<int, List<TerminalScreenCell>> rows,
+    Map<int, List<_ShadedCell>> rows,
   ) {
     final cursor = snapshot.cursor;
     if (!cursor.visible) return;
@@ -1359,10 +1369,11 @@ class _TerminalGridPainter extends CustomPainter {
     }
   }
 
-  Iterable<_TerminalRowRun> _rowRuns(List<TerminalScreenCell> cells) sync* {
+  Iterable<_TerminalRowRun> _rowRuns(List<_ShadedCell> cells) sync* {
     _TerminalRowRun? current;
     var nextCol = 0;
-    for (final cell in cells) {
+    for (final shaded in cells) {
+      final cell = shaded.cell;
       final span = cell.width < 1 ? 1 : cell.width;
       if (cell.hidden || cell.text.isEmpty) {
         if (current != null) {
@@ -1380,13 +1391,7 @@ class _TerminalGridPainter extends CustomPainter {
         nextCol = cell.col + span;
         continue;
       }
-      final colors = TerminalTheme.resolveCellColors(
-        fg: cell.fg,
-        bg: cell.bg,
-        inverse: cell.inverse,
-        bold: cell.bold,
-        dim: cell.dim,
-      );
+      final colors = shaded.colors;
       // Cells that don't render from the primary monospace font leave the
       // batched run and render on their own, each positioned at its exact grid
       // column. Otherwise a fallback font's advance (proportional, != cell
@@ -1457,12 +1462,12 @@ class _TerminalGridPainter extends CustomPainter {
   }
 
   TerminalScreenCell? _cursorCell(
-    Map<int, List<TerminalScreenCell>> rows,
+    Map<int, List<_ShadedCell>> rows,
     int row,
     int col,
   ) {
-    for (final cell in rows[row] ?? const <TerminalScreenCell>[]) {
-      if (cell.col == col) return cell;
+    for (final shaded in rows[row] ?? const <_ShadedCell>[]) {
+      if (shaded.cell.col == col) return shaded.cell;
     }
     return null;
   }
@@ -1548,6 +1553,14 @@ class _TerminalGridPainter extends CustomPainter {
         old.mono != mono;
   }
 }
+
+/// A cell paired with its resolved paint colours.
+///
+/// The painter needs the same colours in three places -- the background pass,
+/// the builtin-graphics pass and the run builder -- and resolving them is by
+/// far the most expensive thing it does per cell. Resolving once and carrying
+/// the answer costs one small record per cell instead of two extra lookups.
+typedef _ShadedCell = ({TerminalScreenCell cell, TerminalPaintColors colors});
 
 /// Trailing blanks stripped from each copied line. Compiled once: a multi-screen
 /// selection runs this over every line.

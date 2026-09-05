@@ -1,6 +1,16 @@
+import 'package:codux_protocol_ffi/codux_protocol_ffi.dart';
 import 'package:flutter/material.dart';
 
 import 'app_theme.dart';
+
+/// Memo key for [TerminalTheme.resolveCellColors]. A record so equality is
+/// structural and exact — no key string to build, and no hash to collide.
+typedef _CellColorKey = ({
+  int palette,
+  TerminalScreenColor fg,
+  TerminalScreenColor bg,
+  int flags,
+});
 
 class TerminalPaintColors {
   const TerminalPaintColors({
@@ -20,33 +30,30 @@ class TerminalTheme {
   // every repaint, and each call runs several computeLuminance() passes. A
   // terminal screen only has a handful of distinct color combos, so memoizing
   // by a compact value key removes nearly all of that per-cell luminance work.
-  static final Map<String, TerminalPaintColors> _cellColorCache = {};
+  static final Map<_CellColorKey, TerminalPaintColors> _cellColorCache = {};
 
   /// Palette signature. The resolved colors depend on the active theme, so it
   /// belongs in the cache key — otherwise a theme switch keeps serving cells
   /// painted for the previous palette.
-  static String get _paletteKey =>
-      '${CoduxTheme.isLight ? 'l' : 'd'}${CoduxTheme.terminalMono ? 'm' : ''}';
-
-  static String _colorKey(Map<String, dynamic> value) {
-    final kind = '${value['kind'] ?? ''}';
-    return switch (kind) {
-      'rgb' => 'r${value['r']},${value['g']},${value['b']}',
-      'indexed' => 'i${value['index']}',
-      'named' => 'n${value['name']}',
-      _ => kind,
-    };
-  }
+  static int get _paletteKey =>
+      (CoduxTheme.isLight ? 1 : 0) | (CoduxTheme.terminalMono ? 2 : 0);
 
   static TerminalPaintColors resolveCellColors({
-    required Map<String, dynamic> fg,
-    required Map<String, dynamic> bg,
+    required TerminalScreenColor fg,
+    required TerminalScreenColor bg,
     required bool inverse,
     bool bold = false,
     bool dim = false,
   }) {
-    final cacheKey =
-        '$_paletteKey|${_colorKey(fg)}|${_colorKey(bg)}|$inverse|$bold|$dim';
+    // The key is a record rather than an interpolated string: this runs once
+    // per visible cell per frame, and building a string to look up a memo cost
+    // more than the memo saves on everything but the luminance work.
+    final cacheKey = (
+      palette: _paletteKey,
+      fg: fg,
+      bg: bg,
+      flags: (inverse ? 1 : 0) | (bold ? 2 : 0) | (dim ? 4 : 0),
+    );
     final cached = _cellColorCache[cacheKey];
     if (cached != null) return cached;
     final resolved = _resolveCellColors(
@@ -63,7 +70,7 @@ class TerminalTheme {
 
   /// SGR 58 underline color; falls back to the resolved text foreground.
   static Color resolveUnderlineColor(
-    Map<String, dynamic>? value,
+    TerminalScreenColor? value,
     Color fallback,
     Color background,
   ) {
@@ -80,8 +87,8 @@ class TerminalTheme {
   }
 
   static TerminalPaintColors _resolveCellColors({
-    required Map<String, dynamic> fg,
-    required Map<String, dynamic> bg,
+    required TerminalScreenColor fg,
+    required TerminalScreenColor bg,
     required bool inverse,
     required bool bold,
     required bool dim,
@@ -198,38 +205,30 @@ class _ResolvedScreenColor {
 }
 
 _ResolvedScreenColor _resolveScreenColor(
-  Map<String, dynamic> value,
+  TerminalScreenColor value,
   Color fallback,
 ) {
-  final kind = '${value['kind'] ?? ''}';
-  final color = switch (kind) {
-    'rgb' => Color.fromARGB(
+  final color = switch (value.kind) {
+    TerminalScreenColorKind.rgb => Color.fromARGB(
       255,
-      _channel(value['r']),
-      _channel(value['g']),
-      _channel(value['b']),
+      value.red,
+      value.green,
+      value.blue,
     ),
-    'indexed' => _ansiIndexedColor(value['index']),
-    'named' => _namedColor('${value['name'] ?? ''}', fallback),
-    _ => fallback,
+    TerminalScreenColorKind.indexed => _ansiIndexedColor(value.index),
+    TerminalScreenColorKind.named => _namedColor(value.name, fallback),
+    TerminalScreenColorKind.defaultColor => fallback,
   };
-  // An absent colour means "default" -- the snapshot omits default colours
-  // rather than spelling them out. Deriving every flag from `isDefault` keeps
-  // the two spellings equivalent; reading `kind != 'default'` directly used to
-  // make an omitted background count as clashing and paint the elevated
-  // surface behind every ordinary cell.
-  final isDefault = kind.isEmpty || kind == 'default';
+  // "Absent" and "default" are the same value once the snapshot is decoded --
+  // the wire omits default colours and the decoder maps the omission onto
+  // `TerminalScreenColor.defaults`. There is no second spelling to get wrong
+  // here any more, so every flag reads off the one kind.
   return _ResolvedScreenColor(
     color: color,
-    isDefault: isDefault,
-    isRgb: kind == 'rgb',
-    isClashingSurface: !isDefault && _isClashingSurface(color),
+    isDefault: value.isDefault,
+    isRgb: value.kind == TerminalScreenColorKind.rgb,
+    isClashingSurface: !value.isDefault && _isClashingSurface(color),
   );
-}
-
-int _channel(Object? value) {
-  if (value is num) return value.toInt().clamp(0, 255);
-  return int.tryParse('${value ?? ''}')?.clamp(0, 255) ?? 0;
 }
 
 /// ANSI 16 for a dark canvas: soft, slightly desaturated hues.
@@ -275,9 +274,7 @@ const _lightAnsi = [
 
 List<Color> get _ansiPalette => CoduxTheme.isLight ? _lightAnsi : _darkAnsi;
 
-Color _ansiIndexedColor(Object? value) {
-  final index = value is num ? value.toInt() : int.tryParse('${value ?? ''}');
-  if (index == null) return AppColors.terminalText;
+Color _ansiIndexedColor(int index) {
   final basic = _ansiPalette;
   if (index < basic.length) return basic[index.clamp(0, basic.length - 1)];
   if (index >= 16 && index <= 231) {
@@ -295,12 +292,12 @@ Color _ansiIndexedColor(Object? value) {
   return AppColors.terminalText;
 }
 
-Color _boldForeground(Map<String, dynamic> value, Color fallback) {
-  if ('${value['kind'] ?? ''}' != 'indexed') return fallback;
-  final index = value['index'] is num
-      ? (value['index'] as num).toInt()
-      : int.tryParse('${value['index'] ?? ''}');
-  if (index == null || index < 0 || index >= 8) return fallback;
+/// Bold maps one of the eight base ANSI slots onto its bright twin. Anything
+/// else -- default, rgb, named, or an already-bright slot -- keeps its colour.
+Color _boldForeground(TerminalScreenColor value, Color fallback) {
+  if (value.kind != TerminalScreenColorKind.indexed) return fallback;
+  final index = value.index;
+  if (index < 0 || index >= 8) return fallback;
   return _ansiIndexedColor(index + 8);
 }
 

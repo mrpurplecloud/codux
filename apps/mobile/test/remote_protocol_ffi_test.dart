@@ -208,15 +208,15 @@ void main() {
     expect(plain.strikeout, isFalse);
     expect(plain.underline, codux_protocol_ffi.TerminalScreenUnderline.none);
     expect(plain.underlineColor, isNull);
-    // An absent colour means the default colour.
-    expect(plain.fg['kind'], anyOf(isNull, 'default'));
-    expect(plain.bg['kind'], anyOf(isNull, 'default'));
+    // An absent colour decodes to the default colour.
+    expect(plain.fg.isDefault, isTrue);
+    expect(plain.bg.isDefault, isTrue);
 
     // Present fields still survive the trip.
     final styled = cellAt(0, 2);
     expect(styled.text, 'C');
     expect(styled.bold, isTrue);
-    expect(styled.fg['kind'], 'indexed');
+    expect(styled.fg.kind, codux_protocol_ffi.TerminalScreenColorKind.indexed);
 
     final wide = cellAt(1, 0);
     expect(wide.text, '字');

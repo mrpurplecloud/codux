@@ -1080,6 +1080,103 @@ enum TerminalScreenUnderline {
   }
 }
 
+/// How a terminal cell colour is specified.
+enum TerminalScreenColorKind { defaultColor, indexed, rgb, named }
+
+/// A terminal cell colour, parsed once when the snapshot is decoded.
+///
+/// The wire form is a small JSON object, or absent for the default. Leaving it
+/// as a map made every reader re-interpret it -- the renderer asks for the
+/// colours of thousands of cells on every frame, and each ask walked the map
+/// again and built a string to look the answer up by. Parsing here hands
+/// readers a value they can compare and cache on directly, and it puts the
+/// channel clamping at the boundary the untrusted numbers cross.
+class TerminalScreenColor {
+  const TerminalScreenColor._({
+    required this.kind,
+    this.index = 0,
+    this.rgb = 0,
+    this.name = '',
+  });
+
+  /// The terminal's own foreground/background, whatever the theme resolves it
+  /// to. Also what an absent or unrecognised colour means.
+  static const TerminalScreenColor defaults = TerminalScreenColor._(
+    kind: TerminalScreenColorKind.defaultColor,
+  );
+
+  /// One of the 256 palette slots.
+  const TerminalScreenColor.indexed(int index)
+    : this._(kind: TerminalScreenColorKind.indexed, index: index);
+
+  /// A direct 24-bit colour. Channels are clamped, so a malformed frame cannot
+  /// produce an out-of-range component downstream.
+  factory TerminalScreenColor.rgb(int r, int g, int b) {
+    return TerminalScreenColor._(
+      kind: TerminalScreenColorKind.rgb,
+      rgb: (_channel(r) << 16) | (_channel(g) << 8) | _channel(b),
+    );
+  }
+
+  /// A palette slot addressed by name (`Green`, `BrightBlack`, ...).
+  const TerminalScreenColor.named(String name)
+    : this._(kind: TerminalScreenColorKind.named, name: name);
+
+  factory TerminalScreenColor.fromJson(Object? json) {
+    if (json is! Map) return defaults;
+    return switch ('${json['kind'] ?? ''}') {
+      'indexed' => TerminalScreenColor.indexed(_jsonInt(json['index'])),
+      'rgb' => TerminalScreenColor.rgb(
+        _jsonInt(json['r']),
+        _jsonInt(json['g']),
+        _jsonInt(json['b']),
+      ),
+      'named' => TerminalScreenColor.named('${json['name'] ?? ''}'),
+      _ => defaults,
+    };
+  }
+
+  final TerminalScreenColorKind kind;
+
+  /// Palette slot for [TerminalScreenColorKind.indexed].
+  final int index;
+
+  /// Packed `0xRRGGBB` for [TerminalScreenColorKind.rgb].
+  final int rgb;
+
+  /// Slot name for [TerminalScreenColorKind.named].
+  final String name;
+
+  bool get isDefault => kind == TerminalScreenColorKind.defaultColor;
+
+  int get red => (rgb >> 16) & 0xFF;
+  int get green => (rgb >> 8) & 0xFF;
+  int get blue => rgb & 0xFF;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TerminalScreenColor &&
+          other.kind == kind &&
+          other.index == index &&
+          other.rgb == rgb &&
+          other.name == name;
+
+  @override
+  int get hashCode => Object.hash(kind, index, rgb, name);
+
+  @override
+  String toString() => switch (kind) {
+    TerminalScreenColorKind.defaultColor => 'default',
+    TerminalScreenColorKind.indexed => 'indexed($index)',
+    TerminalScreenColorKind.rgb =>
+      'rgb(0x${rgb.toRadixString(16).padLeft(6, '0')})',
+    TerminalScreenColorKind.named => 'named($name)',
+  };
+}
+
+int _channel(int value) => value < 0 ? 0 : (value > 255 ? 255 : value);
+
 class TerminalScreenCell {
   const TerminalScreenCell({
     required this.row,
@@ -1102,15 +1199,15 @@ class TerminalScreenCell {
   final int col;
   final String text;
   final int width;
-  final Map<String, dynamic> fg;
-  final Map<String, dynamic> bg;
+  final TerminalScreenColor fg;
+  final TerminalScreenColor bg;
   final bool bold;
   final bool dim;
   final bool italic;
   final TerminalScreenUnderline underline;
 
   /// SGR 58 underline color override; null means the text foreground.
-  final Map<String, dynamic>? underlineColor;
+  final TerminalScreenColor? underlineColor;
   final bool inverse;
   final bool hidden;
   final bool strikeout;
@@ -1127,18 +1224,14 @@ class TerminalScreenCell {
       col: _jsonInt(json['col']),
       text: '${json['text'] ?? ''}',
       width: json['width'] == null ? 1 : _jsonInt(json['width']),
-      fg: json['fg'] is Map
-          ? Map<String, dynamic>.from(json['fg'] as Map)
-          : const {},
-      bg: json['bg'] is Map
-          ? Map<String, dynamic>.from(json['bg'] as Map)
-          : const {},
+      fg: TerminalScreenColor.fromJson(json['fg']),
+      bg: TerminalScreenColor.fromJson(json['bg']),
       bold: json['bold'] == true,
       dim: json['dim'] == true,
       italic: json['italic'] == true,
       underline: TerminalScreenUnderline.fromJson(json['underline']),
       underlineColor: json['underlineColor'] is Map
-          ? Map<String, dynamic>.from(json['underlineColor'] as Map)
+          ? TerminalScreenColor.fromJson(json['underlineColor'])
           : null,
       inverse: json['inverse'] == true,
       hidden: json['hidden'] == true,
