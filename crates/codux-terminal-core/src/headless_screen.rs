@@ -1232,16 +1232,16 @@ impl TerminalScreenWorker {
         if self.cols == cols && self.rows == rows {
             return;
         }
-        let shrinking_budget = cols > self.cols;
+        let widening = cols > self.cols;
         self.cols = cols;
         self.rows = rows;
         // Grow the row budget before a narrow reflow can drop rows. Shrink it
         // only after a wide reflow has reduced the rows needed by the content.
-        if !shrinking_budget {
+        if !widening {
             self.apply_scrollback_budget();
         }
         self.term.resize(HeadlessTermSize::new(cols, rows));
-        if shrinking_budget {
+        if widening {
             self.apply_scrollback_budget();
         }
     }
