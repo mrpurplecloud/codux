@@ -1,3 +1,4 @@
+import 'package:codux_protocol_ffi/codux_protocol_ffi.dart' show mallocPurge;
 import 'package:flutter/foundation.dart';
 
 import '../../services/remote_runtime_store.dart';
@@ -180,6 +181,9 @@ class HomeRuntimeCoordinator {
       terminalInputSender.clear(sessionId: sessionId);
     }
     if (evicted.isNotEmpty) {
+      // Evicting drops each session's grid, but the native allocator holds on
+      // to the pages, so RSS stays where it was until we ask for them back.
+      mallocPurge();
       CoduxLog.info(
         '[codux-flutter-terminal] evict inactive sessions=${evicted.length} keep=$bindSessionId',
       );
