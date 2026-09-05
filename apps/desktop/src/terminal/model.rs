@@ -537,15 +537,19 @@ impl TerminalModel {
         self.handle.snapshot()
     }
 
-    fn set_render_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+    /// Returns whether visibility actually changed. The workspace re-asserts the
+    /// current visibility on every render, so callers that do work on the
+    /// transition (rather than on the state) need to know which is which.
+    fn set_render_visible(&mut self, visible: bool, cx: &mut Context<Self>) -> bool {
         if self.render_visible == visible {
-            return;
+            return false;
         }
         self.render_visible = visible;
         if visible && self.snapshot_dirty {
             self.schedule_snapshot_publish(cx);
             cx.notify();
         }
+        true
     }
 
     // Output-driven publish requests go through here: snapshots are only

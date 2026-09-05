@@ -304,8 +304,19 @@ impl TerminalView {
     }
 
     pub fn set_render_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
-        self.model
+        let changed = self
+            .model
             .update(cx, |model, cx| model.set_render_visible(visible, cx));
+        if changed && !visible {
+            // A hidden pane is never painted, so its prepared-row cache (up to
+            // TERMINAL_ROW_CACHE_LIMIT shaped rows) is dead weight until the
+            // pane comes back. Showing it again only re-shapes the rows that
+            // are actually on screen, which the first prepaint does anyway.
+            // Keyed on the transition, not the state: the workspace re-asserts
+            // visibility every render, so doing this per call would run it on
+            // every frame the terminal is off screen.
+            self.renderer.clear_cache();
+        }
         self.blink_manager
             .update(cx, |manager, cx| manager.set_render_visible(visible, cx));
     }
