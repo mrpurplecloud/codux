@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:codux_flutter/services/remote_protocol_service.dart';
 import 'package:codux_flutter/models/remote_models.dart';
 import 'package:codux_protocol_ffi/codux_protocol_ffi.dart'
@@ -144,5 +146,80 @@ void main() {
       codux_protocol_ffi.terminalKeyInput(key: 'up', applicationCursor: true),
       '\u001bOA',
     );
+  });
+
+  test('snapshot omits default cell fields and the decoder restores them', () {
+    // The Rust snapshot leaves every default-valued cell field off the wire (a
+    // full screen is thousands of cells, almost all of them plain). This is the
+    // consumer half of that contract: an omitted field must decode to the
+    // default, and a present one must survive. Getting a default wrong here
+    // renders silently wrong -- nothing throws -- so it is pinned here rather
+    // than left to the renderer's incidental null handling.
+    //
+    // The Rust half is `cell_snapshot_omits_exactly_the_default_fields` in
+    // crates/codux-terminal-core/src/tests.rs.
+    final router = codux_protocol_ffi.RemoteOutputRouter(
+      maxBufferChars: 65536,
+      maxCachedChars: 65536,
+    );
+    addTearDown(router.dispose);
+    router.bindSession('session-1', requireBaseline: true);
+    router.resizeScreen('session-1', cols: 20, rows: 4);
+    router.accept(
+      jsonEncode({
+        'type': 'terminal.output',
+        'sessionId': 'session-1',
+        'payload': {
+          'data': '',
+          // "ab" plain, then bold red "CD", then a wide CJK glyph on row 2.
+          'screenData':
+              '\u001b[2J\u001b[Hab\u001b[1;31mCD\u001b[0m\u001b[2;1H字',
+          'buffer': true,
+          'offset': 0,
+          'bufferLength': 0,
+          'tail': true,
+          'outputSeq': 1,
+        },
+      }),
+      'session-1',
+    );
+
+    final snapshot = router.screenSnapshot('session-1');
+    expect(snapshot, isNotNull);
+    // The repaint string is not built for consumer screens, so it never arrives.
+    expect(snapshot!.data, isEmpty);
+
+    codux_protocol_ffi.TerminalScreenCell cellAt(int row, int col) =>
+        snapshot.cells.firstWhere(
+          (cell) => cell.row == row && cell.col == col,
+          orElse: () => fail('no cell at row $row col $col'),
+        );
+
+    // Omitted fields decode to their defaults -- note width, which must be 1
+    // and not the 0 a bare int-parse of null would give.
+    final plain = cellAt(0, 0);
+    expect(plain.text, 'a');
+    expect(plain.width, 1);
+    expect(plain.bold, isFalse);
+    expect(plain.dim, isFalse);
+    expect(plain.italic, isFalse);
+    expect(plain.inverse, isFalse);
+    expect(plain.hidden, isFalse);
+    expect(plain.strikeout, isFalse);
+    expect(plain.underline, codux_protocol_ffi.TerminalScreenUnderline.none);
+    expect(plain.underlineColor, isNull);
+    // An absent colour means the default colour.
+    expect(plain.fg['kind'], anyOf(isNull, 'default'));
+    expect(plain.bg['kind'], anyOf(isNull, 'default'));
+
+    // Present fields still survive the trip.
+    final styled = cellAt(0, 2);
+    expect(styled.text, 'C');
+    expect(styled.bold, isTrue);
+    expect(styled.fg['kind'], 'indexed');
+
+    final wide = cellAt(1, 0);
+    expect(wide.text, '字');
+    expect(wide.width, 2);
   });
 }

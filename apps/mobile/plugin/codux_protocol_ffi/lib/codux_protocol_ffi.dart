@@ -1115,12 +1115,18 @@ class TerminalScreenCell {
   final bool hidden;
   final bool strikeout;
 
+  /// Decodes one cell of the grid.
+  ///
+  /// The snapshot omits every field that holds its default -- a full screen is
+  /// thousands of cells and almost all of them are a plain character -- so an
+  /// absent field here means that default, not "unset". Colours fall back to
+  /// the empty map, which [TerminalTheme] resolves as the default colour.
   factory TerminalScreenCell.fromJson(Map<String, dynamic> json) {
     return TerminalScreenCell(
       row: _jsonInt(json['row']),
       col: _jsonInt(json['col']),
       text: '${json['text'] ?? ''}',
-      width: _jsonInt(json['width']),
+      width: json['width'] == null ? 1 : _jsonInt(json['width']),
       fg: json['fg'] is Map
           ? Map<String, dynamic>.from(json['fg'] as Map)
           : const {},

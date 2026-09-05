@@ -42,6 +42,11 @@ const TERMINAL_CELL_HEIGHT_PX: u32 = 20;
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalScreenSnapshot {
+    /// ANSI repaint string for the whole viewport. Only consumers that replay
+    /// into another emulator need it; a snapshot built with `include_data =
+    /// false` leaves it empty, and an empty one is left off the wire entirely
+    /// (it runs to tens of KB on a full screen).
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub data: String,
     pub cols: usize,
     pub rows: usize,
@@ -99,18 +104,33 @@ pub enum TerminalScreenCursorShape {
     HollowBlock,
 }
 
+/// One cell of the grid.
+///
+/// Serialization omits every field that holds its default, because the JSON
+/// form of this struct is the mobile renderer's per-frame payload: a full
+/// screen is thousands of cells, and the overwhelming majority are an ordinary
+/// character with no attributes. Spelling out six `false` flags, `"none"`,
+/// `"default"` colours and `width: 1` on each of them dominated the snapshot.
+/// A decoder must therefore read an absent field as that default.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalScreenCellSnapshot {
     pub row: i32,
     pub col: usize,
     pub text: String,
+    #[serde(skip_serializing_if = "is_single_width")]
     pub width: usize,
+    #[serde(skip_serializing_if = "TerminalScreenColor::is_default")]
     pub fg: TerminalScreenColor,
+    #[serde(skip_serializing_if = "TerminalScreenColor::is_default")]
     pub bg: TerminalScreenColor,
+    #[serde(skip_serializing_if = "is_not_set")]
     pub bold: bool,
+    #[serde(skip_serializing_if = "is_not_set")]
     pub dim: bool,
+    #[serde(skip_serializing_if = "is_not_set")]
     pub italic: bool,
+    #[serde(skip_serializing_if = "TerminalScreenUnderline::is_none")]
     pub underline: TerminalScreenUnderline,
     /// SGR 58 underline color override; None means the text foreground.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -118,9 +138,21 @@ pub struct TerminalScreenCellSnapshot {
     /// OSC 8 hyperlink URI attached to this cell.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
+    #[serde(skip_serializing_if = "is_not_set")]
     pub inverse: bool,
+    #[serde(skip_serializing_if = "is_not_set")]
     pub hidden: bool,
+    #[serde(skip_serializing_if = "is_not_set")]
     pub strikeout: bool,
+}
+
+fn is_not_set(value: &bool) -> bool {
+    !*value
+}
+
+/// A cell spans one column unless it holds a wide (CJK) glyph.
+fn is_single_width(value: &usize) -> bool {
+    *value == 1
 }
 
 /// Underline style carried per cell (SGR 4 and 4:x colon subparams).
@@ -136,6 +168,12 @@ pub enum TerminalScreenUnderline {
     Dashed,
 }
 
+impl TerminalScreenUnderline {
+    fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum TerminalScreenColor {
@@ -143,6 +181,12 @@ pub enum TerminalScreenColor {
     Named { name: String },
     Rgb { r: u8, g: u8, b: u8 },
     Indexed { index: u8 },
+}
+
+impl TerminalScreenColor {
+    fn is_default(&self) -> bool {
+        matches!(self, Self::Default)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

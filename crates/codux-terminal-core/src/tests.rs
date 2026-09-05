@@ -1,5 +1,42 @@
 use super::*;
 
+/// Visible text of a snapshot, joined row by row.
+///
+/// Assertions read the cell grid because that is the surface the consumer
+/// actually renders. The snapshot's ANSI repaint string is not built for
+/// consumer-side screens (nothing reads it, and it costs a full-viewport string
+/// per snapshot), so it is not a stand-in for "what is on screen".
+fn screen_text(snapshot: &TerminalScreenSnapshot) -> String {
+    let mut rows: std::collections::BTreeMap<
+        i32,
+        std::collections::BTreeMap<usize, (&str, usize)>,
+    > = std::collections::BTreeMap::new();
+    for cell in &snapshot.cells {
+        rows.entry(cell.row)
+            .or_default()
+            .insert(cell.col, (cell.text.as_str(), cell.width.max(1)));
+    }
+    // Blank default-styled cells are left out of a snapshot on purpose, so the
+    // spaces between words live in the gaps between column numbers. Rebuild
+    // them the same way the renderer does.
+    rows.values()
+        .map(|row| {
+            let mut line = String::new();
+            let mut next_col = 0usize;
+            for (col, (text, width)) in row {
+                while next_col < *col {
+                    line.push(' ');
+                    next_col += 1;
+                }
+                line.push_str(text);
+                next_col += width;
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn key_input<'a>(
     key: &'a str,
     key_char: Option<&'a str>,
@@ -350,19 +387,22 @@ fn restores_raw_history_screen_from_baseline() {
     assert_eq!(session.content(), history);
     assert_eq!(session.buffer_length(), 83);
     assert_eq!(session.sequence(), 7);
-    assert!(screen.data.contains("raw history 12"));
-    assert!(!screen.data.contains("raw history 01"));
+    assert!(screen_text(&screen).contains("raw history 12"));
+    assert!(!screen_text(&screen).contains("raw history 01"));
 
     scroll_history_up(&mut session, 8);
     let scrolled = session.screen_snapshot();
     assert!(scrolled.display_offset > 0);
-    assert!(scrolled.data.contains("raw history 01") || scrolled.data.contains("raw history 02"));
+    assert!(
+        screen_text(&scrolled).contains("raw history 01")
+            || screen_text(&scrolled).contains("raw history 02")
+    );
 
     scroll_history_bottom(&mut session);
     let bottom = session.screen_snapshot();
     assert_eq!(bottom.display_offset, 0);
-    assert!(bottom.data.contains("raw history 12"));
-    assert!(!bottom.data.contains("raw history 01"));
+    assert!(screen_text(&bottom).contains("raw history 12"));
+    assert!(!screen_text(&bottom).contains("raw history 01"));
 }
 
 #[test]
@@ -379,14 +419,17 @@ fn baseline_keyframe_reconstructs_current_screen_over_raw_history() {
 
     let screen = session.screen_snapshot();
     assert_eq!(screen.display_offset, 0);
-    assert!(screen.data.contains("tui current screen"));
+    assert!(screen_text(&screen).contains("tui current screen"));
 
     // The raw history is still reachable by scrolling up. The keyframe replaces
     // the visible rows in place without adding another copy to scrollback.
     scroll_history_up(&mut session, 100);
     let scrolled = session.screen_snapshot();
     assert!(scrolled.display_offset > 0);
-    assert!(scrolled.data.contains("scrollback 01") || scrolled.data.contains("scrollback 02"));
+    assert!(
+        screen_text(&scrolled).contains("scrollback 01")
+            || screen_text(&scrolled).contains("scrollback 02")
+    );
 }
 
 #[test]
@@ -432,7 +475,7 @@ fn baseline_scroll_restore_falls_back_to_bottom_when_history_shrinks() {
     );
     let screen = session.screen_snapshot();
     assert_eq!(screen.display_offset, 0);
-    assert!(screen.data.contains("short 12"));
+    assert!(screen_text(&screen).contains("short 12"));
 }
 
 #[test]
@@ -457,13 +500,13 @@ fn live_output_appends_to_raw_history_screen() {
     assert_eq!(session.content(), format!("{history}partial live raw"));
     assert_eq!(session.buffer_length(), baseline_end + live.chars().count());
     assert_eq!(session.sequence(), 4);
-    assert!(screen.data.contains("partial live raw"));
-    assert!(!screen.data.contains("restored tui"));
+    assert!(screen_text(&screen).contains("partial live raw"));
+    assert!(!screen_text(&screen).contains("restored tui"));
 
     scroll_history_up(&mut session, 8);
     let scrolled = session.screen_snapshot();
     assert!(scrolled.display_offset > 0);
-    assert!(scrolled.data.contains("cached raw history"));
+    assert!(screen_text(&scrolled).contains("cached raw history"));
 }
 
 #[test]
@@ -550,9 +593,9 @@ fn live_screen_keyframe_replaces_current_screen_without_polluting_history() {
     // stream reflowed to the consumer's grid; the host-sized keyframe ("new
     // screen") is never spliced into either.
     let screen = session.screen_snapshot();
-    assert!(screen.data.contains("live raw"));
-    assert!(!screen.data.contains("new screen"));
-    assert!(!screen.data.contains("old screen"));
+    assert!(screen_text(&screen).contains("live raw"));
+    assert!(!screen_text(&screen).contains("new screen"));
+    assert!(!screen_text(&screen).contains("old screen"));
     assert!(session.content().contains("live raw"));
     assert!(!session.content().contains("new screen"));
     assert!(!session.content().contains("old screen"));
@@ -560,13 +603,16 @@ fn live_screen_keyframe_replaces_current_screen_without_polluting_history() {
     scroll_history_up(&mut session, 8);
     let scrolled = session.screen_snapshot();
     assert!(scrolled.display_offset > 0);
-    assert!(scrolled.data.contains("history 01") || scrolled.data.contains("history 02"));
-    assert!(!scrolled.data.contains("new screen"));
+    assert!(
+        screen_text(&scrolled).contains("history 01")
+            || screen_text(&scrolled).contains("history 02")
+    );
+    assert!(!screen_text(&scrolled).contains("new screen"));
 
     scroll_history_bottom(&mut session);
     let bottom = session.screen_snapshot();
-    assert!(bottom.data.contains("live raw"));
-    assert!(!bottom.data.contains("history 01"));
+    assert!(screen_text(&bottom).contains("live raw"));
+    assert!(!screen_text(&bottom).contains("history 01"));
 }
 
 #[test]
@@ -586,9 +632,9 @@ fn empty_live_screen_keyframe_leaves_live_view_unchanged() {
     assert!(!session.content().contains("old screen"));
 
     let screen = session.screen_snapshot();
-    assert!(screen.data.contains("history 12"));
-    assert!(!screen.data.contains("fresh screen"));
-    assert!(!screen.data.contains("old screen"));
+    assert!(screen_text(&screen).contains("history 12"));
+    assert!(!screen_text(&screen).contains("fresh screen"));
+    assert!(!screen_text(&screen).contains("old screen"));
 }
 
 #[test]
@@ -622,6 +668,120 @@ fn caches_only_the_trailing_line_budget() {
     assert!(
         (590..=600).contains(&kept),
         "kept {kept} lines, expected ~600"
+    );
+}
+
+#[test]
+fn cell_snapshot_omits_exactly_the_default_fields() {
+    // The snapshot's JSON form is the mobile renderer's per-frame payload, so
+    // default-valued fields are left off the wire and the decoder restores
+    // them. This pins both halves of that bargain: which keys an ordinary cell
+    // omits, and that a fully-styled cell still spells everything out.
+    //
+    // Changing either list is a wire-contract change. Update
+    // `TerminalScreenCell.fromJson` in
+    // apps/mobile/plugin/codux_protocol_ffi/lib/codux_protocol_ffi.dart in the
+    // same change, and extend its "snapshot omits default cell fields" test --
+    // a missing default there decodes silently wrong, it does not fail.
+    fn keys(cell: &TerminalScreenCellSnapshot) -> Vec<String> {
+        let value = serde_json::to_value(cell).expect("cell serializes");
+        let mut keys: Vec<String> = value
+            .as_object()
+            .expect("cell is a JSON object")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    let plain = TerminalScreenCellSnapshot {
+        row: 3,
+        col: 7,
+        text: "a".to_string(),
+        width: 1,
+        fg: TerminalScreenColor::Default,
+        bg: TerminalScreenColor::Default,
+        bold: false,
+        dim: false,
+        italic: false,
+        underline: TerminalScreenUnderline::None,
+        underline_color: None,
+        link: None,
+        inverse: false,
+        hidden: false,
+        strikeout: false,
+    };
+    assert_eq!(
+        keys(&plain),
+        ["col", "row", "text"],
+        "an unstyled cell must carry nothing but its position and glyph"
+    );
+
+    let styled = TerminalScreenCellSnapshot {
+        width: 2,
+        text: "字".to_string(),
+        fg: TerminalScreenColor::Indexed { index: 4 },
+        bg: TerminalScreenColor::Rgb { r: 1, g: 2, b: 3 },
+        bold: true,
+        dim: true,
+        italic: true,
+        underline: TerminalScreenUnderline::Curly,
+        underline_color: Some(TerminalScreenColor::Named {
+            name: "red".to_string(),
+        }),
+        link: Some("https://example.test".to_string()),
+        inverse: true,
+        hidden: true,
+        strikeout: true,
+        ..plain.clone()
+    };
+    assert_eq!(
+        keys(&styled),
+        [
+            "bg",
+            "bold",
+            "col",
+            "dim",
+            "fg",
+            "hidden",
+            "inverse",
+            "italic",
+            "link",
+            "row",
+            "strikeout",
+            "text",
+            "underline",
+            "underlineColor",
+            "width",
+        ],
+        "a fully styled cell must still carry every attribute"
+    );
+}
+
+#[test]
+fn consumer_screen_snapshot_skips_the_ansi_repaint_string() {
+    // The consumer renders from `cells`; nothing reads the repaint string, and
+    // building it cost a full-viewport string per snapshot. Keeping it empty is
+    // what lets `skip_serializing_if` drop it from the wire entirely.
+    let mut session = RemotePtySession::<String>::new(4096);
+    session.resize_screen(20, 8);
+    session.replace_from_baseline("hello world", None, None, Some(11), None, Some(1));
+
+    let snapshot = session.screen_snapshot();
+    assert!(
+        snapshot.data.is_empty(),
+        "consumer snapshot built the repaint string: {:?}",
+        snapshot.data
+    );
+    assert!(
+        screen_text(&snapshot).contains("hello world"),
+        "cells still carry the screen"
+    );
+    let json = serde_json::to_value(&snapshot).expect("snapshot serializes");
+    assert!(
+        json.get("data").is_none(),
+        "an empty repaint string must not reach the wire"
     );
 }
 

@@ -59,7 +59,12 @@ impl<T> RemotePtySession<T> {
         // One screen owns both the replayed history and authoritative visible
         // keyframes, so live output, scrolling, and baseline restores cannot
         // diverge into separate render states.
-        self.history_screen.snapshot()
+        //
+        // `include_data = false`: the consumer renders from `cells`, so the
+        // ANSI repaint string is never read. Building it cost the screen worker
+        // a full-viewport string per snapshot, and shipping it added tens of KB
+        // to every frame the mobile renderer decoded.
+        self.history_screen.snapshot_request(false).snapshot()
     }
 
     pub fn resize_screen(&mut self, cols: usize, rows: usize) {

@@ -213,11 +213,17 @@ _ResolvedScreenColor _resolveScreenColor(
     'named' => _namedColor('${value['name'] ?? ''}', fallback),
     _ => fallback,
   };
+  // An absent colour means "default" -- the snapshot omits default colours
+  // rather than spelling them out. Deriving every flag from `isDefault` keeps
+  // the two spellings equivalent; reading `kind != 'default'` directly used to
+  // make an omitted background count as clashing and paint the elevated
+  // surface behind every ordinary cell.
+  final isDefault = kind.isEmpty || kind == 'default';
   return _ResolvedScreenColor(
     color: color,
-    isDefault: kind.isEmpty || kind == 'default',
+    isDefault: isDefault,
     isRgb: kind == 'rgb',
-    isClashingSurface: kind != 'default' && _isClashingSurface(color),
+    isClashingSurface: !isDefault && _isClashingSurface(color),
   );
 }
 

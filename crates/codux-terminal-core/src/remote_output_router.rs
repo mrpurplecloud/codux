@@ -1062,6 +1062,47 @@ mod tests {
         effects.iter().map(|effect| effect.kind.as_str()).collect()
     }
 
+    /// Visible text of a session's screen, read from the cell grid the renderer
+    /// draws. The snapshot JSON no longer carries the ANSI repaint string, so
+    /// searching the raw JSON for a word would only ever find it split across
+    /// one cell per character.
+    fn screen_text(router: &RemoteTerminalOutputRouter, session_id: &str) -> String {
+        let json = router
+            .screen_snapshot_json(session_id)
+            .expect("screen snapshot");
+        let snapshot: Value = serde_json::from_str(&json).expect("snapshot json");
+        let mut rows: std::collections::BTreeMap<
+            i64,
+            std::collections::BTreeMap<i64, (String, i64)>,
+        > = std::collections::BTreeMap::new();
+        for cell in snapshot["cells"].as_array().into_iter().flatten() {
+            let row = cell["row"].as_i64().unwrap_or_default();
+            let col = cell["col"].as_i64().unwrap_or_default();
+            let text = cell["text"].as_str().unwrap_or_default().to_string();
+            // `width` is omitted for the single-column majority.
+            let width = cell["width"].as_i64().unwrap_or(1).max(1);
+            rows.entry(row).or_default().insert(col, (text, width));
+        }
+        // Blank default-styled cells are omitted, so spaces live in the gaps
+        // between column numbers.
+        rows.values()
+            .map(|row| {
+                let mut line = String::new();
+                let mut next_col = 0i64;
+                for (col, (text, width)) in row {
+                    while next_col < *col {
+                        line.push(' ');
+                        next_col += 1;
+                    }
+                    line.push_str(text);
+                    next_col += width;
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn buffer(
         session: &str,
         data: &str,
@@ -1376,7 +1417,7 @@ mod tests {
             &buffer_with_screen_data("session-1", "raw-history", "\x1b[2J\x1b[Hold-screen", 10),
             Some("session-1"),
         );
-        let before = router.screen_snapshot_json("session-1").unwrap();
+        let before = screen_text(&router, "session-1");
         assert!(before.contains("old-screen"), "baseline screen: {before}");
 
         let effects = router.accept(
@@ -1394,7 +1435,7 @@ mod tests {
         );
         assert_eq!(kinds(&effects), ["loading", "sessionUpdated", "ack"]);
 
-        let after = router.screen_snapshot_json("session-1").unwrap();
+        let after = screen_text(&router, "session-1");
         assert!(
             after.contains("fresh-screen"),
             "screen adopts keyframe: {after}"
