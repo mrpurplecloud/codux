@@ -549,10 +549,6 @@ class HomeController extends ChangeNotifier with WidgetsBindingObserver {
           ),
         );
       }
-      // Backgrounded is when RSS matters most — the low-memory killer scores by
-      // it — and when a few tens of milliseconds cost nothing, since nothing is
-      // being drawn. Hand back every page the allocator is sitting on.
-      codux_terminal_core.mallocPurge();
       CoduxLog.info(
         '[codux-flutter-lifecycle] background keep transport state=${state.name}',
       );

@@ -246,18 +246,6 @@ final _lastError = _dylib
     .lookupFunction<Pointer<Utf8> Function(), Pointer<Utf8> Function()>(
       'codux_protocol_last_error',
     );
-// Looked up defensively: purging is an optimisation, and a native library
-// built before this symbol existed must keep working rather than throw on the
-// first eviction.
-final bool Function()? _mallocPurge = () {
-  try {
-    return _dylib.lookupFunction<Bool Function(), bool Function()>(
-      'codux_malloc_purge',
-    );
-  } on ArgumentError {
-    return null;
-  }
-}();
 final _controllerTransportSendJson = _dylib
     .lookupFunction<
       Bool Function(Pointer<Void>, Pointer<Utf8>),
@@ -775,19 +763,6 @@ class ControllerTransportHandle {
 }
 
 String lastError() => _takeString(_lastError());
-
-/// Hand pages that the native allocator has already freed back to the OS.
-///
-/// Dropping cached terminal sessions frees their grids, but the allocator keeps
-/// the pages, so RSS does not move — and Android's low-memory killer scores by
-/// RSS. Measured on device with 16 cached sessions: evicting 15 left RSS at
-/// 138 MB, one purge took it to 18 MB.
-///
-/// Returns whether a purge actually ran — false on a platform with nothing to
-/// purge, or against a native library predating this symbol. Costs tens of
-/// milliseconds when there is a lot to return, so call it after bulk eviction
-/// or when going to the background, never per frame.
-bool mallocPurge() => _mallocPurge?.call() ?? false;
 
 Map<String, dynamic> resourceSubscribeEnvelope({
   required String resource,
