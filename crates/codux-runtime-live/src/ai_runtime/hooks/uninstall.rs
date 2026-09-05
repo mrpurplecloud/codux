@@ -24,8 +24,8 @@ use std::path::Path;
 pub fn uninstall_managed_hook_configs_in(home_dir: &Path) -> Result<(), String> {
     for config in LEGACY_JSON_HOOK_CONFIGS {
         let path = legacy_json_hook_path(home_dir, config);
-        uninstall_tool_hooks(&path, config.tool, config.definitions)?;
-        if config.tool == "codex" {
+        let removed_managed_hooks = uninstall_tool_hooks(&path, config.tool, config.definitions)?;
+        if config.tool == "codex" && removed_managed_hooks {
             uninstall_codex_config(&path)?;
         }
     }
@@ -61,12 +61,12 @@ fn uninstall_tool_hooks(
     path: &Path,
     tool: &str,
     definitions: &[LegacyHookDefinition],
-) -> Result<(), String> {
+) -> Result<bool, String> {
     if tool == "kiro" {
         return uninstall_kiro_tool_hooks(path, definitions);
     }
     if !path.exists() {
-        return Ok(());
+        return Ok(false);
     }
     let mut root = load_json_object(path)?;
     let mut hooks = root
@@ -74,11 +74,13 @@ fn uninstall_tool_hooks(
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
 
+    let mut removed_managed_hooks = false;
     for (event_key, action) in removed_hook_definitions(tool) {
-        strip_managed_action_from_hooks(&mut hooks, event_key, action, None, Some(tool));
+        removed_managed_hooks |=
+            strip_managed_action_from_hooks(&mut hooks, event_key, action, None, Some(tool));
     }
     if tool == "claude" {
-        strip_managed_action_from_hooks(
+        removed_managed_hooks |= strip_managed_action_from_hooks(
             &mut hooks,
             "Notification",
             "notification",
@@ -87,7 +89,7 @@ fn uninstall_tool_hooks(
         );
     }
     for definition in definitions {
-        strip_managed_action_from_hooks(
+        removed_managed_hooks |= strip_managed_action_from_hooks(
             &mut hooks,
             definition.event_key,
             definition.action,
@@ -96,10 +98,15 @@ fn uninstall_tool_hooks(
         );
     }
 
+    if !removed_managed_hooks {
+        return Ok(false);
+    }
+
     if !hooks.is_empty() {
         root.insert("hooks".to_string(), Value::Object(hooks));
     }
-    write_json_object(path, root)
+    write_json_object(path, root)?;
+    Ok(true)
 }
 
 /// Kiro's flat-array uninstall: entries sit directly under each event key, so
@@ -109,9 +116,9 @@ fn uninstall_tool_hooks(
 fn uninstall_kiro_tool_hooks(
     path: &Path,
     definitions: &[LegacyHookDefinition],
-) -> Result<(), String> {
+) -> Result<bool, String> {
     if !path.exists() {
-        return Ok(());
+        return Ok(false);
     }
     let mut root = load_json_object(path)?;
     let mut hooks = root
@@ -119,6 +126,7 @@ fn uninstall_kiro_tool_hooks(
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
 
+    let mut removed_managed_hooks = false;
     for definition in definitions {
         let entries = hooks
             .remove(definition.event_key)
@@ -126,17 +134,26 @@ fn uninstall_kiro_tool_hooks(
             .unwrap_or_default();
         let cleaned = entries
             .into_iter()
-            .filter(|entry| !is_managed_hook_action(entry, definition.action, None, Some("kiro")))
+            .filter(|entry| {
+                let managed = is_managed_hook_action(entry, definition.action, None, Some("kiro"));
+                removed_managed_hooks |= managed;
+                !managed
+            })
             .collect::<Vec<_>>();
         if !cleaned.is_empty() {
             hooks.insert(definition.event_key.to_string(), Value::Array(cleaned));
         }
     }
 
+    if !removed_managed_hooks {
+        return Ok(false);
+    }
+
     if !hooks.is_empty() {
         root.insert("hooks".to_string(), Value::Object(hooks));
     }
-    write_json_object(path, root)
+    write_json_object(path, root)?;
+    Ok(true)
 }
 
 fn removed_hook_definitions(tool: &str) -> &'static [(&'static str, &'static str)] {
@@ -161,16 +178,17 @@ fn strip_managed_action_from_hooks(
     action: &str,
     owner: Option<&str>,
     tool: Option<&str>,
-) {
+) -> bool {
     let groups = hooks
         .remove(event_key)
         .and_then(|value| value.as_array().cloned())
         .unwrap_or_default();
     if groups.is_empty() {
-        return;
+        return false;
     }
 
     let mut cleaned_groups = Vec::new();
+    let mut removed_managed_hooks = false;
     for group in groups {
         let Some(group_object) = group.as_object() else {
             continue;
@@ -181,7 +199,11 @@ fn strip_managed_action_from_hooks(
             .cloned()
             .unwrap_or_default()
             .into_iter()
-            .filter(|item| !is_managed_hook_action(item, action, owner, tool))
+            .filter(|item| {
+                let managed = is_managed_hook_action(item, action, owner, tool);
+                removed_managed_hooks |= managed;
+                !managed
+            })
             .collect::<Vec<_>>();
         if next_hooks.is_empty() {
             continue;
@@ -194,6 +216,7 @@ fn strip_managed_action_from_hooks(
     if !cleaned_groups.is_empty() {
         hooks.insert(event_key.to_string(), Value::Array(cleaned_groups));
     }
+    removed_managed_hooks
 }
 
 #[cfg(test)]
@@ -243,6 +266,70 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(remaining.len(), 1);
         assert!(remaining[0]["command"].as_str().unwrap().contains("custom"));
+    }
+
+    #[test]
+    fn repeated_uninstall_preserves_user_codex_hook_trust() {
+        let home = std::env::temp_dir().join(format!(
+            "codux-codex-trust-uninstall-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let codex_dir = home.join(".codex");
+        let hooks_path = codex_dir.join("hooks.json");
+        let config_path = codex_dir.join("config.toml");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        std::fs::write(
+            &hooks_path,
+            serde_json::json!({
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "hooks": [{
+                                "type": "command",
+                                "command": "'/tmp/codux/dmux-ai-state.sh' 'codex-session-start' 'codux' 'codex'"
+                            }]
+                        },
+                        {
+                            "hooks": [{
+                                "type": "command",
+                                "command": "'/tmp/custom-session-start.sh'"
+                            }]
+                        }
+                    ]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            &config_path,
+            format!(
+                "[features]\nhooks = true\n\n[hooks.state.\"{}:session_start:1:0\"]\ntrusted_hash = \"sha256:stale\"\n",
+                hooks_path.display()
+            ),
+        )
+        .unwrap();
+
+        uninstall_managed_hook_configs_in(&home).unwrap();
+        assert!(
+            !std::fs::read_to_string(&config_path)
+                .unwrap()
+                .contains("trusted_hash")
+        );
+
+        let trusted_config = format!(
+            "[features]\nhooks = true\n\n[hooks.state.\"{}:session_start:0:0\"]\ntrusted_hash = \"sha256:user-reviewed\"\n",
+            hooks_path.display()
+        );
+        std::fs::write(&config_path, &trusted_config).unwrap();
+
+        uninstall_managed_hook_configs_in(&home).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            trusted_config
+        );
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
