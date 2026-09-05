@@ -1,6 +1,10 @@
 fn migrate_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE TRANSACTION;")?;
     let result = (|| -> Result<()> {
+        // Everything below reads and writes the declared shape, so bring the
+        // database to it first; an older build's tables are missing columns
+        // that `CREATE TABLE IF NOT EXISTS` could not add.
+        reconcile_declared_columns(conn)?;
         conn.execute_batch(
             r#"
         INSERT OR IGNORE INTO ai_history_file_usage_event (

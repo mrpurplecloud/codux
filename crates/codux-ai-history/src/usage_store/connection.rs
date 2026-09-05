@@ -6,7 +6,6 @@ fn initialize_connection(conn: &Connection) -> Result<()> {
     for statement in SCHEMA_STATEMENTS {
         conn.execute_batch(statement)?;
     }
-    reconcile_declared_columns(conn)?;
 
     let stored_version: Option<String> = conn
         .query_row(
@@ -26,14 +25,15 @@ fn initialize_connection(conn: &Connection) -> Result<()> {
 
 /// Give every table the columns its declaration in [`SCHEMA_STATEMENTS`] has.
 ///
-/// `CREATE TABLE IF NOT EXISTS` cannot evolve a table that already exists, so a
-/// database written by an older build keeps that build's columns while the
-/// declarations move on. Everything after this point assumes the two agree --
-/// the migration reads columns straight off the declared shape -- and when they
-/// do not it fails inside its transaction and rolls back, taking the stored
-/// schema version with it. The next launch then fails identically, so the
-/// database stalls on its old version forever and the usage tables stay empty
-/// with nothing reported anywhere.
+/// This is the migration's precondition, which is why it runs there and not on
+/// every connection: `CREATE TABLE IF NOT EXISTS` cannot evolve a table that
+/// already exists, so a database written by an older build keeps that build's
+/// columns while the declarations move on. The migration reads columns straight
+/// off the declared shape, and when the two disagree it fails inside its
+/// transaction and rolls back -- taking the stored schema version with it, so
+/// the next launch fails identically. The database then stalls on its old
+/// version forever and the usage tables stay empty with nothing reported
+/// anywhere.
 ///
 /// The declared shape is obtained by running the same statements against a
 /// fresh in-memory database, which by construction gets the current shape,
@@ -98,8 +98,13 @@ impl DeclaredColumn {
 }
 
 fn declared_table_names(model: &Connection) -> Result<Vec<String>> {
-    let mut statement =
-        model.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name;")?;
+    // `sqlite_%` names are SQLite's own bookkeeping (`sqlite_sequence` and
+    // friends); they are not ours to alter.
+    let mut statement = model.prepare(
+        "SELECT name FROM sqlite_master
+         WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+         ORDER BY name;",
+    )?;
     let names = statement
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
