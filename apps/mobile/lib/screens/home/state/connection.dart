@@ -173,6 +173,16 @@ extension _HomePageConnection on HomeController {
   void _refreshStoredTransports(StoredDevice target, Object? value) {
     final reported = remoteTransportCandidatesFromJson(value);
     if (reported.isEmpty) return;
+    // Ask the dial path — the one authority on what is dialable — whether this
+    // report is usable before letting it replace a set that demonstrably is.
+    // A host that reports something we could never dial has effectively told us
+    // nothing, and adopting it would strand the device until it is re-paired.
+    if (!_hasDialableTransport(reported)) {
+      CoduxLog.warn(
+        '[codux-flutter-remote] ignored undialable host transports device=${target.deviceId} count=${reported.length}',
+      );
+      return;
+    }
     final result = _deviceController.replaceTransports(
       devices: _devices,
       activeDevice: _activeDevice ?? target,
@@ -186,6 +196,19 @@ extension _HomePageConnection on HomeController {
     _devices = result.state.devices;
     _activeDevice = result.state.activeDevice;
     unawaited(_storage.saveDevices(result.state.devices));
+  }
+
+  /// Whether any of [candidates] is one the dial path would actually accept.
+  ///
+  /// Answered by the native config parser rather than re-implemented here: it
+  /// applies the same rule the dialer does, so this cannot drift from it. The
+  /// summary reports the count that survived that filter.
+  bool _hasDialableTransport(List<RemoteTransportCandidate> candidates) {
+    final summary = codux_terminal_core.controllerTransportConfigSummary({
+      'transports': candidates.map((item) => item.toJson()).toList(),
+    });
+    final count = summary['transportCount'];
+    return count is int && count > 0;
   }
 
   /// Remember the address a live direct path is using, so a later dial can try

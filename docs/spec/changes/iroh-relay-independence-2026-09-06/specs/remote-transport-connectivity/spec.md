@@ -14,7 +14,12 @@ A controller or host endpoint SHALL treat relay registration as a best-effort si
 - **GIVEN** a controller endpoint whose relay registration times out
 - **WHEN** the timeout elapses
 - **THEN** the endpoint SHALL remain open and usable for dialling
-- **AND** a later relay recovery SHALL bring the same endpoint online without rebuilding it
+- **AND** it SHALL NOT be closed on account of the relay alone
+- **AND** a later relay recovery SHALL be observable on that same endpoint without rebuilding it
+
+Retiring an endpoint whose every dial failed is a separate, pre-existing
+behaviour and is unaffected: that decision is about a wedged path, not about the
+relay.
 
 #### Scenario: Relay available is unchanged
 - **GIVEN** a controller whose relay is reachable
@@ -32,10 +37,16 @@ A controller or host endpoint SHALL treat relay registration as a best-effort si
 ### Requirement: Relay-less Dial Fails No Slower Than The Former Gate
 The dial schedule SHALL be derived from whether the endpoint has a relay home. A relay-less dial SHALL use a bounded flat schedule whose total budget does not exceed the relay registration timeout it replaces. A relay-routed dial SHALL retain its escalating schedule. Exhausting a relay-less dial SHALL report an error distinct from relay unreachability.
 
-#### Scenario: Relay-less failure is not slower than before
+#### Scenario: Relay-less dialling is not slower than the gate it replaces
 - **GIVEN** a controller with no relay home and no reachable direct address
-- **WHEN** the controller connects and every dial fails
-- **THEN** total time to report failure SHALL NOT exceed the relay registration timeout budget
+- **WHEN** every dial fails
+- **THEN** the dialling SHALL NOT take longer than the relay registration timeout
+
+The bound is on the dialling this change adds, not on the whole connect. A cold
+start still waits out relay registration first — there is no way to learn that
+the relay will fail without waiting for it — but that wait is what the previous
+behaviour charged before failing outright, and the pooled endpoint pays it once
+rather than per attempt.
 
 #### Scenario: Failure cause is distinguishable
 - **GIVEN** a controller with no relay home
@@ -90,31 +101,53 @@ A controller SHALL record the transport address that carried its most recent suc
 - **WHEN** the controller dials
 - **THEN** the ticket's addresses SHALL still be attempted
 
-### Requirement: Host Announces Current Address On The Control Link
-A host SHALL advertise an address-announcement capability and SHALL send its current endpoint address set to controllers that advertised support, on connection establishment and whenever its address set changes. A receiving controller SHALL replace and persist its stored transport candidate from the announcement. The message is additive: a host SHALL NOT send it to a controller that did not advertise support, and a controller that never receives it SHALL retain current behaviour.
+### Requirement: Host Reports Its Current Addresses In `host.info`
+A host SHALL report its current dial candidates in the `host.info` payload,
+rebuilt from its live endpoint on each reply rather than cached. A receiving
+controller SHALL replace and persist its stored candidates from that report,
+except where the report is empty or carries nothing the dial path would accept.
 
-#### Scenario: Address change reaches the controller
-- **GIVEN** a paired controller and host that both support address announcement
-- **AND** the host's address set changes after pairing
-- **WHEN** the control link is established
-- **THEN** the host SHALL announce its current address set
-- **AND** the controller SHALL replace and persist its stored transport candidate
+This requires no capability negotiation and no new message: the field already
+exists on the wire and is already sent unconditionally, so a controller that
+ignores it is unaffected and a controller that uses it needs no agreement from
+the host. An earlier draft of this requirement specified a new capability-gated
+message; implementation found the existing reply already carried everything
+needed, and the extra mechanism would have added a negotiation nobody reads.
 
-#### Scenario: New host with old controller
-- **GIVEN** a host supporting address announcement
-- **AND** a controller that did not advertise support
-- **WHEN** the control link is established
-- **THEN** the host SHALL NOT send the announcement
-- **AND** the controller SHALL operate exactly as before
+Announcing mid-connection on address change is explicitly NOT required. While a
+link is live its path still works, and once it breaks the reconnect fetches a
+fresh `host.info` — a push matters only for a host whose address changed without
+the link noticing, which is exactly when it cannot be delivered.
 
-#### Scenario: Old host with new controller
-- **GIVEN** a host that does not support address announcement
-- **AND** a controller that does
-- **WHEN** the control link is established
-- **THEN** the controller SHALL retain its ticket addresses
-- **AND** its last-known-good address SHALL remain its only address-tracking mechanism
+#### Scenario: Address change reaches the controller on reconnect
+- **GIVEN** a paired controller and host
+- **AND** the host's address set changed after pairing
+- **WHEN** the controller connects and requests `host.info`
+- **THEN** the host SHALL report its current addresses
+- **AND** the controller SHALL replace and persist its stored candidates
 
-#### Scenario: Announcement and local memory stay independent
-- **GIVEN** a controller that has both received an announcement and recorded a last-known-good address
+#### Scenario: Both host builds report
+- **GIVEN** either a desktop host or a headless agent host
+- **WHEN** it replies to `host.info`
+- **THEN** the reply SHALL carry its current dial candidates
+- **AND** those candidates SHALL include the relay authentication needed to use them
+
+#### Scenario: An empty report is not an instruction to forget
+- **GIVEN** a host that reports no transports
+- **WHEN** the controller receives the reply
+- **THEN** the controller SHALL retain its stored candidates unchanged
+
+#### Scenario: An undialable report is refused
+- **GIVEN** a host reporting candidates that the dial path would reject
+- **WHEN** the controller receives the reply
+- **THEN** the controller SHALL retain its stored candidates unchanged
+
+#### Scenario: An unchanged report costs no write
+- **GIVEN** a host reporting exactly the candidates already stored
+- **WHEN** the controller receives the reply
+- **THEN** no device-store write SHALL occur
+
+#### Scenario: Report and local memory stay independent
+- **GIVEN** a controller that has both adopted a report and recorded a last-known-good address
 - **WHEN** the controller dials
-- **THEN** replacing the stored candidate from an announcement SHALL NOT erase the remembered address
+- **THEN** adopting a reported candidate set SHALL NOT erase the remembered address

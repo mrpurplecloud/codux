@@ -253,6 +253,40 @@ struct AgentMessageHandlerContext {
     /// restarted host sends.
     runtime_instance_id: String,
     name: String,
+    /// Bearer token for a custom relay. Carried so the transport candidates this
+    /// host reports are complete — a controller replaces its stored set with
+    /// what we send, so anything omitted here is lost on the controller side.
+    relay_authentication: String,
+}
+
+/// This host's current dial candidates, rebuilt from the live transport on
+/// every call.
+///
+/// Rebuilt rather than cached because the ticket inside encodes the endpoint's
+/// current addresses: a host that changed network, or acquired a relay home
+/// after starting without one, must report where it is now. Empty while the
+/// transport is still starting, which a controller reads as "nothing to say"
+/// and leaves its stored candidates untouched.
+fn agent_transport_candidates(
+    slot: &TransportSlot,
+    relay_authentication: &str,
+) -> Vec<codux_protocol::RemoteTransportCandidate> {
+    let Some(transport) = slot.lock().ok().and_then(|guard| guard.as_ref().cloned()) else {
+        return Vec::new();
+    };
+    let Some((node_id, relay_url)) = transport.iroh_candidate() else {
+        return Vec::new();
+    };
+    let ticket = transport.iroh_endpoint_ticket().unwrap_or_default();
+    vec![
+        codux_protocol::iroh_transport_candidate_with_ticket_and_authentication(
+            &relay_url,
+            node_id,
+            relay_url.clone(),
+            ticket,
+            relay_authentication,
+        ),
+    ]
 }
 
 fn make_handler(
@@ -270,6 +304,7 @@ fn make_handler(
         host_id,
         runtime_instance_id,
         name,
+        relay_authentication,
     } = context;
     Arc::new(move |source: String, data: Vec<u8>| {
         let Ok(envelope) = serde_json::from_slice::<Value>(&data) else {
@@ -505,8 +540,6 @@ fn make_handler(
             }
             REMOTE_HOST_INFO => Some((
                 REMOTE_HOST_INFO,
-                // Transports left empty: the controller already knows the path
-                // it connected on; host.info here carries identity/capabilities.
                 host_info_payload(HostInfoPayload {
                     host_id: host_id.clone(),
                     runtime_instance_id: runtime_instance_id.clone(),
@@ -517,7 +550,13 @@ fn make_handler(
                         REMOTE_RESOURCE_PROJECTS.to_string(),
                         codux_protocol::REMOTE_RESOURCE_TERMINALS.to_string(),
                     ],
-                    transports: Vec::new(),
+                    // Report where this host can be reached right now. These
+                    // were once left empty on the reasoning that the controller
+                    // already knew the path it connected on — true of the live
+                    // connection, but not of the NEXT one: a controller stores
+                    // these to dial with later, and a stored set frozen at
+                    // pairing time cannot follow a host that moved.
+                    transports: agent_transport_candidates(&slot, &relay_authentication),
                 }),
             )),
             REMOTE_FILE_LIST => {
@@ -1051,6 +1090,7 @@ async fn connect_serving_host(
                 host_id: cfg.host_id.clone(),
                 runtime_instance_id: new_runtime_instance_id(&cfg.host_id)?,
                 name: cfg.name.clone(),
+                relay_authentication: cfg.relay_authentication.clone(),
             }),
             on_upload: Arc::new(|_| Ok(())),
             on_state: {

@@ -128,5 +128,54 @@ void main() {
 
       expect(result.updatedDevice, isNull);
     });
+
+    test('a relay-less reported candidate is adopted', () {
+      // A host with no reachable relay reports an empty relayUrl and relies on
+      // its ticket. Adopting that is the whole point: refusing it would pin the
+      // device to a pairing-time address the host may have left.
+      final devices = [device()];
+      final relayLess = [candidate(relayUrl: '', ticket: 'ticket-v2')];
+
+      final result = controller.replaceTransports(
+        devices: devices,
+        activeDevice: devices.first,
+        deviceId: 'device-1',
+        transports: relayLess,
+      );
+
+      expect(result.updatedDevice?.transports, relayLess);
+      expect(
+        result.updatedDevice?.transportByKind(RemoteTransportKind.iroh)?.ticket,
+        'ticket-v2',
+      );
+    });
+
+    test('adoption carries the relay authentication through', () {
+      // The controller REPLACES its stored set, so anything a host omits is
+      // lost on this side. A dropped bearer token would leave the device unable
+      // to use a custom relay it had been using fine.
+      final devices = [device()];
+      const authenticated = RemoteTransportCandidate(
+        kind: RemoteTransportKind.iroh,
+        nodeId: 'node-1',
+        relayUrl: 'https://relay.example',
+        ticket: 'ticket-v2',
+        relayAuthentication: 'bearer-token',
+      );
+
+      final result = controller.replaceTransports(
+        devices: devices,
+        activeDevice: devices.first,
+        deviceId: 'device-1',
+        transports: const [authenticated],
+      );
+
+      expect(
+        result.updatedDevice
+            ?.transportByKind(RemoteTransportKind.iroh)
+            ?.relayAuthentication,
+        'bearer-token',
+      );
+    });
   });
 }

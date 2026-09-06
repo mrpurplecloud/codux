@@ -929,8 +929,7 @@ const Map<String, String> _en = {
   'pair.importImage': 'Import from photo',
   'pair.importNoCode': 'No QR code found — try a clearer screenshot',
   'pair.noCameraTitle': 'Camera unavailable',
-  'pair.noCameraHint':
-      'Use "Import from photo" or "Manual connect" below to pair',
+  'pair.noCameraHint': 'Use "Import from photo" or "Manual connect" below to pair',
   'pair.retryCamera': 'Retry camera',
   'settings.title': 'Settings',
   'settings.nameLabel': 'Device name',
@@ -1322,8 +1321,7 @@ const Map<String, String> _ja = {
   'project.nameLabel': 'プロジェクト名',
   'project.pathLabel': 'プロジェクトパス',
   'project.nameHint': '例: healthy-api',
-  'project.pathHint':
-      'パスは Home、/Volumes、またはルートから選択できます。保存後、Mac 側のプロジェクト一覧が更新されます。',
+  'project.pathHint': 'パスは Home、/Volumes、またはルートから選択できます。保存後、Mac 側のプロジェクト一覧が更新されます。',
   'project.updated': 'プロジェクトを更新しました',
   'project.noAvailable': '利用可能なプロジェクトがありません',
   'project.selectFirst': '先にプロジェクトを選択してください',
@@ -1413,8 +1411,7 @@ const Map<String, String> _ja = {
   'update.appStorePending': 'このアプリはまだ App Store で提供されていません',
   'update.latest': 'すでに最新版 v{version} です',
   'update.foundTitle': '新しいバージョン {version}',
-  'update.foundBody':
-      '現在のバージョンは v{version} です。GitHub Releases を開いて更新をダウンロードしてください。',
+  'update.foundBody': '現在のバージョンは v{version} です。GitHub Releases を開いて更新をダウンロードしてください。',
   'update.foundBodyAppStore': '現在のバージョンは v{version} です。App Store を開いて更新してください。',
   'update.failed': '更新の確認に失敗しました: {reason}',
   'stats.aiTitle': 'AI 統計',
@@ -1443,8 +1440,7 @@ const Map<String, String> _ja = {
   'stats.noRankData': 'ランキングデータがありません',
   'stats.noStats': '統計データがありません',
   'stats.emptyHint': '対応している AI CLI を実行すると、ここに現在のプロジェクトの統計が表示されます。',
-  'remote.qrMissingFields':
-      'QR データに暗号化されたペアリング情報がありません。Mac の QR コードをもう一度スキャンしてください',
+  'remote.qrMissingFields': 'QR データに暗号化されたペアリング情報がありません。Mac の QR コードをもう一度スキャンしてください',
   'remote.qrEmpty': 'QR データが空です',
   'remote.qrInvalid': 'QR データを認識できません。Mac の最新ペアリング Token をスキャンまたは貼り付けてください',
   'remote.pairingCodeInvalid': 'ペアリング Token を入力してください',
@@ -1640,8 +1636,7 @@ const Map<String, String> _ko = {
   'project.nameLabel': '프로젝트 이름',
   'project.pathLabel': '프로젝트 경로',
   'project.nameHint': '예: healthy-api',
-  'project.pathHint':
-      '홈, /Volumes 또는 루트에서 경로를 선택하세요. 저장하면 Mac 프로젝트 목록이 새로고침됩니다.',
+  'project.pathHint': '홈, /Volumes 또는 루트에서 경로를 선택하세요. 저장하면 Mac 프로젝트 목록이 새로고침됩니다.',
   'project.updated': '프로젝트가 업데이트됨',
   'project.noAvailable': '사용 가능한 프로젝트 없음',
   'project.selectFirst': '먼저 프로젝트를 선택하세요',
@@ -1833,16 +1828,14 @@ final Map<String, String> _fr = {
   'app.newTerminal': 'Nouveau terminal',
   'app.terminal': 'Terminal',
   'app.removeDevice': 'Retirer l\'ordinateur',
-  'app.removeDeviceConfirm':
-      'Supprimer {name} localement ?\\n(Vous devez aussi le retirer sur le Mac)',
+  'app.removeDeviceConfirm': 'Supprimer {name} localement ?\\n(Vous devez aussi le retirer sur le Mac)',
   'app.closeSplit': 'Fermer le volet',
   'app.closeSplitConfirm': 'Fermer {name} ?',
   'app.logs': 'Journaux de débogage',
   'app.debugLogs': 'Journaux de débogage',
   'app.checkUpdate': 'Rechercher des mises à jour',
   'app.updatePending': 'La recherche de mises à jour est réservée',
-  'app.aboutText':
-      'Codux Mobile est le compagnon mobile de Codux. Il se connecte de façon sécurisée à vos ordinateurs, contrôle les terminaux de projet et gère les appareils jumelés.',
+  'app.aboutText': 'Codux Mobile est le compagnon mobile de Codux. Il se connecte de façon sécurisée à vos ordinateurs, contrôle les terminaux de projet et gère les appareils jumelés.',
   'app.github': 'GitHub',
   'app.licenses': 'Licences',
   'app.close': 'Fermer',
@@ -1854,13 +1847,10 @@ final Map<String, String> _fr = {
   'logs.exportFailed': 'Échec de l\'exportation',
   'logs.shareText': 'Journaux de débogage Codux Mobile',
   'logs.clear': 'Effacer',
-  'toolbar.copyEmpty':
-      'Appuyez longuement et faites glisser pour sélectionner avant de copier',
+  'toolbar.copyEmpty': 'Appuyez longuement et faites glisser pour sélectionner avant de copier',
   'toolbar.copyDone': 'Sélection copiée',
-  'toolbar.uploadPending':
-      'Connectez-vous à un ordinateur avant d\'envoyer des fichiers',
-  'voice.preparing':
-      'Préparation du modèle local et de l\'autorisation du micro',
+  'toolbar.uploadPending': 'Connectez-vous à un ordinateur avant d\'envoyer des fichiers',
+  'voice.preparing': 'Préparation du modèle local et de l\'autorisation du micro',
   'voice.starting': 'Démarrage de l\'enregistrement',
   'voice.downloading': 'Téléchargement du modèle vocal local',
   'voice.recognizing': 'Reconnaissance locale en cours',
@@ -1903,8 +1893,7 @@ final Map<String, String> _fr = {
   'file.saved': 'Fichier enregistré',
   'pair.tapToScan': 'Toucher pour ouvrir l\'appareil photo',
   'pair.heading': 'Scannez le QR code du Mac',
-  'pair.subheading':
-      'Ouvrez Codux ▸ Distant sur le Mac et scannez pour jumeler instantanément',
+  'pair.subheading': 'Ouvrez Codux ▸ Distant sur le Mac et scannez pour jumeler instantanément',
   'pair.manualToggleOpen': 'Saisir le code manuellement',
   'pair.manualToggleClose': 'Masquer la saisie manuelle',
   'pair.manualHint': 'Coller',
@@ -1916,10 +1905,8 @@ final Map<String, String> _fr = {
   'pair.serverCustomHint': 'https://your-relay.example',
   'pair.codeHint': 'Token de jumelage',
   'pair.tokenHint': 'Collez le token de jumelage affiché sur l\'ordinateur',
-  'pair.manualHelp':
-      'Collez le token de jumelage complet affiché sur l\'ordinateur, ou le lien codux://pair complet.',
-  'pair.networkHint':
-      'Assurez-vous que le téléphone et l\'ordinateur ont accès au réseau pour le jumelage et la connexion',
+  'pair.manualHelp': 'Collez le token de jumelage complet affiché sur l\'ordinateur, ou le lien codux://pair complet.',
+  'pair.networkHint': 'Assurez-vous que le téléphone et l\'ordinateur ont accès au réseau pour le jumelage et la connexion',
   'pair.submitting': 'Envoi de la demande de jumelage...',
   'pair.waiting': 'En attente de confirmation du Mac...',
   'pair.success': 'Jumelé, connexion en cours',
@@ -1963,8 +1950,7 @@ final Map<String, String> _fr = {
   'project.nameLabel': 'Nom du projet',
   'project.pathLabel': 'Chemin du projet',
   'project.nameHint': 'Par exemple healthy-api',
-  'project.pathHint':
-      'Choisissez un chemin dans Home, /Volumes ou la racine. Après l\'enregistrement, la liste des projets du Mac sera actualisée.',
+  'project.pathHint': 'Choisissez un chemin dans Home, /Volumes ou la racine. Après l\'enregistrement, la liste des projets du Mac sera actualisée.',
   'project.updated': 'Projet mis à jour',
   'project.noAvailable': 'Aucun projet disponible',
   'project.selectFirst': 'Sélectionnez d\'abord un projet',
@@ -1972,12 +1958,10 @@ final Map<String, String> _fr = {
   'project.saveSubmitted': 'Enregistrement du projet envoyé',
   'project.removeRequested': 'Retrait du projet demandé',
   'project.currentNoDir': 'Le projet actuel n\'a pas de répertoire',
-  'device.homeHint':
-      'Choisissez un ordinateur connecté pour ouvrir le terminal',
+  'device.homeHint': 'Choisissez un ordinateur connecté pour ouvrir le terminal',
   'device.addByScan': 'Scanner pour ajouter un ordinateur',
   'device.emptyTitle': 'Aucun ordinateur jumelé',
-  'device.emptySubtitle':
-      'Scannez un Mac pour contrôler le terminal à distance',
+  'device.emptySubtitle': 'Scannez un Mac pour contrôler le terminal à distance',
   'device.scanAdd': 'Scanner pour ajouter',
   'device.edit': 'Modifier',
   'device.delete': 'Supprimer',
@@ -1988,32 +1972,25 @@ final Map<String, String> _fr = {
   'pair.cancelled': 'Jumelage annulé',
   'pair.rejected': 'Le jumelage a été refusé par le Mac',
   'pair.failed': 'Échec du jumelage',
-  'pair.repairRequired':
-      'Appareil non autorisé. Jumelez à nouveau cet appareil',
+  'pair.repairRequired': 'Appareil non autorisé. Jumelez à nouveau cet appareil',
   'pair.confirmTitle': 'Confirmer cet ordinateur',
   'pair.waitingTitle': 'En attente de confirmation du Mac',
-  'pair.confirmBody':
-      'Confirmez que le code affiché sur le Mac correspond avant de demander le jumelage',
-  'pair.waitingBody':
-      'Cliquez sur Autoriser sur le Mac. Vérification automatique…',
+  'pair.confirmBody': 'Confirmez que le code affiché sur le Mac correspond avant de demander le jumelage',
+  'pair.waitingBody': 'Cliquez sur Autoriser sur le Mac. Vérification automatique…',
   'pair.device': 'Appareil',
   'pair.matchCode': 'Code de jumelage',
   'pair.pairing': 'Jumelage…',
-  'connection.failedRetry':
-      'Échec de la connexion, nouvelle tentative en arrière-plan',
-  'connection.failedExhausted':
-      'Échec de la connexion — touchez l\'appareil pour réessayer',
+  'connection.failedRetry': 'Échec de la connexion, nouvelle tentative en arrière-plan',
+  'connection.failedExhausted': 'Échec de la connexion — touchez l\'appareil pour réessayer',
   'connection.failedWithReason': 'Échec de la connexion : {reason}',
   'connection.macDisconnected': 'Le Mac n\'est pas connecté',
-  'connection.upgradeRequired':
-      'Version du protocole incompatible. Veuillez mettre à jour l\'application',
+  'connection.upgradeRequired': 'Version du protocole incompatible. Veuillez mettre à jour l\'application',
   'connection.direct': 'P2P',
   'connection.relay': 'Relais',
   'terminal.creating': 'Création du terminal, patientez avant de saisir',
   'terminal.createOrSelectFirst': 'Créez ou sélectionnez d\'abord un terminal',
   'terminal.loadingHistory': 'Chargement de l\'historique du terminal...',
-  'terminal.loadingHistoryProgress':
-      'Chargement de l\'historique du terminal {percent}%',
+  'terminal.loadingHistoryProgress': 'Chargement de l\'historique du terminal {percent}%',
   'terminal.renderingHistory': 'Affichage de l\'historique du terminal...',
   'terminal.rebuilding': 'Reconstruction du terminal',
   'terminal.keepOne': 'Conservez au moins un terminal',
@@ -2052,25 +2029,20 @@ final Map<String, String> _fr = {
   'upload.fileSentPath': 'Fichier envoyé et chemin temporaire collé',
   'upload.fileTooLarge': 'Le fichier doit faire 20 Mo ou moins',
   'upload.fileReadFailed': 'Impossible de lire le fichier sélectionné',
-  'upload.directRequired':
-      'Connectez-vous à un ordinateur avant d\'envoyer des fichiers',
+  'upload.directRequired': 'Connectez-vous à un ordinateur avant d\'envoyer des fichiers',
   'upload.aiTool': 'Outil IA',
   'remote.error': 'Le serveur distant a renvoyé une erreur',
-  'remote.dirTimeout':
-      'Délai de lecture du répertoire dépassé. Vérifiez que le service distant du Mac est en ligne',
+  'remote.dirTimeout': 'Délai de lecture du répertoire dépassé. Vérifiez que le service distant du Mac est en ligne',
   'update.checking': 'Recherche de mises à jour...',
   'update.loading': 'Recherche de mises à jour',
   'update.noRelease': 'Aucune version GitHub disponible',
   'update.httpFailed': 'Échec de la recherche de mises à jour : HTTP {status}',
   'update.noVersion': 'Aucune version trouvée',
-  'update.appStorePending':
-      'Cette application n\'est pas encore disponible sur l\'App Store',
+  'update.appStorePending': 'Cette application n\'est pas encore disponible sur l\'App Store',
   'update.latest': 'Déjà à jour v{version}',
   'update.foundTitle': 'Nouvelle version {version}',
-  'update.foundBody':
-      'Version actuelle v{version}. Ouvrez GitHub Releases pour télécharger la mise à jour.',
-  'update.foundBodyAppStore':
-      'Version actuelle v{version}. Ouvrez l\'App Store pour mettre à jour.',
+  'update.foundBody': 'Version actuelle v{version}. Ouvrez GitHub Releases pour télécharger la mise à jour.',
+  'update.foundBodyAppStore': 'Version actuelle v{version}. Ouvrez l\'App Store pour mettre à jour.',
   'update.failed': 'Échec de la recherche de mises à jour : {reason}',
   'stats.aiTitle': 'Stats IA',
   'stats.todayToken': 'Tokens du jour',
@@ -2097,13 +2069,10 @@ final Map<String, String> _fr = {
   'stats.dayDetail': '{day} · {tokens} · {count} requêtes',
   'stats.noRankData': 'Aucune donnée de classement',
   'stats.noStats': 'Aucune donnée statistique',
-  'stats.emptyHint':
-      'Lancez une CLI IA prise en charge pour voir ici les stats du projet actuel.',
-  'remote.qrMissingFields':
-      'Le contenu du QR code ne contient pas les champs de jumelage chiffrés. Scannez à nouveau le QR code du Mac',
+  'stats.emptyHint': 'Lancez une CLI IA prise en charge pour voir ici les stats du projet actuel.',
+  'remote.qrMissingFields': 'Le contenu du QR code ne contient pas les champs de jumelage chiffrés. Scannez à nouveau le QR code du Mac',
   'remote.qrEmpty': 'Le contenu du QR code est vide',
-  'remote.qrInvalid':
-      'Impossible de reconnaître le contenu du QR code. Scannez ou collez le dernier token de jumelage du Mac',
+  'remote.qrInvalid': 'Impossible de reconnaître le contenu du QR code. Scannez ou collez le dernier token de jumelage du Mac',
   'remote.pairingCodeInvalid': 'Saisissez le token de jumelage',
   'remote.requestFailed': 'Échec de la requête {status}',
   'remote.waitTimeout': 'Délai d\'attente de la confirmation du Mac dépassé',
@@ -2175,16 +2144,14 @@ final Map<String, String> _de = {
   'app.newTerminal': 'Neues Terminal',
   'app.terminal': 'Terminal',
   'app.removeDevice': 'Computer entfernen',
-  'app.removeDeviceConfirm':
-      '{name} lokal löschen?\\n(Du musst ihn auch auf dem Mac entfernen)',
+  'app.removeDeviceConfirm': '{name} lokal löschen?\\n(Du musst ihn auch auf dem Mac entfernen)',
   'app.closeSplit': 'Split schließen',
   'app.closeSplitConfirm': '{name} schließen?',
   'app.logs': 'Debug-Protokolle',
   'app.debugLogs': 'Debug-Protokolle',
   'app.checkUpdate': 'Nach Updates suchen',
   'app.updatePending': 'Update-Prüfung ist reserviert',
-  'app.aboutText':
-      'Codux Mobile ist der mobile Begleiter für Codux. Es verbindet sich sicher mit deinen Computern, steuert Projekt-Terminals und verwaltet gekoppelte Geräte.',
+  'app.aboutText': 'Codux Mobile ist der mobile Begleiter für Codux. Es verbindet sich sicher mit deinen Computern, steuert Projekt-Terminals und verwaltet gekoppelte Geräte.',
   'app.github': 'GitHub',
   'app.licenses': 'Lizenzen',
   'app.close': 'Schließen',
@@ -2196,12 +2163,10 @@ final Map<String, String> _de = {
   'logs.exportFailed': 'Export fehlgeschlagen',
   'logs.shareText': 'Codux Mobile Debug-Protokolle',
   'logs.clear': 'Leeren',
-  'toolbar.copyEmpty':
-      'Terminaltext gedrückt halten und ziehen, um vor dem Kopieren auszuwählen',
+  'toolbar.copyEmpty': 'Terminaltext gedrückt halten und ziehen, um vor dem Kopieren auszuwählen',
   'toolbar.copyDone': 'Auswahl kopiert',
   'toolbar.uploadPending': 'Vor dem Hochladen mit einem Computer verbinden',
-  'voice.preparing':
-      'Lokales Modell und Mikrofonberechtigung werden vorbereitet',
+  'voice.preparing': 'Lokales Modell und Mikrofonberechtigung werden vorbereitet',
   'voice.starting': 'Aufnahme wird gestartet',
   'voice.downloading': 'Lokales Sprachmodell wird heruntergeladen',
   'voice.recognizing': 'Lokale Erkennung läuft',
@@ -2244,8 +2209,7 @@ final Map<String, String> _de = {
   'file.saved': 'Datei gespeichert',
   'pair.tapToScan': 'Tippen, um Kamera zu öffnen',
   'pair.heading': 'Mac-QR-Code scannen',
-  'pair.subheading':
-      'Codux ▸ Remote auf dem Mac öffnen und scannen, um sofort zu koppeln',
+  'pair.subheading': 'Codux ▸ Remote auf dem Mac öffnen und scannen, um sofort zu koppeln',
   'pair.manualToggleOpen': 'Code manuell eingeben',
   'pair.manualToggleClose': 'Manuelle Eingabe ausblenden',
   'pair.manualHint': 'Einfügen',
@@ -2257,10 +2221,8 @@ final Map<String, String> _de = {
   'pair.serverCustomHint': 'https://your-relay.example',
   'pair.codeHint': 'Kopplungs-Token',
   'pair.tokenHint': 'Auf dem Desktop angezeigtes Kopplungs-Token einfügen',
-  'pair.manualHelp':
-      'Das vollständige auf dem Desktop angezeigte Kopplungs-Token oder den vollständigen codux://pair-Link einfügen.',
-  'pair.networkHint':
-      'Stelle sicher, dass Handy und Computer das Netzwerk für Kopplung und Verbindung erreichen können',
+  'pair.manualHelp': 'Das vollständige auf dem Desktop angezeigte Kopplungs-Token oder den vollständigen codux://pair-Link einfügen.',
+  'pair.networkHint': 'Stelle sicher, dass Handy und Computer das Netzwerk für Kopplung und Verbindung erreichen können',
   'pair.submitting': 'Kopplungsanfrage wird gesendet...',
   'pair.waiting': 'Warte auf Mac-Bestätigung...',
   'pair.success': 'Gekoppelt, verbinde',
@@ -2304,8 +2266,7 @@ final Map<String, String> _de = {
   'project.nameLabel': 'Projektname',
   'project.pathLabel': 'Projektpfad',
   'project.nameHint': 'Zum Beispiel healthy-api',
-  'project.pathHint':
-      'Wähle einen Pfad aus Home, /Volumes oder Wurzel. Nach dem Speichern wird die Mac-Projektliste aktualisiert.',
+  'project.pathHint': 'Wähle einen Pfad aus Home, /Volumes oder Wurzel. Nach dem Speichern wird die Mac-Projektliste aktualisiert.',
   'project.updated': 'Projekt aktualisiert',
   'project.noAvailable': 'Keine verfügbaren Projekte',
   'project.selectFirst': 'Zuerst ein Projekt auswählen',
@@ -2327,30 +2288,23 @@ final Map<String, String> _de = {
   'pair.cancelled': 'Kopplung abgebrochen',
   'pair.rejected': 'Kopplung wurde vom Mac abgelehnt',
   'pair.failed': 'Kopplung fehlgeschlagen',
-  'pair.repairRequired':
-      'Gerät ist nicht autorisiert. Koppele dieses Gerät erneut',
+  'pair.repairRequired': 'Gerät ist nicht autorisiert. Koppele dieses Gerät erneut',
   'pair.confirmTitle': 'Diesen Computer bestätigen',
   'pair.waitingTitle': 'Warte auf Mac-Bestätigung',
-  'pair.confirmBody':
-      'Bestätige den auf dem Mac angezeigten Code, bevor du die Kopplung anforderst',
-  'pair.waitingBody':
-      'Klicke auf dem Mac auf Erlauben. Prüfung läuft automatisch…',
+  'pair.confirmBody': 'Bestätige den auf dem Mac angezeigten Code, bevor du die Kopplung anforderst',
+  'pair.waitingBody': 'Klicke auf dem Mac auf Erlauben. Prüfung läuft automatisch…',
   'pair.device': 'Gerät',
   'pair.matchCode': 'Kopplungscode',
   'pair.pairing': 'Kopple…',
-  'connection.failedRetry':
-      'Verbindung fehlgeschlagen, erneuter Versuch im Hintergrund',
-  'connection.failedExhausted':
-      'Verbindung fehlgeschlagen — zum Wiederholen auf das Gerät tippen',
+  'connection.failedRetry': 'Verbindung fehlgeschlagen, erneuter Versuch im Hintergrund',
+  'connection.failedExhausted': 'Verbindung fehlgeschlagen — zum Wiederholen auf das Gerät tippen',
   'connection.failedWithReason': 'Verbindung fehlgeschlagen: {reason}',
   'connection.macDisconnected': 'Mac ist nicht verbunden',
-  'connection.upgradeRequired':
-      'Protokollversion ist inkompatibel. Bitte aktualisiere die App',
+  'connection.upgradeRequired': 'Protokollversion ist inkompatibel. Bitte aktualisiere die App',
   'connection.direct': 'P2P',
   'connection.relay': 'Relay',
   'terminal.creating': 'Terminal wird erstellt, bitte vor dem Tippen warten',
-  'terminal.createOrSelectFirst':
-      'Zuerst ein Terminal erstellen oder auswählen',
+  'terminal.createOrSelectFirst': 'Zuerst ein Terminal erstellen oder auswählen',
   'terminal.loadingHistory': 'Terminalverlauf wird geladen...',
   'terminal.loadingHistoryProgress': 'Terminalverlauf wird geladen {percent}%',
   'terminal.renderingHistory': 'Terminalverlauf wird gerendert...',
@@ -2384,8 +2338,7 @@ final Map<String, String> _de = {
   'upload.chooseImage': 'Bild wählen',
   'upload.imageUploading': 'Bild wird hochgeladen...',
   'upload.imageInserting': 'Bild wird eingefügt...',
-  'upload.imageSentTool':
-      'Bild hochgeladen und über die {tool}-Einfügeverknüpfung gesendet',
+  'upload.imageSentTool': 'Bild hochgeladen und über die {tool}-Einfügeverknüpfung gesendet',
   'upload.imageSentPath': 'Bild hochgeladen und temporärer Pfad eingefügt',
   'upload.fileUploading': 'Datei wird hochgeladen...',
   'upload.fileInserting': 'Datei wird eingefügt...',
@@ -2395,8 +2348,7 @@ final Map<String, String> _de = {
   'upload.directRequired': 'Vor dem Hochladen mit einem Computer verbinden',
   'upload.aiTool': 'AI-Tool',
   'remote.error': 'Remote hat einen Fehler zurückgegeben',
-  'remote.dirTimeout':
-      'Zeitüberschreitung beim Lesen des Verzeichnisses. Stelle sicher, dass der Mac-Remote-Dienst online ist',
+  'remote.dirTimeout': 'Zeitüberschreitung beim Lesen des Verzeichnisses. Stelle sicher, dass der Mac-Remote-Dienst online ist',
   'update.checking': 'Suche nach Updates...',
   'update.loading': 'Suche nach Updates',
   'update.noRelease': 'Noch kein GitHub-Release',
@@ -2405,10 +2357,8 @@ final Map<String, String> _de = {
   'update.appStorePending': 'Diese App ist noch nicht im App Store verfügbar',
   'update.latest': 'Bereits aktuell v{version}',
   'update.foundTitle': 'Neue Version {version}',
-  'update.foundBody':
-      'Aktuelle Version v{version}. Öffne GitHub Releases, um das Update herunterzuladen.',
-  'update.foundBodyAppStore':
-      'Aktuelle Version v{version}. Öffne den App Store zum Aktualisieren.',
+  'update.foundBody': 'Aktuelle Version v{version}. Öffne GitHub Releases, um das Update herunterzuladen.',
+  'update.foundBodyAppStore': 'Aktuelle Version v{version}. Öffne den App Store zum Aktualisieren.',
   'update.failed': 'Update-Prüfung fehlgeschlagen: {reason}',
   'stats.aiTitle': 'AI-Statistik',
   'stats.todayToken': 'Heute Token',
@@ -2435,13 +2385,10 @@ final Map<String, String> _de = {
   'stats.dayDetail': '{day} · {tokens} · {count} Anfragen',
   'stats.noRankData': 'Keine Ranglistendaten',
   'stats.noStats': 'Keine Statistikdaten',
-  'stats.emptyHint':
-      'Führe eine unterstützte KI-CLI aus, um hier die Statistik des aktuellen Projekts zu sehen.',
-  'remote.qrMissingFields':
-      'Im QR-Inhalt fehlen verschlüsselte Kopplungsfelder. Scanne den Mac-QR-Code erneut',
+  'stats.emptyHint': 'Führe eine unterstützte KI-CLI aus, um hier die Statistik des aktuellen Projekts zu sehen.',
+  'remote.qrMissingFields': 'Im QR-Inhalt fehlen verschlüsselte Kopplungsfelder. Scanne den Mac-QR-Code erneut',
   'remote.qrEmpty': 'QR-Inhalt ist leer',
-  'remote.qrInvalid':
-      'QR-Inhalt nicht erkannt. Scanne oder füge das neueste Mac-Kopplungs-Token ein',
+  'remote.qrInvalid': 'QR-Inhalt nicht erkannt. Scanne oder füge das neueste Mac-Kopplungs-Token ein',
   'remote.pairingCodeInvalid': 'Gib das Kopplungs-Token ein',
   'remote.requestFailed': 'Anfrage fehlgeschlagen {status}',
   'remote.waitTimeout': 'Zeitüberschreitung beim Warten auf Mac-Bestätigung',
@@ -2513,16 +2460,14 @@ final Map<String, String> _es = {
   'app.newTerminal': 'Nuevo terminal',
   'app.terminal': 'Terminal',
   'app.removeDevice': 'Quitar equipo',
-  'app.removeDeviceConfirm':
-      '¿Eliminar {name} localmente?\\n(También debes quitarlo en el Mac)',
+  'app.removeDeviceConfirm': '¿Eliminar {name} localmente?\\n(También debes quitarlo en el Mac)',
   'app.closeSplit': 'Cerrar división',
   'app.closeSplitConfirm': '¿Cerrar {name}?',
   'app.logs': 'Registros de depuración',
   'app.debugLogs': 'Registros de depuración',
   'app.checkUpdate': 'Buscar actualizaciones',
   'app.updatePending': 'La búsqueda de actualizaciones está reservada',
-  'app.aboutText':
-      'Codux Mobile es el complemento móvil de Codux. Se conecta de forma segura a tus equipos, controla los terminales de proyectos y gestiona los dispositivos emparejados.',
+  'app.aboutText': 'Codux Mobile es el complemento móvil de Codux. Se conecta de forma segura a tus equipos, controla los terminales de proyectos y gestiona los dispositivos emparejados.',
   'app.github': 'GitHub',
   'app.licenses': 'Licencias',
   'app.close': 'Cerrar',
@@ -2534,8 +2479,7 @@ final Map<String, String> _es = {
   'logs.exportFailed': 'Error al exportar',
   'logs.shareText': 'Registros de depuración de Codux Mobile',
   'logs.clear': 'Borrar',
-  'toolbar.copyEmpty':
-      'Mantén pulsado el texto del terminal y arrastra para seleccionar antes de copiar',
+  'toolbar.copyEmpty': 'Mantén pulsado el texto del terminal y arrastra para seleccionar antes de copiar',
   'toolbar.copyDone': 'Selección copiada',
   'toolbar.uploadPending': 'Conéctate a un equipo antes de subir archivos',
   'voice.preparing': 'Preparando el modelo local y el permiso del micrófono',
@@ -2581,8 +2525,7 @@ final Map<String, String> _es = {
   'file.saved': 'Archivo guardado',
   'pair.tapToScan': 'Toca para abrir la cámara',
   'pair.heading': 'Escanea el código QR del Mac',
-  'pair.subheading':
-      'Abre Codux ▸ Remoto en el Mac y escanea para emparejar al instante',
+  'pair.subheading': 'Abre Codux ▸ Remoto en el Mac y escanea para emparejar al instante',
   'pair.manualToggleOpen': 'Introducir código manualmente',
   'pair.manualToggleClose': 'Ocultar entrada manual',
   'pair.manualHint': 'Pegar',
@@ -2593,19 +2536,15 @@ final Map<String, String> _es = {
   'pair.serverCustom': 'Personalizado',
   'pair.serverCustomHint': 'https://your-relay.example',
   'pair.codeHint': 'Token de emparejamiento',
-  'pair.tokenHint':
-      'Pega el token de emparejamiento que aparece en el escritorio',
-  'pair.manualHelp':
-      'Pega el token de emparejamiento completo que aparece en el escritorio, o el enlace codux://pair completo.',
-  'pair.networkHint':
-      'Asegúrate de que el teléfono y el equipo tengan acceso a la red para completar el emparejamiento y la conexión',
+  'pair.tokenHint': 'Pega el token de emparejamiento que aparece en el escritorio',
+  'pair.manualHelp': 'Pega el token de emparejamiento completo que aparece en el escritorio, o el enlace codux://pair completo.',
+  'pair.networkHint': 'Asegúrate de que el teléfono y el equipo tengan acceso a la red para completar el emparejamiento y la conexión',
   'pair.submitting': 'Enviando solicitud de emparejamiento...',
   'pair.waiting': 'Esperando la confirmación del Mac...',
   'pair.success': 'Emparejado, conectando',
   'pair.scanned': 'QR escaneado, toca para solicitar el emparejamiento',
   'pair.scanTitle': 'Escanear el código de emparejamiento del Mac',
-  'pair.scanHint':
-      'Mantén el código QR en el encuadre y luego vuelve automáticamente',
+  'pair.scanHint': 'Mantén el código QR en el encuadre y luego vuelve automáticamente',
   'pair.close': 'Cerrar',
   'settings.nameHint': 'Nombre del dispositivo',
   'settings.useDeviceName': 'Usar el nombre detectado: {name}',
@@ -2643,8 +2582,7 @@ final Map<String, String> _es = {
   'project.nameLabel': 'Nombre del proyecto',
   'project.pathLabel': 'Ruta del proyecto',
   'project.nameHint': 'Por ejemplo healthy-api',
-  'project.pathHint':
-      'Elige una ruta desde Home, /Volumes o la raíz. Al guardar, la lista de proyectos del Mac se actualizará.',
+  'project.pathHint': 'Elige una ruta desde Home, /Volumes o la raíz. Al guardar, la lista de proyectos del Mac se actualizará.',
   'project.updated': 'Proyecto actualizado',
   'project.noAvailable': 'No hay proyectos disponibles',
   'project.selectFirst': 'Selecciona primero un proyecto',
@@ -2655,8 +2593,7 @@ final Map<String, String> _es = {
   'device.homeHint': 'Elige un equipo conectado para entrar al terminal',
   'device.addByScan': 'Escanear para añadir equipo',
   'device.emptyTitle': 'Aún no hay equipos emparejados',
-  'device.emptySubtitle':
-      'Escanea un Mac para controlar el terminal de forma remota',
+  'device.emptySubtitle': 'Escanea un Mac para controlar el terminal de forma remota',
   'device.scanAdd': 'Escanear para añadir',
   'device.edit': 'Editar',
   'device.delete': 'Eliminar',
@@ -2667,31 +2604,25 @@ final Map<String, String> _es = {
   'pair.cancelled': 'Emparejamiento cancelado',
   'pair.rejected': 'El Mac rechazó el emparejamiento',
   'pair.failed': 'Error de emparejamiento',
-  'pair.repairRequired':
-      'El dispositivo no está autorizado. Vuelve a emparejar este dispositivo',
+  'pair.repairRequired': 'El dispositivo no está autorizado. Vuelve a emparejar este dispositivo',
   'pair.confirmTitle': 'Confirmar este equipo',
   'pair.waitingTitle': 'Esperando la confirmación del Mac',
-  'pair.confirmBody':
-      'Confirma que el código mostrado en el Mac coincide antes de solicitar el emparejamiento',
-  'pair.waitingBody':
-      'Haz clic en Permitir en el Mac. Comprobando automáticamente…',
+  'pair.confirmBody': 'Confirma que el código mostrado en el Mac coincide antes de solicitar el emparejamiento',
+  'pair.waitingBody': 'Haz clic en Permitir en el Mac. Comprobando automáticamente…',
   'pair.device': 'Dispositivo',
   'pair.matchCode': 'Código de emparejamiento',
   'pair.pairing': 'Emparejando…',
   'connection.failedRetry': 'Error de conexión, reintentando en segundo plano',
-  'connection.failedExhausted':
-      'Error de conexión: toca el dispositivo para reintentar',
+  'connection.failedExhausted': 'Error de conexión: toca el dispositivo para reintentar',
   'connection.failedWithReason': 'Error de conexión: {reason}',
   'connection.macDisconnected': 'El Mac no está conectado',
-  'connection.upgradeRequired':
-      'La versión del protocolo es incompatible. Actualiza la aplicación',
+  'connection.upgradeRequired': 'La versión del protocolo es incompatible. Actualiza la aplicación',
   'connection.direct': 'P2P',
   'connection.relay': 'Relé',
   'terminal.creating': 'Creando el terminal, espera antes de escribir',
   'terminal.createOrSelectFirst': 'Crea o selecciona primero un terminal',
   'terminal.loadingHistory': 'Cargando el historial del terminal...',
-  'terminal.loadingHistoryProgress':
-      'Cargando el historial del terminal {percent}%',
+  'terminal.loadingHistoryProgress': 'Cargando el historial del terminal {percent}%',
   'terminal.renderingHistory': 'Mostrando el historial del terminal...',
   'terminal.rebuilding': 'Reconstruyendo el terminal',
   'terminal.keepOne': 'Conserva al menos un terminal',
@@ -2723,8 +2654,7 @@ final Map<String, String> _es = {
   'upload.chooseImage': 'Elegir imagen',
   'upload.imageUploading': 'Subiendo imagen...',
   'upload.imageInserting': 'Insertando imagen...',
-  'upload.imageSentTool':
-      'Imagen subida y enviada mediante el atajo de pegado de {tool}',
+  'upload.imageSentTool': 'Imagen subida y enviada mediante el atajo de pegado de {tool}',
   'upload.imageSentPath': 'Imagen subida y ruta temporal pegada',
   'upload.fileUploading': 'Subiendo archivo...',
   'upload.fileInserting': 'Insertando archivo...',
@@ -2734,28 +2664,23 @@ final Map<String, String> _es = {
   'upload.directRequired': 'Conéctate a un equipo antes de subir archivos',
   'upload.aiTool': 'Herramienta de IA',
   'remote.error': 'El equipo remoto devolvió un error',
-  'remote.dirTimeout':
-      'La lectura del directorio agotó el tiempo. Comprueba que el servicio remoto del Mac esté en línea',
+  'remote.dirTimeout': 'La lectura del directorio agotó el tiempo. Comprueba que el servicio remoto del Mac esté en línea',
   'update.checking': 'Buscando actualizaciones...',
   'update.loading': 'Buscando actualizaciones',
   'update.noRelease': 'Aún no hay ninguna Release de GitHub',
   'update.httpFailed': 'Error al buscar actualizaciones: HTTP {status}',
   'update.noVersion': 'No se encontró ninguna versión',
-  'update.appStorePending':
-      'Esta aplicación aún no está disponible en la App Store',
+  'update.appStorePending': 'Esta aplicación aún no está disponible en la App Store',
   'update.latest': 'Ya tienes la última versión v{version}',
   'update.foundTitle': 'Nueva versión {version}',
-  'update.foundBody':
-      'Versión actual v{version}. Abre GitHub Releases para descargar la actualización.',
-  'update.foundBodyAppStore':
-      'Versión actual v{version}. Abre la App Store para actualizar.',
+  'update.foundBody': 'Versión actual v{version}. Abre GitHub Releases para descargar la actualización.',
+  'update.foundBodyAppStore': 'Versión actual v{version}. Abre la App Store para actualizar.',
   'update.failed': 'Error al buscar actualizaciones: {reason}',
   'stats.aiTitle': 'Estadísticas de IA',
   'stats.todayToken': 'Tokens de hoy',
   'stats.totalToken': 'Tokens totales',
   'stats.currentSession': 'Totales de la sesión actual',
-  'stats.currentSession.empty':
-      'No hay sesiones de IA actuales en este momento',
+  'stats.currentSession.empty': 'No hay sesiones de IA actuales en este momento',
   'stats.sessionTotal': 'Total de la sesión',
   'stats.requests': 'Solicitudes',
   'stats.tool': 'Herramienta',
@@ -2776,17 +2701,13 @@ final Map<String, String> _es = {
   'stats.dayDetail': '{day} · {tokens} · {count} solicitudes',
   'stats.noRankData': 'Sin datos de ranking',
   'stats.noStats': 'Sin datos estadísticos',
-  'stats.emptyHint':
-      'Ejecuta una CLI de IA compatible para ver aquí las estadísticas del proyecto actual.',
-  'remote.qrMissingFields':
-      'Al contenido del QR le faltan campos de emparejamiento cifrados. Vuelve a escanear el código QR del Mac',
+  'stats.emptyHint': 'Ejecuta una CLI de IA compatible para ver aquí las estadísticas del proyecto actual.',
+  'remote.qrMissingFields': 'Al contenido del QR le faltan campos de emparejamiento cifrados. Vuelve a escanear el código QR del Mac',
   'remote.qrEmpty': 'El contenido del QR está vacío',
-  'remote.qrInvalid':
-      'No se reconoce el contenido del QR. Escanea o pega el token de emparejamiento más reciente del Mac',
+  'remote.qrInvalid': 'No se reconoce el contenido del QR. Escanea o pega el token de emparejamiento más reciente del Mac',
   'remote.pairingCodeInvalid': 'Introduce el token de emparejamiento',
   'remote.requestFailed': 'Solicitud fallida {status}',
-  'remote.waitTimeout':
-      'Se agotó el tiempo de espera de la confirmación del Mac',
+  'remote.waitTimeout': 'Se agotó el tiempo de espera de la confirmación del Mac',
   'cmd.hint': 'Comando (entrada alternativa)',
 };
 
@@ -2855,16 +2776,14 @@ final Map<String, String> _ptBR = {
   'app.newTerminal': 'Novo terminal',
   'app.terminal': 'Terminal',
   'app.removeDevice': 'Remover computador',
-  'app.removeDeviceConfirm':
-      'Excluir {name} localmente?\\n(Você também precisa removê-lo no Mac)',
+  'app.removeDeviceConfirm': 'Excluir {name} localmente?\\n(Você também precisa removê-lo no Mac)',
   'app.closeSplit': 'Fechar divisão',
   'app.closeSplitConfirm': 'Fechar {name}?',
   'app.logs': 'Logs de depuração',
   'app.debugLogs': 'Logs de depuração',
   'app.checkUpdate': 'Verificar atualizações',
   'app.updatePending': 'Verificação de atualização reservada',
-  'app.aboutText':
-      'O Codux Mobile é o aplicativo companion do Codux. Ele se conecta com segurança aos seus computadores, controla terminais de projetos e gerencia dispositivos pareados.',
+  'app.aboutText': 'O Codux Mobile é o aplicativo companion do Codux. Ele se conecta com segurança aos seus computadores, controla terminais de projetos e gerencia dispositivos pareados.',
   'app.github': 'GitHub',
   'app.licenses': 'Licenças',
   'app.close': 'Fechar',
@@ -2876,11 +2795,9 @@ final Map<String, String> _ptBR = {
   'logs.exportFailed': 'Falha ao exportar',
   'logs.shareText': 'Logs de depuração do Codux Mobile',
   'logs.clear': 'Limpar',
-  'toolbar.copyEmpty':
-      'Pressione e arraste no texto do terminal para selecionar antes de copiar',
+  'toolbar.copyEmpty': 'Pressione e arraste no texto do terminal para selecionar antes de copiar',
   'toolbar.copyDone': 'Seleção copiada',
-  'toolbar.uploadPending':
-      'Conecte-se a um computador antes de enviar arquivos',
+  'toolbar.uploadPending': 'Conecte-se a um computador antes de enviar arquivos',
   'voice.preparing': 'Preparando o modelo local e a permissão do microfone',
   'voice.starting': 'Iniciando gravação',
   'voice.downloading': 'Baixando o modelo de voz local',
@@ -2924,8 +2841,7 @@ final Map<String, String> _ptBR = {
   'file.saved': 'Arquivo salvo',
   'pair.tapToScan': 'Toque para abrir a câmera',
   'pair.heading': 'Escaneie o QR code do Mac',
-  'pair.subheading':
-      'Abra o Codux ▸ Remoto no Mac e escaneie para parear na hora',
+  'pair.subheading': 'Abra o Codux ▸ Remoto no Mac e escaneie para parear na hora',
   'pair.manualToggleOpen': 'Inserir código manualmente',
   'pair.manualToggleClose': 'Ocultar entrada manual',
   'pair.manualHint': 'Colar',
@@ -2937,10 +2853,8 @@ final Map<String, String> _ptBR = {
   'pair.serverCustomHint': 'https://your-relay.example',
   'pair.codeHint': 'Token de pareamento',
   'pair.tokenHint': 'Cole o token de pareamento exibido no desktop',
-  'pair.manualHelp':
-      'Cole o token de pareamento completo exibido no desktop, ou o link codux://pair completo.',
-  'pair.networkHint':
-      'Garanta que o telefone e o computador tenham acesso à rede para concluir o pareamento e a conexão',
+  'pair.manualHelp': 'Cole o token de pareamento completo exibido no desktop, ou o link codux://pair completo.',
+  'pair.networkHint': 'Garanta que o telefone e o computador tenham acesso à rede para concluir o pareamento e a conexão',
   'pair.submitting': 'Enviando solicitação de pareamento...',
   'pair.waiting': 'Aguardando confirmação do Mac...',
   'pair.success': 'Pareado, conectando',
@@ -2984,8 +2898,7 @@ final Map<String, String> _ptBR = {
   'project.nameLabel': 'Nome do projeto',
   'project.pathLabel': 'Caminho do projeto',
   'project.nameHint': 'Por exemplo healthy-api',
-  'project.pathHint':
-      'Escolha um caminho a partir de Home, /Volumes ou da raiz. Após salvar, a lista de projetos do Mac será atualizada.',
+  'project.pathHint': 'Escolha um caminho a partir de Home, /Volumes ou da raiz. Após salvar, a lista de projetos do Mac será atualizada.',
   'project.updated': 'Projeto atualizado',
   'project.noAvailable': 'Nenhum projeto disponível',
   'project.selectFirst': 'Selecione um projeto primeiro',
@@ -2996,8 +2909,7 @@ final Map<String, String> _ptBR = {
   'device.homeHint': 'Escolha um computador conectado para entrar no terminal',
   'device.addByScan': 'Escanear para adicionar computador',
   'device.emptyTitle': 'Nenhum computador pareado ainda',
-  'device.emptySubtitle':
-      'Escaneie um Mac para controlar o terminal remotamente',
+  'device.emptySubtitle': 'Escaneie um Mac para controlar o terminal remotamente',
   'device.scanAdd': 'Escanear para adicionar',
   'device.edit': 'Editar',
   'device.delete': 'Excluir',
@@ -3008,31 +2920,25 @@ final Map<String, String> _ptBR = {
   'pair.cancelled': 'Pareamento cancelado',
   'pair.rejected': 'O pareamento foi recusado pelo Mac',
   'pair.failed': 'Falha no pareamento',
-  'pair.repairRequired':
-      'Dispositivo não autorizado. Pareie este dispositivo novamente',
+  'pair.repairRequired': 'Dispositivo não autorizado. Pareie este dispositivo novamente',
   'pair.confirmTitle': 'Confirmar este computador',
   'pair.waitingTitle': 'Aguardando confirmação do Mac',
-  'pair.confirmBody':
-      'Confirme que o código exibido no Mac corresponde antes de solicitar o pareamento',
+  'pair.confirmBody': 'Confirme que o código exibido no Mac corresponde antes de solicitar o pareamento',
   'pair.waitingBody': 'Clique em Permitir no Mac. Verificando automaticamente…',
   'pair.device': 'Dispositivo',
   'pair.matchCode': 'Código de pareamento',
   'pair.pairing': 'Pareando…',
-  'connection.failedRetry':
-      'Falha na conexão, tentando novamente em segundo plano',
-  'connection.failedExhausted':
-      'Falha na conexão — toque no dispositivo para tentar novamente',
+  'connection.failedRetry': 'Falha na conexão, tentando novamente em segundo plano',
+  'connection.failedExhausted': 'Falha na conexão — toque no dispositivo para tentar novamente',
   'connection.failedWithReason': 'Falha na conexão: {reason}',
   'connection.macDisconnected': 'O Mac não está conectado',
-  'connection.upgradeRequired':
-      'A versão do protocolo é incompatível. Atualize o aplicativo',
+  'connection.upgradeRequired': 'A versão do protocolo é incompatível. Atualize o aplicativo',
   'connection.direct': 'P2P',
   'connection.relay': 'Relay',
   'terminal.creating': 'Criando terminal, aguarde antes de digitar',
   'terminal.createOrSelectFirst': 'Crie ou selecione um terminal primeiro',
   'terminal.loadingHistory': 'Carregando histórico do terminal...',
-  'terminal.loadingHistoryProgress':
-      'Carregando histórico do terminal {percent}%',
+  'terminal.loadingHistoryProgress': 'Carregando histórico do terminal {percent}%',
   'terminal.renderingHistory': 'Renderizando histórico do terminal...',
   'terminal.rebuilding': 'Reconstruindo terminal',
   'terminal.keepOne': 'Mantenha pelo menos um terminal',
@@ -3071,25 +2977,20 @@ final Map<String, String> _ptBR = {
   'upload.fileSentPath': 'Arquivo enviado e caminho temporário colado',
   'upload.fileTooLarge': 'O arquivo deve ter 20MB ou menos',
   'upload.fileReadFailed': 'Não foi possível ler o arquivo selecionado',
-  'upload.directRequired':
-      'Conecte-se a um computador antes de enviar arquivos',
+  'upload.directRequired': 'Conecte-se a um computador antes de enviar arquivos',
   'upload.aiTool': 'Ferramenta de IA',
   'remote.error': 'O servidor remoto retornou um erro',
-  'remote.dirTimeout':
-      'A leitura do diretório expirou. Confirme se o serviço remoto do Mac está online',
+  'remote.dirTimeout': 'A leitura do diretório expirou. Confirme se o serviço remoto do Mac está online',
   'update.checking': 'Verificando atualizações...',
   'update.loading': 'Verificando atualizações',
   'update.noRelease': 'Nenhum GitHub Release ainda',
   'update.httpFailed': 'Falha ao verificar atualizações: HTTP {status}',
   'update.noVersion': 'Nenhuma versão encontrada',
-  'update.appStorePending':
-      'Este aplicativo ainda não está disponível na App Store',
+  'update.appStorePending': 'Este aplicativo ainda não está disponível na App Store',
   'update.latest': 'Já está na versão mais recente v{version}',
   'update.foundTitle': 'Nova versão {version}',
-  'update.foundBody':
-      'Versão atual v{version}. Abra o GitHub Releases para baixar a atualização.',
-  'update.foundBodyAppStore':
-      'Versão atual v{version}. Abra a App Store para atualizar.',
+  'update.foundBody': 'Versão atual v{version}. Abra o GitHub Releases para baixar a atualização.',
+  'update.foundBodyAppStore': 'Versão atual v{version}. Abra a App Store para atualizar.',
   'update.failed': 'Falha ao verificar atualizações: {reason}',
   'stats.aiTitle': 'Estatísticas de IA',
   'stats.todayToken': 'Tokens de hoje',
@@ -3116,13 +3017,10 @@ final Map<String, String> _ptBR = {
   'stats.dayDetail': '{day} · {tokens} · {count} requisições',
   'stats.noRankData': 'Sem dados de ranking',
   'stats.noStats': 'Sem dados de estatísticas',
-  'stats.emptyHint':
-      'Execute uma CLI de IA compatível para ver as estatísticas do projeto atual aqui.',
-  'remote.qrMissingFields':
-      'O conteúdo do QR code está sem os campos de pareamento criptografados. Escaneie o QR code do Mac novamente',
+  'stats.emptyHint': 'Execute uma CLI de IA compatível para ver as estatísticas do projeto atual aqui.',
+  'remote.qrMissingFields': 'O conteúdo do QR code está sem os campos de pareamento criptografados. Escaneie o QR code do Mac novamente',
   'remote.qrEmpty': 'O conteúdo do QR code está vazio',
-  'remote.qrInvalid':
-      'Não foi possível reconhecer o conteúdo do QR code. Escaneie ou cole o token de pareamento mais recente do Mac',
+  'remote.qrInvalid': 'Não foi possível reconhecer o conteúdo do QR code. Escaneie ou cole o token de pareamento mais recente do Mac',
   'remote.pairingCodeInvalid': 'Insira o token de pareamento',
   'remote.requestFailed': 'Falha na requisição {status}',
   'remote.waitTimeout': 'Tempo esgotado aguardando a confirmação do Mac',
@@ -3194,16 +3092,14 @@ final Map<String, String> _ru = {
   'app.newTerminal': 'Новый терминал',
   'app.terminal': 'Терминал',
   'app.removeDevice': 'Удалить компьютер',
-  'app.removeDeviceConfirm':
-      'Удалить {name} локально?\\n(Также нужно удалить его на Mac)',
+  'app.removeDeviceConfirm': 'Удалить {name} локально?\\n(Также нужно удалить его на Mac)',
   'app.closeSplit': 'Закрыть разделение',
   'app.closeSplitConfirm': 'Закрыть {name}?',
   'app.logs': 'Журналы отладки',
   'app.debugLogs': 'Журналы отладки',
   'app.checkUpdate': 'Проверить обновления',
   'app.updatePending': 'Проверка обновлений зарезервирована',
-  'app.aboutText':
-      'Codux Mobile — это мобильный спутник для Codux. Он безопасно подключается к вашим компьютерам, управляет терминалами проектов и связанными устройствами.',
+  'app.aboutText': 'Codux Mobile — это мобильный спутник для Codux. Он безопасно подключается к вашим компьютерам, управляет терминалами проектов и связанными устройствами.',
   'app.github': 'GitHub',
   'app.licenses': 'Лицензии',
   'app.close': 'Закрыть',
@@ -3215,8 +3111,7 @@ final Map<String, String> _ru = {
   'logs.exportFailed': 'Ошибка экспорта',
   'logs.shareText': 'Журналы отладки Codux Mobile',
   'logs.clear': 'Очистить',
-  'toolbar.copyEmpty':
-      'Удерживайте текст терминала и выделите его перед копированием',
+  'toolbar.copyEmpty': 'Удерживайте текст терминала и выделите его перед копированием',
   'toolbar.copyDone': 'Выделение скопировано',
   'toolbar.uploadPending': 'Подключитесь к компьютеру перед загрузкой файлов',
   'voice.preparing': 'Подготовка локальной модели и разрешения микрофона',
@@ -3262,8 +3157,7 @@ final Map<String, String> _ru = {
   'file.saved': 'Файл сохранён',
   'pair.tapToScan': 'Нажмите, чтобы открыть камеру',
   'pair.heading': 'Отсканируйте QR-код Mac',
-  'pair.subheading':
-      'Откройте Codux ▸ Удалённо на Mac и отсканируйте для мгновенной связки',
+  'pair.subheading': 'Откройте Codux ▸ Удалённо на Mac и отсканируйте для мгновенной связки',
   'pair.manualToggleOpen': 'Ввести код вручную',
   'pair.manualToggleClose': 'Скрыть ручной ввод',
   'pair.manualHint': 'Вставить',
@@ -3275,10 +3169,8 @@ final Map<String, String> _ru = {
   'pair.serverCustomHint': 'https://your-relay.example',
   'pair.codeHint': 'Токен сопряжения',
   'pair.tokenHint': 'Вставьте токен сопряжения с компьютера',
-  'pair.manualHelp':
-      'Вставьте полный токен сопряжения с компьютера или полную ссылку codux://pair.',
-  'pair.networkHint':
-      'Убедитесь, что телефон и компьютер имеют доступ к сети для сопряжения и подключения',
+  'pair.manualHelp': 'Вставьте полный токен сопряжения с компьютера или полную ссылку codux://pair.',
+  'pair.networkHint': 'Убедитесь, что телефон и компьютер имеют доступ к сети для сопряжения и подключения',
   'pair.submitting': 'Отправка запроса на сопряжение...',
   'pair.waiting': 'Ожидание подтверждения на Mac...',
   'pair.success': 'Сопряжено, подключение',
@@ -3322,8 +3214,7 @@ final Map<String, String> _ru = {
   'project.nameLabel': 'Имя проекта',
   'project.pathLabel': 'Путь проекта',
   'project.nameHint': 'Например healthy-api',
-  'project.pathHint':
-      'Выберите путь из Home, /Volumes или корня. После сохранения список проектов на Mac обновится.',
+  'project.pathHint': 'Выберите путь из Home, /Volumes или корня. После сохранения список проектов на Mac обновится.',
   'project.updated': 'Проект обновлён',
   'project.noAvailable': 'Нет доступных проектов',
   'project.selectFirst': 'Сначала выберите проект',
@@ -3334,8 +3225,7 @@ final Map<String, String> _ru = {
   'device.homeHint': 'Выберите подключённый компьютер, чтобы войти в терминал',
   'device.addByScan': 'Сканировать для добавления компьютера',
   'device.emptyTitle': 'Пока нет связанных компьютеров',
-  'device.emptySubtitle':
-      'Отсканируйте Mac для удалённого управления терминалом',
+  'device.emptySubtitle': 'Отсканируйте Mac для удалённого управления терминалом',
   'device.scanAdd': 'Сканировать для добавления',
   'device.edit': 'Изменить',
   'device.delete': 'Удалить',
@@ -3346,23 +3236,19 @@ final Map<String, String> _ru = {
   'pair.cancelled': 'Сопряжение отменено',
   'pair.rejected': 'Сопряжение отклонено на Mac',
   'pair.failed': 'Ошибка сопряжения',
-  'pair.repairRequired':
-      'Устройство не авторизовано. Выполните сопряжение снова',
+  'pair.repairRequired': 'Устройство не авторизовано. Выполните сопряжение снова',
   'pair.confirmTitle': 'Подтвердите этот компьютер',
   'pair.waitingTitle': 'Ожидание подтверждения на Mac',
-  'pair.confirmBody':
-      'Подтвердите совпадение кода на Mac перед запросом сопряжения',
+  'pair.confirmBody': 'Подтвердите совпадение кода на Mac перед запросом сопряжения',
   'pair.waitingBody': 'Нажмите Разрешить на Mac. Автоматическая проверка…',
   'pair.device': 'Устройство',
   'pair.matchCode': 'Код сопряжения',
   'pair.pairing': 'Сопряжение…',
   'connection.failedRetry': 'Сбой подключения, повтор в фоне',
-  'connection.failedExhausted':
-      'Сбой подключения — нажмите на устройство для повтора',
+  'connection.failedExhausted': 'Сбой подключения — нажмите на устройство для повтора',
   'connection.failedWithReason': 'Сбой подключения: {reason}',
   'connection.macDisconnected': 'Mac не подключён',
-  'connection.upgradeRequired':
-      'Версия протокола несовместима. Обновите приложение',
+  'connection.upgradeRequired': 'Версия протокола несовместима. Обновите приложение',
   'connection.direct': 'P2P',
   'connection.relay': 'Релей',
   'terminal.creating': 'Создание терминала, подождите перед вводом',
@@ -3400,8 +3286,7 @@ final Map<String, String> _ru = {
   'upload.chooseImage': 'Выбрать изображение',
   'upload.imageUploading': 'Загрузка изображения...',
   'upload.imageInserting': 'Вставка изображения...',
-  'upload.imageSentTool':
-      'Изображение загружено и отправлено через сочетание вставки {tool}',
+  'upload.imageSentTool': 'Изображение загружено и отправлено через сочетание вставки {tool}',
   'upload.imageSentPath': 'Изображение загружено, временный путь вставлен',
   'upload.fileUploading': 'Загрузка файла...',
   'upload.fileInserting': 'Вставка файла...',
@@ -3411,8 +3296,7 @@ final Map<String, String> _ru = {
   'upload.directRequired': 'Подключитесь к компьютеру перед загрузкой файлов',
   'upload.aiTool': 'AI-инструмент',
   'remote.error': 'Удалённый сервер вернул ошибку',
-  'remote.dirTimeout':
-      'Истекло время чтения папки. Убедитесь, что удалённая служба Mac в сети',
+  'remote.dirTimeout': 'Истекло время чтения папки. Убедитесь, что удалённая служба Mac в сети',
   'update.checking': 'Проверка обновлений...',
   'update.loading': 'Проверка обновлений',
   'update.noRelease': 'Релизов на GitHub пока нет',
@@ -3421,10 +3305,8 @@ final Map<String, String> _ru = {
   'update.appStorePending': 'Это приложение пока недоступно в App Store',
   'update.latest': 'Уже последняя v{version}',
   'update.foundTitle': 'Новая версия {version}',
-  'update.foundBody':
-      'Текущая версия v{version}. Откройте GitHub Releases, чтобы скачать обновление.',
-  'update.foundBodyAppStore':
-      'Текущая версия v{version}. Откройте App Store для обновления.',
+  'update.foundBody': 'Текущая версия v{version}. Откройте GitHub Releases, чтобы скачать обновление.',
+  'update.foundBodyAppStore': 'Текущая версия v{version}. Откройте App Store для обновления.',
   'update.failed': 'Сбой проверки обновлений: {reason}',
   'stats.aiTitle': 'AI Статистика',
   'stats.todayToken': 'Токены сегодня',
@@ -3451,13 +3333,10 @@ final Map<String, String> _ru = {
   'stats.dayDetail': '{day} · {tokens} · {count} запросов',
   'stats.noRankData': 'Нет данных рейтинга',
   'stats.noStats': 'Нет данных статистики',
-  'stats.emptyHint':
-      'Запустите поддерживаемую AI CLI, чтобы увидеть здесь статистику текущего проекта.',
-  'remote.qrMissingFields':
-      'В QR-коде отсутствуют зашифрованные поля сопряжения. Отсканируйте QR-код Mac снова',
+  'stats.emptyHint': 'Запустите поддерживаемую AI CLI, чтобы увидеть здесь статистику текущего проекта.',
+  'remote.qrMissingFields': 'В QR-коде отсутствуют зашифрованные поля сопряжения. Отсканируйте QR-код Mac снова',
   'remote.qrEmpty': 'Содержимое QR-кода пустое',
-  'remote.qrInvalid':
-      'Не удалось распознать QR-код. Отсканируйте или вставьте свежий токен сопряжения Mac',
+  'remote.qrInvalid': 'Не удалось распознать QR-код. Отсканируйте или вставьте свежий токен сопряжения Mac',
   'remote.pairingCodeInvalid': 'Введите токен сопряжения',
   'remote.requestFailed': 'Сбой запроса {status}',
   'remote.waitTimeout': 'Истекло время ожидания подтверждения на Mac',

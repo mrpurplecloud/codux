@@ -1027,7 +1027,21 @@ impl RemoteTransport for RemoteIrohHostTransport {
     }
 
     fn iroh_candidate(&self) -> Option<(String, String)> {
-        Some((self.node_id.clone(), self.relay_url.clone()))
+        // Read the relay live, like the ticket published beside it. `relay_url`
+        // records only what was true at bind time, and iroh keeps retrying in
+        // the background — a host that started with no reachable relay and
+        // acquired a home since would otherwise keep advertising the empty
+        // startup value, disagreeing with the ticket it ships with. Falls back
+        // to the bind-time value, which is the configured relay we could not
+        // register with, and is still worth telling a controller about.
+        let relay_url = self
+            .endpoint
+            .addr()
+            .relay_urls()
+            .next()
+            .map(|url| url.to_string())
+            .unwrap_or_else(|| self.relay_url.clone());
+        Some((self.node_id.clone(), relay_url))
     }
 
     fn iroh_endpoint_ticket(&self) -> Option<String> {
@@ -2484,6 +2498,48 @@ mod tests {
             DialSchedule::for_relay_state(false)
         );
         endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_relay_less_host_publishes_a_ticket_only_candidate() {
+        // The host reports these to controllers, which replace their stored
+        // dial set from them. With no relay the candidate must still be one a
+        // controller will accept, or the report strands the device.
+        let host = test_host().await;
+        let (node_id, relay_url) = host.transport.iroh_candidate().expect("candidate");
+        let ticket = host.transport.iroh_endpoint_ticket().expect("ticket");
+
+        assert!(relay_url.is_empty(), "this host has no relay home");
+        assert!(!ticket.is_empty());
+        assert!(is_dialable_iroh_transport(
+            codux_protocol::REMOTE_TRANSPORT_IROH,
+            &ticket,
+            &node_id,
+            &relay_url
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_published_candidate_agrees_with_its_endpoint() {
+        // `relay_url` on the transport records only what was true at bind time,
+        // and iroh keeps working on the relay afterwards. The published
+        // candidate must therefore agree with the endpoint it claims to
+        // describe — reporting the live relay whenever there is one, and the
+        // configured value only as a fallback.
+        let host = test_host().await;
+        let (_, reported) = host.transport.iroh_candidate().expect("candidate");
+
+        let live = host
+            .transport
+            .endpoint
+            .addr()
+            .relay_urls()
+            .next()
+            .map(|url| url.to_string());
+        assert_eq!(
+            reported,
+            live.unwrap_or_else(|| host.transport.relay_url.clone())
+        );
     }
 
     #[tokio::test]

@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart' show listEquals;
+
 import '../models/remote_models.dart';
 
 class RemoteDeviceState {
@@ -71,19 +73,29 @@ class RemoteDeviceController {
     );
   }
 
-  RemoteDeviceUpdateResult updateHostName({
+  /// Apply [change] to the device with [deviceId], keeping the active reference
+  /// pointing at whichever record it pointed at before.
+  ///
+  /// [change] returns null — or the same instance — when it would change
+  /// nothing; the result then reports `updatedDevice: null` so the caller can
+  /// skip a disk write. Several of these run on every connection and usually
+  /// have nothing to say.
+  RemoteDeviceUpdateResult _mutateDevice({
     required List<StoredDevice> devices,
     required StoredDevice? activeDevice,
     required String deviceId,
-    required String? hostName,
+    required StoredDevice? Function(StoredDevice) change,
   }) {
     StoredDevice? updated;
     final next = devices.map((item) {
       if (item.deviceId != deviceId) return item;
-      updated = item.copyWith(hostName: hostName);
-      return updated!;
+      final changed = change(item);
+      if (changed == null || identical(changed, item)) return item;
+      updated = changed;
+      return changed;
     }).toList();
-    if (updated == null) {
+    final result = updated;
+    if (result == null) {
       return RemoteDeviceUpdateResult(
         state: preserveActive(devices: devices, activeDevice: activeDevice),
         updatedDevice: null,
@@ -93,12 +105,24 @@ class RemoteDeviceController {
       state: RemoteDeviceState(
         devices: List.unmodifiable(next),
         activeDevice: activeDevice?.deviceId == deviceId
-            ? updated
+            ? result
             : _deviceById(next, activeDevice?.deviceId) ?? _firstOrNull(next),
       ),
-      updatedDevice: updated,
+      updatedDevice: result,
     );
   }
+
+  RemoteDeviceUpdateResult updateHostName({
+    required List<StoredDevice> devices,
+    required StoredDevice? activeDevice,
+    required String deviceId,
+    required String? hostName,
+  }) => _mutateDevice(
+    devices: devices,
+    activeDevice: activeDevice,
+    deviceId: deviceId,
+    change: (device) => device.copyWith(hostName: hostName),
+  );
 
   /// Adopt the dial candidates [deviceId] just reported for itself.
   ///
@@ -121,47 +145,15 @@ class RemoteDeviceController {
     required StoredDevice? activeDevice,
     required String deviceId,
     required List<RemoteTransportCandidate> transports,
-  }) {
-    if (transports.isEmpty) {
-      return RemoteDeviceUpdateResult(
-        state: preserveActive(devices: devices, activeDevice: activeDevice),
-        updatedDevice: null,
-      );
-    }
-    StoredDevice? updated;
-    final next = devices.map((item) {
-      if (item.deviceId != deviceId) return item;
-      if (_sameTransports(item.transports, transports)) return item;
-      updated = item.copyWith(transports: transports);
-      return updated!;
-    }).toList();
-    if (updated == null) {
-      return RemoteDeviceUpdateResult(
-        state: preserveActive(devices: devices, activeDevice: activeDevice),
-        updatedDevice: null,
-      );
-    }
-    return RemoteDeviceUpdateResult(
-      state: RemoteDeviceState(
-        devices: List.unmodifiable(next),
-        activeDevice: activeDevice?.deviceId == deviceId
-            ? updated
-            : _deviceById(next, activeDevice?.deviceId) ?? _firstOrNull(next),
-      ),
-      updatedDevice: updated,
-    );
-  }
-
-  bool _sameTransports(
-    List<RemoteTransportCandidate> a,
-    List<RemoteTransportCandidate> b,
-  ) {
-    if (a.length != b.length) return false;
-    for (var i = 0; i < a.length; i += 1) {
-      if (a[i] != b[i]) return false;
-    }
-    return true;
-  }
+  }) => _mutateDevice(
+    devices: devices,
+    activeDevice: activeDevice,
+    deviceId: deviceId,
+    change: (device) =>
+        transports.isEmpty || listEquals(device.transports, transports)
+        ? null
+        : device.copyWith(transports: transports),
+  );
 
   /// Record that [deviceId] was just reached at [addr], so the next dial can try
   /// it alongside the addresses frozen into the pairing ticket.
@@ -175,31 +167,12 @@ class RemoteDeviceController {
     required StoredDevice? activeDevice,
     required String deviceId,
     required String addr,
-  }) {
-    StoredDevice? updated;
-    final next = devices.map((item) {
-      if (item.deviceId != deviceId) return item;
-      final promoted = item.withDirectAddr(addr);
-      if (identical(promoted, item)) return item;
-      updated = promoted;
-      return promoted;
-    }).toList();
-    if (updated == null) {
-      return RemoteDeviceUpdateResult(
-        state: preserveActive(devices: devices, activeDevice: activeDevice),
-        updatedDevice: null,
-      );
-    }
-    return RemoteDeviceUpdateResult(
-      state: RemoteDeviceState(
-        devices: List.unmodifiable(next),
-        activeDevice: activeDevice?.deviceId == deviceId
-            ? updated
-            : _deviceById(next, activeDevice?.deviceId) ?? _firstOrNull(next),
-      ),
-      updatedDevice: updated,
-    );
-  }
+  }) => _mutateDevice(
+    devices: devices,
+    activeDevice: activeDevice,
+    deviceId: deviceId,
+    change: (device) => device.withDirectAddr(addr),
+  );
 
   RemoteDeviceRemoveResult remove({
     required List<StoredDevice> devices,

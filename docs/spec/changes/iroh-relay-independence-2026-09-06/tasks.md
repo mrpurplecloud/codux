@@ -94,4 +94,53 @@ rather than by agreement.
 - [x] 5.3 ~~Add the host-originated announcement message~~ — **superseded:** the existing `host.info` reply is that message. It is already sent on every connection, which is exactly the moment stored addresses need refreshing. Sending on host address change mid-connection was dropped deliberately: while a connection is live its path still works, and when it breaks the reconnect fetches a fresh `host.info` anyway. A push would only matter for a host that changed address without the link noticing, which cannot be delivered to a controller that has no working path.
 - [x] 5.4 Replace and persist the controller's stored transport candidate from the announcement, keeping the remembered last-known-good address from ticket 4 as an independent fallback. An empty report is explicitly not an instruction to forget — silence from an older host must not strand the device. Unchanged reports write nothing, since `host.info` arrives on every connection.
 - [x] 5.5 Update `docs/protocol.md` with the added message and the capability that gates it, including its version note. Documented the field's meaning and the two safety rules instead — the wire format is unchanged, so there is no version note to add.
-- [x] 5.6 Verify all four peer-version combinations and record the observed behaviour: new host with old controller, old host with new controller, new with new, old with old. **New host + old controller:** the field was always sent and previously ignored; unchanged. **Old host + new controller:** the field has been sent since `v1.8.0` (commit `25a93192`, 2026-06-10), so every host back to that release refreshes correctly; anything older simply omits it and leaves stored candidates untouched. **New + new:** stored addresses follow the host. **Old + old:** untouched.
+- [x] 5.6 Verify all four peer-version combinations and record the observed behaviour: new host with old controller, old host with new controller, new with new, old with old. **New host + old controller:** the field was always sent and previously ignored; unchanged. **Old host + new controller:** a desktop host has sent it since `v1.8.0` (commit `25a93192`, 2026-06-10); an older desktop host, and any headless host predating this change, simply omit it and leave stored candidates untouched. **New + new:** stored addresses follow the host. **Old + old:** untouched.
+
+## Self-review corrections
+
+A two-axis review (standards + spec) after the five tickets found four real
+defects and one process failure. All are fixed above; recorded here because
+each was a claim made and then falsified.
+
+**Headless never reported its addresses.** 5.6 originally claimed "both desktop
+and headless already send it, from one shared payload builder". The builder is
+shared; the agent was passing it `Vec::new()`, with a comment reasoning that the
+controller already knew the path it connected on. True of the live connection,
+false of the next one — which is the whole point of storing them. Ticket 5 was
+therefore half-delivered: it worked against a desktop host and did nothing
+against a headless one. The agent now rebuilds its candidates from its live
+transport, and carries its relay authentication so the reported set is complete
+— a controller replaces its stored set wholesale, so an omitted bearer token
+would be lost on the controller side.
+
+**The host published a build-time relay while publishing a live ticket.** The
+same defect ticket 1 fixed on the controller, left standing on the host one
+commit later: `relay_url` was captured at bind, so a host that started without a
+reachable relay and acquired one later kept advertising the empty startup value
+— inside the very payload ticket 5 added to make addresses follow the host. Two
+fields answering "where is this host" differently. Now read live, with the
+bind-time value as fallback.
+
+**Adoption bypassed the dialability authority.** `_refreshStoredTransports`
+checked only for an empty report before replacing stored candidates. A report
+carrying nothing dialable would have overwritten a working set and stranded the
+device until re-pairing — the exact failure the extracted rule exists to
+prevent. It now asks the native config parser, which applies the dialer's own
+rule.
+
+**Unrelated formatting rode along.** A blanket `dart format lib test` reflowed
+24 files this change never touched, and inside two files it did touch it
+reformatted unrelated types. Reverted; `i18n.dart` went from 363 changed lines
+to 10, `remote_models.dart` from 172 to 90. Format only what you edited.
+
+**Three copies of one shape.** `updateHostName`, `replaceTransports`, and
+`rememberDirectAddr` were line-for-line variants of the same map-and-preserve
+walk. Collapsed onto one `_mutateDevice`, and `_sameTransports` replaced with
+`listEquals` from the framework.
+
+Two findings were checked and rejected: `_rememberDirectAddr` reading
+`_activeDevice` is safe because stale transport events are already dropped by
+the connection-generation guard before reaching it, and the endpoint eviction
+after a fully failed dial does not contradict the relay-timeout scenario — that
+decision is about a wedged path, not about the relay. The scenario wording was
+tightened to say so.
