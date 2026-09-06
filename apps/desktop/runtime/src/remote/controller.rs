@@ -88,9 +88,18 @@ pub struct TicketTransport {
 impl TicketTransport {
     /// Whether this transport carries enough to dial: a full ticket, or a node
     /// id + relay url pair (the slim QR form).
+    ///
+    /// Delegates to the transport crate so this and the iroh dial path cannot
+    /// disagree about what is dialable. They previously each had their own copy,
+    /// and had already drifted: this one treated a whitespace-only ticket as
+    /// usable, the dial path did not.
     fn is_dialable_iroh(&self) -> bool {
-        self.kind == REMOTE_TRANSPORT_IROH
-            && (!self.ticket.is_empty() || (!self.node_id.is_empty() && !self.relay_url.is_empty()))
+        codux_remote_transport::is_dialable_iroh_transport(
+            &self.kind,
+            &self.ticket,
+            &self.node_id,
+            &self.relay_url,
+        )
     }
 }
 

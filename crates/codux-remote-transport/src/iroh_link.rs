@@ -293,26 +293,35 @@ impl RemoteIrohHostTransport {
         .map_err(|error| format!("iroh host bind failed: {error}"))?;
         // Advertise on the LAN so co-located controllers reach us directly.
         enable_local_discovery(&endpoint, &on_log);
-        if tokio::time::timeout(IROH_ONLINE_TIMEOUT, endpoint.online())
+        // Best-effort, exactly as on the controller side: a relay lets remote
+        // controllers find us, but its absence does not make this host
+        // unreachable — the endpoint ticket we publish below carries our direct
+        // addresses, and a controller on the same LAN or SD-WAN network dials
+        // those with no relay involved. Failing startup here would take the host
+        // down for every controller, including the ones already one hop away.
+        let relay_online = tokio::time::timeout(IROH_ONLINE_TIMEOUT, endpoint.online())
             .await
-            .is_err()
-        {
-            endpoint.close().await;
-            return Err("iroh host relay online timeout".to_string());
-        }
+            .is_ok();
+        // Empty when we have no relay at all. The published candidate then
+        // carries only the ticket, which `is_dialable_iroh_candidate` accepts.
         let relay_url = endpoint
             .addr()
             .relay_urls()
             .next()
             .cloned()
             .or(configured_relay_url)
-            .ok_or_else(|| "iroh host has no relay url".to_string())?;
+            .map(|url| url.to_string())
+            .unwrap_or_default();
+        log_transport(
+            &on_log,
+            format!("iroh_host online={relay_online} relay={relay_url}"),
+        );
         let blob_store = new_blob_store();
         let transport = Arc::new(Self {
             node_id: endpoint.id().to_string(),
             endpoint,
             blob_store: blob_store.clone(),
-            relay_url: relay_url.to_string(),
+            relay_url,
             peers: Mutex::new(HashMap::new()),
             on_message,
             on_upload,
@@ -1085,6 +1094,44 @@ struct ControllerEndpoint {
     generation: u64,
 }
 
+/// Whether `candidate` carries enough for a controller to dial the host.
+///
+/// A ticket alone is enough. It serialises the host's whole `EndpointAddr`,
+/// direct addresses included, so it can be dialled with no relay anywhere in the
+/// picture — which is exactly the case for a host that came up on a LAN or an
+/// SD-WAN virtual network with no reachable relay.
+///
+/// Without a ticket there are no direct addresses to try, so both a node id and
+/// a relay to route through are required.
+///
+/// This is a contract shared by the two sides — the host must not publish a
+/// candidate the controller will discard, and the controller must not discard
+/// one the host considers usable — so it lives in one named, tested function
+/// rather than as a condition inlined at the point of use.
+fn is_dialable_iroh_candidate(candidate: &RemoteTransportCandidate) -> bool {
+    is_dialable_iroh_transport(
+        &candidate.kind,
+        &candidate.ticket,
+        &candidate.node_id,
+        &candidate.relay_url,
+    )
+}
+
+/// Field-level form of [`is_dialable_iroh_candidate`], for callers holding the
+/// parts in some other struct — the desktop controller's ticket parser, for one.
+/// One definition so the two cannot drift apart on, say, whether a whitespace
+/// ticket counts.
+pub fn is_dialable_iroh_transport(
+    kind: &str,
+    ticket: &str,
+    node_id: &str,
+    relay_url: &str,
+) -> bool {
+    kind == codux_protocol::REMOTE_TRANSPORT_IROH
+        && (!ticket.trim().is_empty()
+            || (!node_id.trim().is_empty() && !relay_url.trim().is_empty()))
+}
+
 /// Whether `endpoint` currently has a relay home.
 ///
 /// Read live on every dial rather than captured when the endpoint was built.
@@ -1249,12 +1296,7 @@ impl RemoteIrohControllerTransport {
         let candidate = config
             .transports
             .iter()
-            .find(|candidate| {
-                candidate.kind == codux_protocol::REMOTE_TRANSPORT_IROH
-                    && (!candidate.ticket.trim().is_empty()
-                        || (!candidate.node_id.trim().is_empty()
-                            && !candidate.relay_url.trim().is_empty()))
-            })
+            .find(|candidate| is_dialable_iroh_candidate(candidate))
             .ok_or_else(|| "missing iroh transport candidate".to_string())?;
         let endpoint_addr = candidate_endpoint_addr(candidate)?;
         let relay_url = endpoint_addr
@@ -2290,6 +2332,58 @@ mod tests {
             schedule.timeout_for(schedule.attempts - 1),
             "an out-of-range attempt index must not panic or grow unbounded"
         );
+    }
+
+    fn iroh_candidate(node_id: &str, relay_url: &str, ticket: &str) -> RemoteTransportCandidate {
+        RemoteTransportCandidate {
+            kind: codux_protocol::REMOTE_TRANSPORT_IROH.to_string(),
+            url: String::new(),
+            node_id: node_id.to_string(),
+            relay_url: relay_url.to_string(),
+            ticket: ticket.to_string(),
+            relay_authentication: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_ticket_alone_is_enough_to_dial() {
+        // The host may have no relay at all — a LAN-only or SD-WAN-only
+        // deployment. Its ticket still serialises the direct addresses, which is
+        // everything `connect` needs.
+        assert!(is_dialable_iroh_candidate(&iroh_candidate(
+            "",
+            "",
+            "ticket-bytes"
+        )));
+    }
+
+    #[test]
+    fn node_id_needs_a_relay_when_there_is_no_ticket() {
+        // Without a ticket there are no direct addresses, so the only way to
+        // reach the peer is to route through its relay.
+        assert!(is_dialable_iroh_candidate(&iroh_candidate(
+            "node",
+            "https://relay.example",
+            ""
+        )));
+        assert!(!is_dialable_iroh_candidate(&iroh_candidate("node", "", "")));
+        assert!(!is_dialable_iroh_candidate(&iroh_candidate(
+            "",
+            "https://relay.example",
+            ""
+        )));
+    }
+
+    #[test]
+    fn a_candidate_of_another_kind_is_never_dialable_here() {
+        let mut candidate = iroh_candidate("node", "https://relay.example", "ticket");
+        candidate.kind = "something-else".to_string();
+        assert!(!is_dialable_iroh_candidate(&candidate));
+    }
+
+    #[test]
+    fn whitespace_is_not_a_ticket() {
+        assert!(!is_dialable_iroh_candidate(&iroh_candidate("", "", "   ")));
     }
 
     #[tokio::test]

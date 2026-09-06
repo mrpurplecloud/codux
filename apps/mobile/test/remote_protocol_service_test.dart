@@ -25,6 +25,40 @@ void main() {
     expect(device.transportByKind(RemoteTransportKind.iroh)?.nodeId, 'node-1');
   });
 
+  test('a relay-less host candidate is still selectable', () {
+    // A host that came up with no reachable relay publishes a candidate whose
+    // relay url — and therefore the legacy `url` field derived from it — is
+    // empty. Its ticket still carries the direct addresses, so it is dialable,
+    // and this selector must not filter it out before the dial path ever sees
+    // it. `url` is the relay server address; it says nothing about whether an
+    // iroh peer can be reached.
+    final device = StoredDevice.fromJson({
+      'server': '',
+      'hostId': 'host-1',
+      'deviceId': 'device-1',
+      'token': '',
+      'name': 'Phone',
+      'transports': [
+        {
+          'kind': RemoteTransportKind.iroh,
+          'url': '',
+          'nodeId': 'node-1',
+          'relayUrl': '',
+          'ticket': 'endpoint-ticket-bytes',
+        },
+      ],
+    });
+
+    expect(
+      remotePreferredTransportKind(device.transports, pairing: false),
+      RemoteTransportKind.iroh,
+    );
+    expect(
+      device.transportByKind(RemoteTransportKind.iroh)?.ticket,
+      'endpoint-ticket-bytes',
+    );
+  });
+
   test(
     'embedded iroh ticket pairing payload parses without relay ticket fetch',
     () async {

@@ -109,9 +109,17 @@ class StoredDevice {
   final String? hostName;
   final List<RemoteTransportCandidate> transports;
 
+  /// The stored candidate for [kind], or null.
+  ///
+  /// Deliberately does not require a non-empty `url`. That field holds the relay
+  /// SERVER address and says nothing about whether an iroh peer can be reached:
+  /// a host that came up without a reachable relay publishes an empty one while
+  /// its ticket still carries the direct addresses needed to dial it. Screening
+  /// on `url` here rejected such a host before the dial path — the one authority
+  /// on what is dialable — ever saw it.
   RemoteTransportCandidate? transportByKind(String kind) {
     for (final candidate in transports) {
-      if (candidate.kind == kind && candidate.url.trim().isNotEmpty) {
+      if (candidate.kind == kind) {
         return candidate;
       }
     }
@@ -193,19 +201,21 @@ class RelayEnvelope {
   /// stale.
   final String? rawJson;
 
-  factory RelayEnvelope.fromJson(Map<String, dynamic> json, {String? rawJson}) =>
-      RelayEnvelope(
-        type: '${json['type'] ?? ''}',
-        id: json['id']?.toString(),
-        hostId: json['hostId']?.toString(),
-        deviceId: json['deviceId']?.toString(),
-        sessionId: json['sessionId']?.toString(),
-        seq: json['seq'] is num ? (json['seq'] as num).toInt() : null,
-        payload: json['payload'],
-        error: json['error']?.toString(),
-        at: json['at'] is num ? (json['at'] as num).toInt() : null,
-        rawJson: rawJson,
-      );
+  factory RelayEnvelope.fromJson(
+    Map<String, dynamic> json, {
+    String? rawJson,
+  }) => RelayEnvelope(
+    type: '${json['type'] ?? ''}',
+    id: json['id']?.toString(),
+    hostId: json['hostId']?.toString(),
+    deviceId: json['deviceId']?.toString(),
+    sessionId: json['sessionId']?.toString(),
+    seq: json['seq'] is num ? (json['seq'] as num).toInt() : null,
+    payload: json['payload'],
+    error: json['error']?.toString(),
+    at: json['at'] is num ? (json['at'] as num).toInt() : null,
+    rawJson: rawJson,
+  );
 
   Map<String, dynamic> toJson() => {
     'type': type,
@@ -479,7 +489,8 @@ class RemoteGitStatusInfo {
         branches: (json['branches'] as List<dynamic>? ?? [])
             .whereType<Map>()
             .map(
-              (item) => RemoteGitBranch.fromJson(Map<String, dynamic>.from(item)),
+              (item) =>
+                  RemoteGitBranch.fromJson(Map<String, dynamic>.from(item)),
             )
             .toList(),
         remoteBranches: (json['remoteBranches'] as List<dynamic>? ?? [])
@@ -488,7 +499,8 @@ class RemoteGitStatusInfo {
         remotes: (json['remotes'] as List<dynamic>? ?? [])
             .whereType<Map>()
             .map(
-              (item) => RemoteGitRemote.fromJson(Map<String, dynamic>.from(item)),
+              (item) =>
+                  RemoteGitRemote.fromJson(Map<String, dynamic>.from(item)),
             )
             .toList(),
       );
@@ -545,10 +557,11 @@ class RemoteGitRemote {
   final String name;
   final String url;
 
-  factory RemoteGitRemote.fromJson(Map<String, dynamic> json) => RemoteGitRemote(
-    name: '${json['name'] ?? ''}',
-    url: '${json['url'] ?? ''}',
-  );
+  factory RemoteGitRemote.fromJson(Map<String, dynamic> json) =>
+      RemoteGitRemote(
+        name: '${json['name'] ?? ''}',
+        url: '${json['url'] ?? ''}',
+      );
 
   Map<String, dynamic> toJson() => {'name': name, 'url': url};
 }
@@ -559,10 +572,11 @@ class RemoteGitBranch {
   final String name;
   final bool isCurrent;
 
-  factory RemoteGitBranch.fromJson(Map<String, dynamic> json) => RemoteGitBranch(
-    name: '${json['name'] ?? ''}',
-    isCurrent: json['isCurrent'] == true,
-  );
+  factory RemoteGitBranch.fromJson(Map<String, dynamic> json) =>
+      RemoteGitBranch(
+        name: '${json['name'] ?? ''}',
+        isCurrent: json['isCurrent'] == true,
+      );
 
   Map<String, dynamic> toJson() => {'name': name, 'isCurrent': isCurrent};
 }
@@ -610,14 +624,15 @@ class AISessionRecord {
   final double time;
   final int size;
 
-  factory AISessionRecord.fromJson(Map<String, dynamic> json) => AISessionRecord(
-    id: '${json['id'] ?? ''}',
-    title: '${json['title'] ?? ''}',
-    tool: '${json['tool'] ?? ''}',
-    model: json['model']?.toString(),
-    time: (json['time'] is num) ? (json['time'] as num).toDouble() : 0,
-    size: (json['size'] is num) ? (json['size'] as num).toInt() : 0,
-  );
+  factory AISessionRecord.fromJson(Map<String, dynamic> json) =>
+      AISessionRecord(
+        id: '${json['id'] ?? ''}',
+        title: '${json['title'] ?? ''}',
+        tool: '${json['tool'] ?? ''}',
+        model: json['model']?.toString(),
+        time: (json['time'] is num) ? (json['time'] as num).toDouble() : 0,
+        size: (json['size'] is num) ? (json['size'] as num).toInt() : 0,
+      );
 }
 
 /// One saved SSH profile from `ssh.list` — mirrors the shared
@@ -692,8 +707,10 @@ class AIStatsInfo {
         : const <String, dynamic>{};
     int? pick(String key) => _intValue(json[key]) ?? _intValue(summary[key]);
     return AIStatsInfo(
-      projectName: '${json['projectName'] ?? summary['projectName'] ?? 'Project'}',
-      todayTokens: pick('todayTotalTokens') ?? _intValue(json['todayTokens']) ?? 0,
+      projectName:
+          '${json['projectName'] ?? summary['projectName'] ?? 'Project'}',
+      todayTokens:
+          pick('todayTotalTokens') ?? _intValue(json['todayTokens']) ?? 0,
       totalTokens:
           pick('projectTotalTokens') ?? _intValue(json['totalTokens']) ?? 0,
       currentSessionTokens: pick('currentSessionTokens') ?? 0,
@@ -703,9 +720,10 @@ class AIStatsInfo {
       todayCachedInputTokens: pick('todayCachedInputTokens') ?? 0,
       requestCount: pick('requestCount') ?? 0,
       currentTool: (json['currentTool'] ?? summary['currentTool'])?.toString(),
-      currentModel:
-          (json['currentModel'] ?? summary['currentModel'])?.toString(),
-      contextUsagePercent: _doubleValue(json['contextUsagePercent']) ??
+      currentModel: (json['currentModel'] ?? summary['currentModel'])
+          ?.toString(),
+      contextUsagePercent:
+          _doubleValue(json['contextUsagePercent']) ??
           _doubleValue(summary['contextUsagePercent']),
       updatedAt: json['updatedAt']?.toString(),
       currentSessions: _listOf(

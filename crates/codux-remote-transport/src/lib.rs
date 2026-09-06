@@ -16,7 +16,10 @@ mod local_memory;
 mod url_rules;
 mod web_tunnel;
 
-pub use iroh_link::{CODUX_REMOTE_ALPN, RemoteIrohControllerTransport, RemoteIrohHostTransport};
+pub use iroh_link::{
+    CODUX_REMOTE_ALPN, RemoteIrohControllerTransport, RemoteIrohHostTransport,
+    is_dialable_iroh_transport,
+};
 pub use local_memory::{LocalMemoryTransport, LocalMemoryTransportHub};
 pub use web_tunnel::{
     CODUX_WEB_TUNNEL_ALPN, WebTunnelIoStream, WebTunnelResponse, WebTunnelTcpConnectRequest,
