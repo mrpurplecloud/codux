@@ -79,6 +79,84 @@ const IROH_STREAM_READY_TIMEOUT: Duration = Duration::from_secs(1);
 /// to the reconnect loop (which then cold-starts a fresh endpoint). Each attempt
 /// gets `BASE + 2s * attempt`, so 4s + 6s + 8s = 18s of dialling on one online().
 const IROH_DIAL_ATTEMPTS: usize = 3;
+/// Growth per relay-routed dial attempt (see [`DialSchedule`]).
+const IROH_DIAL_STEP: Duration = Duration::from_secs(2);
+/// Attempts for a dial made with no relay home. Two, not one: a single dropped
+/// handshake packet must not be the whole verdict on an address.
+const IROH_DIRECT_DIAL_ATTEMPTS: usize = 2;
+
+/// How long to spend dialling, decided by whether the endpoint reached a relay
+/// home.
+///
+/// Pure data with no endpoint and no IO, so the policy is unit-testable without
+/// touching the process-shared endpoint pool — whose `static` lifetime makes it
+/// hostile to parallel tests.
+///
+/// Two schedules exist because the two paths fail differently:
+///
+/// - **Relay-routed** dials get an escalating ladder. The first dial to a peer
+///   routinely stalls while the relay primes the cross-path, and the re-dial
+///   then connects in milliseconds, so patience genuinely pays here.
+/// - **Relay-less** dials go straight at addresses we already hold. Such a dial
+///   either completes within an RTT or the address is unreachable; escalating
+///   only makes the caller wait longer for a verdict that will not change.
+///
+/// The relay-less budget is bounded by [`IROH_ONLINE_TIMEOUT`]: before this
+/// policy existed, an unreachable relay cost the user exactly that long before
+/// failing. Dialling direct addresses instead of giving up must not cost more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DialSchedule {
+    attempts: usize,
+    base_timeout: Duration,
+    step: Duration,
+}
+
+/// Error for a dial that ran out of attempts, naming the path that was actually
+/// tried. Without the distinction a relay-less failure reads as a plain timeout,
+/// hiding the one fact that explains it: there was no relay, so only the direct
+/// addresses could have worked, and none did.
+fn dial_exhausted_error(relay_online: bool) -> String {
+    if relay_online {
+        "iroh controller connect timeout".to_string()
+    } else {
+        "iroh controller connect timeout: no relay home, direct addresses unreachable".to_string()
+    }
+}
+
+impl DialSchedule {
+    fn for_relay_state(relay_online: bool) -> Self {
+        if relay_online {
+            Self {
+                attempts: IROH_DIAL_ATTEMPTS,
+                base_timeout: IROH_DIAL_BASE_TIMEOUT,
+                step: IROH_DIAL_STEP,
+            }
+        } else {
+            Self {
+                attempts: IROH_DIRECT_DIAL_ATTEMPTS,
+                base_timeout: IROH_DIAL_BASE_TIMEOUT,
+                step: Duration::ZERO,
+            }
+        }
+    }
+
+    /// Timeout for `attempt` (0-based). Saturates at the last attempt so an
+    /// out-of-range index can neither panic nor grow the budget.
+    fn timeout_for(&self, attempt: usize) -> Duration {
+        let step = attempt.min(self.attempts.saturating_sub(1));
+        self.base_timeout + self.step * step as u32
+    }
+
+    /// Worst-case wall time this schedule can spend before it gives up. Exists to
+    /// make the relay-less budget bound assertable; nothing in the dial path needs
+    /// the total, only the per-attempt timeout.
+    #[cfg(test)]
+    fn total_budget(&self) -> Duration {
+        (0..self.attempts)
+            .map(|attempt| self.timeout_for(attempt))
+            .sum()
+    }
+}
 
 type IrohSender = mpsc::Sender<Vec<u8>>;
 static HOST_PEER_ID: AtomicU64 = AtomicU64::new(1);
@@ -994,6 +1072,31 @@ struct SharedControllerEndpoint {
     generation: u64,
 }
 
+/// One acquisition of the pooled controller endpoint. Named rather than a tuple
+/// so the generation — which decides whether a later evict is allowed to retire
+/// this build — can't be read out of position.
+///
+/// Deliberately carries NO relay flag. Relay state is read live off the endpoint
+/// at dial time (see [`has_relay_home`]); caching it here would let one bad start
+/// pin the schedule forever.
+struct ControllerEndpoint {
+    endpoint: Endpoint,
+    blob_store: MemStore,
+    generation: u64,
+}
+
+/// Whether `endpoint` currently has a relay home.
+///
+/// Read live on every dial rather than captured when the endpoint was built.
+/// iroh keeps retrying the relay in the background, so an endpoint that came up
+/// relay-less can gain a home minutes later — and the pooled endpoint is reused
+/// for every subsequent connection. A flag captured at build time would keep
+/// dialling the relay-less schedule long after the relay came back, and would
+/// disagree with the endpoint it claims to describe.
+fn has_relay_home(endpoint: &Endpoint) -> bool {
+    endpoint.addr().relay_urls().next().is_some()
+}
+
 static SHARED_CONTROLLER_ENDPOINT: OnceLock<AsyncMutex<Option<SharedControllerEndpoint>>> =
     OnceLock::new();
 static SHARED_CONTROLLER_ENDPOINT_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -1010,7 +1113,7 @@ async fn acquire_controller_endpoint(
     relay_url: Option<&RelayUrl>,
     relay_authentication: &str,
     on_log: &Option<RemoteTransportLogHandler>,
-) -> Result<(Endpoint, MemStore, u64), String> {
+) -> Result<ControllerEndpoint, String> {
     let key = controller_endpoint_key(relay_url, relay_authentication);
     let mut guard = SHARED_CONTROLLER_ENDPOINT
         .get_or_init(|| AsyncMutex::new(None))
@@ -1019,11 +1122,11 @@ async fn acquire_controller_endpoint(
     if let Some(shared) = guard.as_ref() {
         if shared.relay_key == key {
             log_transport(on_log, "iroh_controller endpoint reused".to_string());
-            return Ok((
-                shared.endpoint.clone(),
-                shared.blob_store.clone(),
-                shared.generation,
-            ));
+            return Ok(ControllerEndpoint {
+                endpoint: shared.endpoint.clone(),
+                blob_store: shared.blob_store.clone(),
+                generation: shared.generation,
+            });
         }
         // Relay changed under us — drop the old entry and build for the new one.
         // Don't close(): a concurrent connect may still hold a clone of it, and
@@ -1042,22 +1145,31 @@ async fn acquire_controller_endpoint(
         .map_err(|error| format!("iroh controller bind failed: {error}"))?;
     // Discover co-located hosts directly on the LAN, not just via the relay.
     enable_local_discovery(&endpoint, on_log);
-    // Wait for our endpoint to register with its relay before we hand it out: a
-    // relay-routed dial cannot complete without a relay home.
-    if tokio::time::timeout(IROH_ONLINE_TIMEOUT, endpoint.online())
+    // Give the endpoint a chance to register with its relay, but do NOT gate the
+    // connection on it. `online()` reports whether a relay home exists; it is not
+    // a precondition for dialling. A peer's `EndpointAddr` is an address LIST —
+    // relay URLs AND direct addresses — and `connect` establishes a direct path
+    // from those addresses with no relay involved. Gating here used to strand
+    // every controller whose relay was unreachable (a captive portal, a VPN or
+    // SD-WAN app owning the default route) even when the host sat one hop away on
+    // the same LAN, because the dial loop below never ran.
+    //
+    // Never `close()` on timeout either: that endpoint is the only object still
+    // able to reach the host directly, and iroh keeps retrying the relay on it in
+    // the background — so a relay that recovers later brings this very endpoint
+    // online without a rebuild.
+    let relay_online = tokio::time::timeout(IROH_ONLINE_TIMEOUT, endpoint.online())
         .await
-        .is_err()
-    {
-        endpoint.close().await;
-        return Err("iroh controller relay online timeout".to_string());
-    }
+        .is_ok();
     log_transport(
         on_log,
         format!(
-            "iroh_controller online elapsed_ms={}",
+            "iroh_controller online={relay_online} elapsed_ms={}",
             online_started.elapsed().as_millis()
         ),
     );
+    // `relay_online` above records only how this build STARTED, for the log. The
+    // dial schedule reads the endpoint live instead — see `has_relay_home`.
     // One blob store + Router for every transport that shares this endpoint, so
     // iroh-blobs is served by a single accept loop instead of per-transport
     // loops racing on the shared endpoint.
@@ -1076,7 +1188,11 @@ async fn acquire_controller_endpoint(
         _router: router,
         generation,
     });
-    Ok((endpoint, blob_store, generation))
+    Ok(ControllerEndpoint {
+        endpoint,
+        blob_store,
+        generation,
+    })
 }
 
 /// Retire the pooled endpoint so the next connection rebuilds a fresh one — used
@@ -1152,20 +1268,32 @@ impl RemoteIrohControllerTransport {
         // connection warms it (relay registration + route priming), every later
         // one — the control link after pairing, reconnects — skips straight to the
         // dial on the warmed path.
-        let (endpoint, blob_store, endpoint_generation) =
-            acquire_controller_endpoint(relay_url.as_ref(), &relay_authentication, &on_log).await?;
-        // Dial with a short timeout and retry on the SAME, already-online
-        // endpoint. The first relay-routed dial routinely stalls while the relay
-        // primes the cross-path (the next dial then connects in ~milliseconds);
-        // re-dialling here keeps the relay-registration cost (online() above) paid
-        // once, instead of letting the Dart/reconnect layer tear the endpoint down
-        // and cold-start a fresh one — which pays online() all over again — for
-        // every attempt. Only after exhausting these does the reconnect loop get
-        // an error and fall back to a fresh endpoint.
+        let ControllerEndpoint {
+            endpoint,
+            blob_store,
+            generation: endpoint_generation,
+        } = acquire_controller_endpoint(relay_url.as_ref(), &relay_authentication, &on_log).await?;
+        // Read the relay state live off the endpoint, not from how it was built:
+        // this endpoint is pooled and reused, and iroh may have acquired a relay
+        // home for it since. See `has_relay_home`.
+        let relay_online = has_relay_home(&endpoint);
+        // Dial with a short timeout and retry on the SAME endpoint. A relay-routed
+        // first dial routinely stalls while the relay primes the cross-path (the
+        // next dial then connects in ~milliseconds); re-dialling here keeps the
+        // relay-registration cost (online() above) paid once, instead of letting
+        // the Dart/reconnect layer tear the endpoint down and cold-start a fresh
+        // one — which pays online() all over again — for every attempt. Only after
+        // exhausting these does the reconnect loop get an error and fall back to a
+        // fresh endpoint.
+        //
+        // With no relay home the schedule is shorter and flat: these dials go
+        // straight at the direct addresses in the ticket, which answer within an
+        // RTT or not at all. See `DialSchedule`.
+        let schedule = DialSchedule::for_relay_state(relay_online);
         let mut connection = None;
-        let mut last_dial_error = "iroh controller connect timeout".to_string();
-        for attempt in 0..IROH_DIAL_ATTEMPTS {
-            let dial_timeout = IROH_DIAL_BASE_TIMEOUT + Duration::from_secs(2 * attempt as u64);
+        let mut last_dial_error = dial_exhausted_error(relay_online);
+        for attempt in 0..schedule.attempts {
+            let dial_timeout = schedule.timeout_for(attempt);
             let dial_started = std::time::Instant::now();
             match tokio::time::timeout(
                 dial_timeout,
@@ -1189,7 +1317,7 @@ impl RemoteIrohControllerTransport {
                     last_dial_error = format!("iroh controller connect failed: {error}");
                 }
                 Err(_) => {
-                    last_dial_error = "iroh controller connect timeout".to_string();
+                    last_dial_error = dial_exhausted_error(relay_online);
                 }
             }
             log_transport(
@@ -2097,6 +2225,97 @@ fn parse_relay_url(value: &str) -> Result<RelayUrl, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_less_dial_is_not_slower_than_the_relay_gate() {
+        let schedule = DialSchedule::for_relay_state(false);
+        assert!(
+            schedule.total_budget() <= IROH_ONLINE_TIMEOUT,
+            "a relay-less dial must not make the user wait longer for failure \
+             than the relay gate it replaces: {:?} > {:?}",
+            schedule.total_budget(),
+            IROH_ONLINE_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn relay_less_dial_is_flat_and_short() {
+        let schedule = DialSchedule::for_relay_state(false);
+        assert!(
+            schedule.attempts >= 2,
+            "one dropped packet must not decide it"
+        );
+        assert_eq!(
+            schedule.timeout_for(0),
+            schedule.timeout_for(schedule.attempts - 1),
+            "direct addresses answer within an RTT or not at all; escalating \
+             only delays the failure"
+        );
+    }
+
+    #[test]
+    fn relay_routed_dial_keeps_its_escalating_ladder() {
+        let schedule = DialSchedule::for_relay_state(true);
+        assert_eq!(schedule.attempts, 3);
+        assert_eq!(schedule.timeout_for(0), Duration::from_secs(4));
+        assert_eq!(schedule.timeout_for(1), Duration::from_secs(6));
+        assert_eq!(schedule.timeout_for(2), Duration::from_secs(8));
+        assert_eq!(schedule.total_budget(), Duration::from_secs(18));
+    }
+
+    #[test]
+    fn dial_exhausted_error_names_the_path_that_was_tried() {
+        let relayed = dial_exhausted_error(true);
+        let direct = dial_exhausted_error(false);
+        assert_ne!(
+            relayed, direct,
+            "a relay-less failure must not read as a plain relay timeout"
+        );
+        assert!(
+            direct.contains("no relay home"),
+            "the relay-less error must say why only direct addresses could have \
+             worked: {direct}"
+        );
+        assert_eq!(
+            relayed, "iroh controller connect timeout",
+            "the relayed error string is load-bearing for existing log analysis"
+        );
+    }
+
+    #[test]
+    fn dial_timeout_saturates_past_the_last_attempt() {
+        let schedule = DialSchedule::for_relay_state(true);
+        assert_eq!(
+            schedule.timeout_for(99),
+            schedule.timeout_for(schedule.attempts - 1),
+            "an out-of-range attempt index must not panic or grow unbounded"
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_state_is_read_live_from_the_endpoint() {
+        // A relay-disabled endpoint can never have a home, so this pins the
+        // reader to the endpoint's own state rather than a build-time flag —
+        // the property that lets a recovered relay change the schedule back.
+        let endpoint = direct_endpoint(Vec::new()).await;
+        assert!(!has_relay_home(&endpoint));
+        assert_eq!(
+            DialSchedule::for_relay_state(has_relay_home(&endpoint)),
+            DialSchedule::for_relay_state(false)
+        );
+        endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn relay_less_endpoints_still_connect_to_each_other() {
+        // The whole point of removing the relay gate: no relay anywhere, and the
+        // dial still completes from the addresses in the peer's `EndpointAddr`.
+        let host = test_host().await;
+        assert!(!has_relay_home(&host.transport.endpoint));
+        let peer = test_peer(&host.transport).await;
+        assert!(!has_relay_home(&peer.endpoint));
+        assert_eq!(peer.connection.remote_id(), host.transport.endpoint.id());
+    }
 
     struct TestHost {
         transport: Arc<RemoteIrohHostTransport>,

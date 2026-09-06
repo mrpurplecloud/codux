@@ -1,0 +1,9 @@
+{
+  "change_id": "iroh-relay-independence",
+  "created_at": "2026-09-06T12:52:07Z",
+  "status": "proposed",
+  "capabilities": [
+    "remote-transport-connectivity"
+  ],
+  "updated_at": "2026-09-06T12:52:07Z"
+}
