@@ -357,13 +357,13 @@ impl RemoteIrohHostTransport {
         Ok(transport)
     }
 
-    pub fn node_id(&self) -> &str {
-        &self.node_id
-    }
-
-    pub fn relay_url(&self) -> &str {
-        &self.relay_url
-    }
+    // No `relay_url()` getter on purpose. `self.relay_url` is the bind-time
+    // value and goes stale the moment iroh acquires a relay home, so handing it
+    // out invites exactly the defect `iroh_candidate` was fixed for — a caller
+    // publishing an address that disagrees with the endpoint. Ask
+    // `iroh_candidate()` instead; it reads the endpoint live. (A `node_id()`
+    // getter went the same way: unused, and `iroh_candidate()` already returns
+    // it alongside the relay it belongs with.)
 
     async fn handle_connection(self: Arc<Self>, connection: Connection) {
         let peer_key = connection.remote_id().to_string();
