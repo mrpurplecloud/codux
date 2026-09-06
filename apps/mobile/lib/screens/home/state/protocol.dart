@@ -39,7 +39,8 @@ extension _HomePageProtocol on HomeController {
       );
       switch (message.type) {
         case final type when type == RemoteMessageType.hello:
-          _reconnectAttempt = 0;
+          // First evidence the link carries the protocol, not just packets.
+          _reconnectPolicy.reset();
           CoduxLog.info('[codux-flutter-remote] hello received');
           if (!_transportConnected) {
             _applyState(() {

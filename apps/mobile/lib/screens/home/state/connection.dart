@@ -15,6 +15,14 @@ extension _HomePageConnection on HomeController {
   void _refreshTransportRoute({required String reason}) {
     final device = _activeDevice;
     if (device == null || !_shouldReconnect) return;
+    // A route change is exactly the event a gave-up schedule was waiting for:
+    // the addresses that were unreachable a moment ago may be reachable now.
+    // Resume before the throttle below, which exists to damp repeated refreshes
+    // on a live connection and must not swallow the one that revives a dead one.
+    if (_reconnectPolicy.exhausted) {
+      _resumeReconnect('route-$reason');
+      return;
+    }
     final now = DateTime.now();
     final lastRefresh = _lastTransportRefreshAt;
     if (lastRefresh != null &&
@@ -96,7 +104,12 @@ extension _HomePageConnection on HomeController {
   }
 
   void _markTransportOpen({String? path}) {
-    _reconnectAttempt = 0;
+    // Deliberately does NOT reset the reconnect schedule. A transport that is
+    // merely open is not a connection that works: a host which accepts QUIC and
+    // then drops the link would reset the schedule on every cycle and could
+    // never exhaust it, which is the same never-give-up loop this policy exists
+    // to bound. The reset belongs to the first evidence the link is usable —
+    // the protocol `hello`, or the host answering.
     _applyState(() {
       _transportConnected = true;
       _hasShownTerminal = true;
@@ -238,6 +251,9 @@ extension _HomePageConnection on HomeController {
 
   void _markHostResponsive(String source, {String? transport}) {
     final wasResponsive = _hostResponsive;
+    // The strongest evidence the link works: the host answered. Whatever the
+    // previous attempts were struggling with is over.
+    _reconnectPolicy.reset();
     if (mounted && !_disposing) {
       _applyState(() {
         _transportConnected = true;
@@ -571,6 +587,11 @@ extension _HomePageConnection on HomeController {
       return;
     }
     _shouldReconnect = true;
+    // A connect the user asked for outranks a schedule that gave up: they can
+    // see something we cannot, and being told "no" by a policy they did not set
+    // is not acceptable. Background retries deliberately do not reset — that
+    // would make the schedule unable to terminate.
+    if (!background) _reconnectPolicy.reset();
     _backgroundConnect = background;
     _connectInFlight = true;
     _connectInFlightKey = connectKey;
@@ -672,18 +693,53 @@ extension _HomePageConnection on HomeController {
 
   void _scheduleReconnect(StoredDevice target) {
     if (!_shouldReconnect) return;
-    _reconnectTimer?.cancel();
-    _reconnectAttempt += 1;
-    final delay = Duration(
-      milliseconds: (800 * (1 << (_reconnectAttempt - 1).clamp(0, 5))).clamp(
-        800,
-        30000,
-      ),
+    final delay = _reconnectPolicy.recordFailure(
+      generation: _transportGeneration,
     );
+    if (delay == null) {
+      if (_reconnectPolicy.exhausted) _enterReconnectExhausted(target);
+      // Otherwise this was the second report of a failure already scheduled, or
+      // a superseded connect reporting in late. Either way the live schedule is
+      // already correct and must not be disturbed.
+      return;
+    }
+    _reconnectTimer?.cancel();
     CoduxLog.info(
-      '[codux-flutter-remote] reconnect scheduled host=${target.hostId} device=${target.deviceId} attempt=$_reconnectAttempt delayMs=${delay.inMilliseconds}',
+      '[codux-flutter-remote] reconnect scheduled host=${target.hostId} device=${target.deviceId} attempt=${_reconnectPolicy.attempt} delayMs=${delay.inMilliseconds}',
     );
     _reconnectTimer = Timer(delay, () => _connect(target, true));
+  }
+
+  /// Stop automatic retries and say so, rather than re-dialling an unreachable
+  /// host forever at the ceiling interval. Recovery is not dead-ended: a network
+  /// route change, a return to the foreground, or the user picking the device
+  /// again all call [_resumeReconnect].
+  void _enterReconnectExhausted(StoredDevice target) {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    CoduxLog.warn(
+      '[codux-flutter-remote] reconnect exhausted host=${target.hostId} device=${target.deviceId} attempts=${_reconnectPolicy.attempt}',
+    );
+    if (!mounted || _disposing) return;
+    _applyState(() {
+      // Not `failedRetry`: that string promises a background retry, and there
+      // is no longer one pending. Saying so would leave the user waiting for
+      // something that will never happen.
+      _status = _t('connection.failedExhausted');
+    });
+  }
+
+  /// Clear an exhausted schedule and try again now, because something changed
+  /// that the previous attempts could not have accounted for.
+  void _resumeReconnect(String reason) {
+    if (!_reconnectPolicy.exhausted) return;
+    final target = _activeDevice;
+    if (target == null || !_shouldReconnect) return;
+    CoduxLog.info('[codux-flutter-remote] reconnect resumed reason=$reason');
+    _reconnectPolicy.reset();
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _connect(target, true);
   }
 
   void _sendInitialTransportRequests({bool force = false}) {

@@ -32,14 +32,16 @@ Compatibility contract for the whole change: every ticket is independently shipp
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done — see 2.3 note for the deduplication key, and the reset-timing note below
 
-- [ ] 2.1 Add a failing test proving one connection failure advances the reconnect attempt counter exactly once, whichever observation path reports it first. Run against baseline and record the expected failure.
-- [ ] 2.2 Extract reconnect backoff and termination into a policy object with no widget dependency, following the existing extracted-controller pattern used elsewhere in the mobile state layer.
-- [ ] 2.3 Make the transport-closed handler the sole scheduler. The connect-failure path reports the failure and delegates; it does not schedule.
-- [ ] 2.4 Add a termination condition: after a bounded number of consecutive failures the policy stops scheduling and reports an exhausted state. A successful connection resets the policy.
-- [ ] 2.5 Surface the exhausted state as a resumable connection status rather than a perpetual reconnecting status, and make a user-initiated reconnect reset the policy.
-- [ ] 2.6 Cover the state-machine reversal case: a failure arriving after the transport was already replaced by a newer connection generation SHALL NOT schedule against the stale target.
+- [x] 2.1 Add a failing test proving one connection failure advances the reconnect attempt counter exactly once, whichever observation path reports it first. Run against baseline and record the expected failure.
+- [x] 2.2 Extract reconnect backoff and termination into a policy object with no widget dependency, following the existing extracted-controller pattern used elsewhere in the mobile state layer.
+- [x] 2.3 ~~Make the transport-closed handler the sole scheduler~~ — **refined during implementation.** Both observations of a failed connect already routed through that one handler, so "which handler schedules" was never the defect. The defect was that a single failure had no identity, and the handler could not tell a second report from a second failure. Failures are now keyed by connection generation inside the policy, which makes deduplication a property of the authority itself rather than a flag on a caller. This also covers the other schedulers (host-probe timeout, host-offline) for free.
+- [x] 2.4 Add a termination condition: after a bounded number of consecutive failures the policy stops scheduling and reports an exhausted state. A successful connection resets the policy.
+- [x] 2.5 Surface the exhausted state as a resumable connection status rather than a perpetual reconnecting status, and make a user-initiated reconnect reset the policy. Added a distinct string across all ten locales — reusing the existing retry string would have promised a background retry that is no longer pending.
+- [x] 2.6 Cover the state-machine reversal case: a failure arriving after the transport was already replaced by a newer connection generation SHALL NOT schedule against the stale target.
+
+**Reset timing corrected.** The schedule previously reset when the transport merely opened. A host that accepts QUIC and then drops the link would reset on every cycle and could never exhaust — the same never-give-up loop this ticket exists to bound. Reset now happens on the first evidence the link is *usable*: the protocol `hello`, or the host answering. Three events resume an exhausted schedule: a network route change, a return to the foreground, and any connect the user asked for.
 
 ## 3. Host Starts Without a Relay Home
 

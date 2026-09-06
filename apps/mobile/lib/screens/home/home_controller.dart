@@ -161,7 +161,12 @@ class HomeController extends ChangeNotifier with WidgetsBindingObserver {
   bool _fileEditorEditing = false;
   bool _fileEditorEditable = true;
   String _fileEditorOriginal = '';
-  int _reconnectAttempt = 0;
+
+  /// The one authority over reconnect timing and termination. Failures are
+  /// keyed by connection generation, so the two observations of a single failed
+  /// connect — the transport `failed:` state and the rejected connect future —
+  /// advance it once between them.
+  final _reconnectPolicy = ReconnectPolicy();
   bool _appInForeground = true;
 
   bool _transportConnected = false;
@@ -497,6 +502,10 @@ class HomeController extends ChangeNotifier with WidgetsBindingObserver {
       CoduxLog.info(
         '[codux-flutter-lifecycle] resume reconnect host=${device.hostId} device=${device.deviceId}',
       );
+      // Coming back to the foreground is new information — the user is here and
+      // the network may have changed while we were away — so a schedule that
+      // gave up in the background gets another run.
+      _reconnectPolicy.reset();
       _connect(device, true);
       return;
     }
