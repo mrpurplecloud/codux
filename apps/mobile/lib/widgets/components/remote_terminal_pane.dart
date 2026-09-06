@@ -76,10 +76,11 @@ class RemoteTerminalPane extends StatefulWidget {
   final void Function(int cols, int rows) onResize;
   final ValueChanged<String?> onSelectionChanged;
   final ValueChanged<String> onSendKey;
-  final bool canForwardScroll;
 
-  /// Scroll bytes for an app that owns scrolling; forwarded only while
-  /// [canForwardScroll] holds.
+  /// Whether this device holds the viewport, asked at gesture time.
+  final bool Function() canForwardScroll;
+
+  /// Scroll bytes for an app that owns scrolling.
   final ValueChanged<String> onSendScroll;
   final VoidCallback onToggleKeyboard;
   final VoidCallback onRequestKeyboard;

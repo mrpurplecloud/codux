@@ -579,18 +579,20 @@ extension _HomePageTerminal on HomeController {
     _sendInputNow(data, source: 'key');
   }
 
+  /// Whether this device may forward scrolling to the app right now — the only
+  /// authority on that, read at gesture time because ownership is released (and
+  /// taken away by another device) between frames.
+  bool _ownsTerminalViewport() =>
+      _terminalViewportInteractive && _sessionId != null;
+
   /// Forward a scroll gesture to the app that owns scrolling. Unlike a key,
   /// scrolling is a read: it must not claim the viewport, because the handoff
   /// resizes the host PTY to this device's grid and the reflow costs the top of
-  /// the scrollback. Returns false when this device is not the owner, and the
-  /// terminal view then scrolls its own buffer instead.
-  bool _sendTerminalScroll(String data) {
-    if (data.isEmpty || !_terminalViewportInteractive) return false;
-    final id = _sessionId;
-    if (id == null) return false;
+  /// the scrollback.
+  void _sendTerminalScroll(String data) {
+    if (data.isEmpty || !_ownsTerminalViewport()) return;
     _terminalInputBatcher.flush();
     _sendInputNow(data, source: 'scroll', claimViewport: false);
-    return true;
   }
 
   void _insertTerminalText(String text) {

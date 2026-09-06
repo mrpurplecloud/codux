@@ -34,9 +34,20 @@ class BackgroundKeepAlive {
 
   final MethodChannel _channel;
   final bool _supported;
+
+  /// What the app wants the service to be — the only authority. [_running] is
+  /// what the platform last reported. Every call records the desire and joins
+  /// the one worker that closes the gap, so interleaved start/stop calls can
+  /// never strand the service in the state the last *command* asked for
+  /// instead of the state the app wants.
+  bool _desired = false;
   bool _running = false;
-  int _commandSerial = 0;
-  Future<bool>? _startInFlight;
+  String _title = '';
+  String _body = '';
+
+  /// The single reconcile worker. Callers join it; they never send commands of
+  /// their own, so one intent is one platform request.
+  Future<void>? _worker;
 
   bool get isRunning => _running;
 
@@ -45,53 +56,63 @@ class BackgroundKeepAlive {
   /// app reconnects on resume.
   Future<bool> start({required String title, required String body}) async {
     if (!_supported) return false;
-    if (_running) return true;
-    final pending = _startInFlight;
-    if (pending != null) return pending;
-    final operation = _start(title: title, body: body);
-    _startInFlight = operation;
-    try {
-      return await operation;
-    } finally {
-      if (identical(_startInFlight, operation)) _startInFlight = null;
-    }
-  }
-
-  Future<bool> _start({required String title, required String body}) async {
-    final commandSerial = ++_commandSerial;
-    var started = false;
-    try {
-      started =
-          await _channel.invokeMethod<bool>('start', {
-            'title': title,
-            'body': body,
-          }) ??
-          false;
-    } on PlatformException catch (error) {
-      CoduxLog.warn(
-        '[codux-flutter-keepalive] start failed code=${error.code} message=${error.message ?? ''}',
-      );
-    } on MissingPluginException {
-      // A build without the native side cannot hold the process.
-    }
-    if (commandSerial != _commandSerial) return false;
-    _running = started;
+    _title = title;
+    _body = body;
+    _desired = true;
+    await _reconcile();
     return _running;
   }
 
   Future<void> stop() async {
-    if (!_supported || (!_running && _startInFlight == null)) return;
-    final commandSerial = ++_commandSerial;
-    _running = false;
+    if (!_supported) return;
+    _desired = false;
+    await _reconcile();
+  }
+
+  /// Join the reconcile worker, starting it if the last one has finished.
+  Future<void> _reconcile() => _worker ??= _drive()
+      // Cleared before the joined future completes, so the next desire starts
+      // a fresh worker rather than joining a finished one.
+      .whenComplete(() => _worker = null);
+
+  /// Send one command at a time until the desire is reached, re-reading it
+  /// after every command — a start that lands mid-stop (or the reverse) is
+  /// honoured by this same loop. A refused command ends the pass: the platform
+  /// said no, and retrying it here would only repeat the request.
+  Future<void> _drive() async {
+    while (_desired != _running) {
+      final target = _desired;
+      if (!await _invoke(target)) {
+        _running = !target;
+        return;
+      }
+      _running = target;
+    }
+  }
+
+  /// Send one command. Returns whether it was applied; `false` means the
+  /// platform refused and the caller must not keep retrying.
+  Future<bool> _invoke(bool target) async {
     try {
+      if (target) {
+        return await _channel.invokeMethod<bool>('start', {
+              'title': _title,
+              'body': _body,
+            }) ??
+            false;
+      }
       await _channel.invokeMethod<void>('stop');
+      return true;
     } on PlatformException catch (error) {
       CoduxLog.warn(
-        '[codux-flutter-keepalive] stop failed code=${error.code} message=${error.message ?? ''}',
+        '[codux-flutter-keepalive] ${target ? 'start' : 'stop'} failed '
+        'code=${error.code} message=${error.message ?? ''}',
       );
-      if (commandSerial == _commandSerial) _running = true;
+      return false;
     } on MissingPluginException {
-      // Nothing to stop on a build without the native side.
+      // A build without the native side can neither hold nor release the
+      // process.
+      return false;
     }
   }
 }

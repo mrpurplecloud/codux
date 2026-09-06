@@ -50,10 +50,10 @@ class SelfDrawnTerminalView extends StatefulWidget {
     required this.controller,
     required this.repaintSignal,
     required this.fontSize,
-    required this.canForwardScroll,
     this.onResize,
     this.onInput,
     this.onSendKey,
+    this.canForwardScroll,
     this.onSendScroll,
     this.onCursorMetrics,
     this.onSelectionChanged,
@@ -69,7 +69,6 @@ class SelfDrawnTerminalView extends StatefulWidget {
   /// re-reads the snapshot (gated by render generation) and repaints.
   final Listenable repaintSignal;
   final double fontSize;
-  final bool canForwardScroll;
   final void Function(int cols, int rows)? onResize;
 
   /// Raw typed text (batched by the host send path, same as the native view).
@@ -78,10 +77,14 @@ class SelfDrawnTerminalView extends StatefulWidget {
   /// Pre-encoded key bytes (enter, backspace, ...), sent immediately.
   final ValueChanged<String>? onSendKey;
 
-  /// Pre-encoded scroll bytes for an app that owns scrolling. Only sent while
-  /// [canForwardScroll] holds: scrolling is a read and must not take the
-  /// session from whoever is driving it, because the handoff reflows the host
-  /// grid.
+  /// Whether this device may forward scrolling to the app right now. Asked at
+  /// gesture time, never captured at build time: viewport ownership is released
+  /// (and taken by another device) between frames. Scrolling is a read and must
+  /// not take the session from whoever is driving it, because the handoff
+  /// reflows the host grid.
+  final bool Function()? canForwardScroll;
+
+  /// Pre-encoded scroll bytes for an app that owns scrolling.
   final ValueChanged<String>? onSendScroll;
   final ValueChanged<TerminalCursorMetrics?>? onCursorMetrics;
 
@@ -526,15 +529,9 @@ class _SelfDrawnTerminalViewState extends State<SelfDrawnTerminalView>
     // to the local buffer rather than taking the session away from its owner.
     if (mode != null) {
       if (mode.mouseTracking) {
-        if (widget.canForwardScroll &&
-            _forwardScroll(pixels, mode, useWheel: true)) {
-          return;
-        }
+        if (_forwardScroll(pixels, mode, useWheel: true)) return;
       } else if (mode.alternateScreen && mode.alternateScroll) {
-        if (widget.canForwardScroll &&
-            _forwardScroll(pixels, mode, useWheel: false)) {
-          return;
-        }
+        if (_forwardScroll(pixels, mode, useWheel: false)) return;
       }
     }
     widget.controller.scrollScreenPixels(
@@ -546,8 +543,12 @@ class _SelfDrawnTerminalViewState extends State<SelfDrawnTerminalView>
   }
 
   /// Returns whether the gesture belongs to the app; `false` (no session
-  /// snapshot or no sink) leaves it for the local buffer. Sub-cell movement
-  /// belongs to the app too — it stays accumulated until it makes a full tick.
+  /// snapshot, no sink, or a device that does not own the viewport) leaves it
+  /// for the local buffer. Ownership is asked before any movement is swallowed,
+  /// because sub-cell movement belongs to the app too — it stays accumulated
+  /// until it makes a full tick. Losing ownership drops what was accumulated:
+  /// that drag was handed to the local buffer, and replaying it at the app
+  /// later would scroll twice.
   bool _forwardScroll(
     double pixels,
     TerminalScreenInputMode mode, {
@@ -555,7 +556,12 @@ class _SelfDrawnTerminalViewState extends State<SelfDrawnTerminalView>
   }) {
     final snapshot = _snapshot;
     final send = widget.onSendScroll;
-    if (snapshot == null || send == null) return false;
+    final ownsViewport = widget.canForwardScroll;
+    if (snapshot == null || send == null || ownsViewport == null) return false;
+    if (!ownsViewport()) {
+      _wheelAccum = 0;
+      return false;
+    }
     _wheelAccum += pixels;
     // One tick per cell-height of drag; dragging down (positive) reveals older
     // content, i.e. a wheel-up / up-arrow.

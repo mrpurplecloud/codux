@@ -139,12 +139,37 @@ void main() {
 
       final starting = keepAlive.start(title: 'Codux', body: 'holding');
       await Future<void>.delayed(Duration.zero);
-      await keepAlive.stop();
+      final stopping = keepAlive.stop();
       startResult.complete(true);
-      await starting;
+      await Future.wait([starting, stopping]);
 
       expect(calls.map((call) => call.method).toList(), ['start', 'stop']);
       expect(keepAlive.isRunning, isFalse);
+    });
+
+    test('a start that lands during a stop is not lost', () async {
+      final firstStart = Completer<bool>();
+      var starts = 0;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            calls.add(call);
+            if (call.method != 'start') return null;
+            starts += 1;
+            return starts == 1 ? firstStart.future : true;
+          });
+      final keepAlive = BackgroundKeepAlive(channel: channel, supported: true);
+
+      // Background → foreground → background while the first start is still
+      // waiting on the platform: the app ends up wanting the service running.
+      final first = keepAlive.start(title: 'Codux', body: 'holding');
+      await Future<void>.delayed(Duration.zero);
+      final stopping = keepAlive.stop();
+      final second = keepAlive.start(title: 'Codux', body: 'holding');
+      firstStart.complete(true);
+      await Future.wait([first, second, stopping]);
+
+      expect(keepAlive.isRunning, isTrue);
+      expect(calls.last.method, 'start');
     });
 
     test('concurrent starts share one platform request', () async {
@@ -166,6 +191,29 @@ void main() {
       expect(await first, isTrue);
       expect(await second, isTrue);
       expect(keepAlive.isRunning, isTrue);
+    });
+
+    test('concurrent starts share one refusal too', () async {
+      final startResult = Completer<bool>();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            calls.add(call);
+            if (call.method == 'start') return startResult.future;
+            return null;
+          });
+      final keepAlive = BackgroundKeepAlive(channel: channel, supported: true);
+
+      final first = keepAlive.start(title: 'Codux', body: 'holding');
+      final second = keepAlive.start(title: 'Codux', body: 'holding');
+      await Future<void>.delayed(Duration.zero);
+      // Android refuses the foreground service (no permission, background
+      // start restriction): the joined caller must not re-ask.
+      startResult.complete(false);
+
+      expect(await first, isFalse);
+      expect(await second, isFalse);
+      expect(calls.map((call) => call.method).toList(), ['start']);
+      expect(keepAlive.isRunning, isFalse);
     });
   });
 }

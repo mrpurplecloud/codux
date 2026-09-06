@@ -44,7 +44,6 @@ void main() {
               controller: controller,
               repaintSignal: signal,
               fontSize: 14,
-              canForwardScroll: false,
               onResize: (cols, rows) {
                 reportedCols = cols;
                 reportedRows = rows;
@@ -108,7 +107,6 @@ void main() {
               controller: controller,
               repaintSignal: signal,
               fontSize: 14,
-              canForwardScroll: false,
               onSelectionChanged: (text) => selected = text,
             ),
           ),
@@ -166,7 +164,6 @@ void main() {
               controller: controller,
               repaintSignal: signal,
               fontSize: 14,
-              canForwardScroll: false,
             ),
           ),
         ),
@@ -218,8 +215,9 @@ void main() {
             controller: controller,
             repaintSignal: signal,
             fontSize: 14,
-            canForwardScroll: owned,
             onSendKey: (data) => forwarded.add('key:$data'),
+            // Ownership is asked at gesture time, not captured at build time.
+            canForwardScroll: () => owned,
             onSendScroll: (data) => forwarded.add('scroll:$data'),
           ),
         ),
@@ -240,9 +238,9 @@ void main() {
       greaterThan(0),
     );
 
+    // Ownership is regained without a rebuild: the view must ask the sender,
+    // not a bool captured when it was last built.
     owned = true;
-    await tester.pumpWidget(buildView());
-    await tester.pump();
     final localOffset = controller.screenSnapshot('session-1')!.displayOffset;
     await tester.drag(find.byType(SelfDrawnTerminalView), const Offset(0, 120));
     await tester.pump();
@@ -295,7 +293,7 @@ void main() {
               controller: controller,
               repaintSignal: signal,
               fontSize: 40,
-              canForwardScroll: false,
+              canForwardScroll: () => false,
               onSendScroll: forwarded.add,
             ),
           ),
@@ -318,6 +316,86 @@ void main() {
       greaterThan(0),
     );
     await gesture.up();
+  });
+
+  testWidgets('losing the viewport mid-gesture drops the accumulated drag', (
+    tester,
+  ) async {
+    final controller = RemoteTerminalOutputController();
+    addTearDown(controller.dispose);
+    controller.bindSession('session-1', requireBaseline: true);
+    controller.accept(
+      RelayEnvelope(
+        type: 'terminal.output',
+        sessionId: 'session-1',
+        payload: {
+          'data': _mouseTrackingHistory,
+          'screenData': '\u001b[2J\u001b[H\u001b[?1000hline-0119',
+          'buffer': true,
+          'offset': 0,
+          'bufferLength': 1200,
+          'tail': true,
+          'outputSeq': 1,
+        },
+      ),
+      activeSessionId: 'session-1',
+    );
+
+    final signal = ValueNotifier<int>(0);
+    addTearDown(signal.dispose);
+    final forwarded = <String>[];
+    var owned = true;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 320,
+            height: 480,
+            child: SelfDrawnTerminalView(
+              sessionId: 'session-1',
+              controller: controller,
+              // 14 * 1.3 = one 18.2px cell.
+              repaintSignal: signal,
+              fontSize: 14,
+              canForwardScroll: () => owned,
+              onSendScroll: forwarded.add,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    // The app owns scrolling, so a full-cell drag would be forwarded.
+    expect(
+      controller.screenSnapshot('session-1')!.inputMode.mouseTracking,
+      isTrue,
+    );
+
+    final origin = tester.getCenter(find.byType(SelfDrawnTerminalView));
+    final gesture = await tester.startGesture(origin);
+    // First move is eaten by the touch slop; the second is owned but under one
+    // cell, so it is held for the app until it makes a full tick.
+    await gesture.moveBy(const Offset(0, 30));
+    await tester.pump();
+    await gesture.moveBy(const Offset(0, 12));
+    await tester.pump();
+    expect(forwarded, isEmpty);
+    // The viewport is taken away mid-gesture; this part scrolls locally.
+    owned = false;
+    await gesture.moveBy(const Offset(0, 20));
+    await tester.pump();
+    // Owned again: what the local buffer consumed must not be replayed at the
+    // app, so this sub-cell movement still owes a tick on its own — with the
+    // earlier 12px kept, 12 + 10 would cross the 18.2px cell and fire.
+    owned = true;
+    await gesture.moveBy(const Offset(0, 10));
+    await tester.pump();
+    await gesture.up();
+
+    expect(forwarded, isEmpty);
   });
 }
 
