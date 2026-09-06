@@ -62,6 +62,9 @@ pub struct RemoteControllerTarget {
     pub node_id: String,
     pub ticket: String,
     pub relay_authentication: String,
+    /// Addresses this desktop has reached the host on before, dialled alongside
+    /// the ticket's own. Empty for a first connection and for pairing.
+    pub direct_addrs: Vec<String>,
 }
 
 /// A pairing ticket pasted by the user: the host emits a `codux://pair?payload=`
@@ -420,7 +423,7 @@ impl RemoteController {
                 ticket: target.ticket.clone(),
                 relay_authentication: target.relay_authentication.clone(),
             }],
-            direct_addrs: Vec::new(),
+            direct_addrs: target.direct_addrs.clone(),
         };
         let message_inner = Arc::clone(&inner);
         let transport = RemoteTransportFactory::connect_controller(
@@ -444,24 +447,9 @@ impl RemoteController {
         host: &SavedRemoteHost,
         on_state: RemoteTransportStateHandler,
     ) -> Result<Self, String> {
-        let iroh = host
-            .transports
-            .iter()
-            .find(|transport| transport.kind == REMOTE_TRANSPORT_IROH)
+        let target = saved_host_target(host)
             .ok_or_else(|| "Saved host has no iroh transport.".to_string())?;
-        Self::connect(
-            &RemoteControllerTarget {
-                host_id: host.host_id.clone(),
-                device_id: host.device_id.clone(),
-                device_token: host.device_token.clone(),
-                relay_url: iroh.relay_url.clone(),
-                node_id: iroh.node_id.clone(),
-                ticket: String::new(),
-                relay_authentication: iroh.relay_authentication.clone(),
-            },
-            on_state,
-        )
-        .await
+        Self::connect(&target, on_state).await
     }
 
     /// Drive the pairing handshake against a host that has an active pairing:
@@ -492,6 +480,8 @@ impl RemoteController {
                 node_id: iroh.node_id.clone(),
                 ticket: iroh.ticket.clone(),
                 relay_authentication: iroh.relay_authentication.clone(),
+                // Pairing is the first contact: there is nothing remembered yet.
+                direct_addrs: Vec::new(),
             },
             on_state,
         )
@@ -1263,6 +1253,54 @@ impl crate::host_browser::HostBrowserController for RemoteController {
     }
 }
 
+/// Read one persistable transport from a wire candidate.
+///
+/// Shared by pairing and by the `host.info` refresh so the two cannot disagree
+/// about which fields survive. `directAddrs` is deliberately not read from the
+/// wire: it is this desktop's own record of where it reached the host, and no
+/// host gets to overwrite it.
+pub(super) fn saved_transport_from_json(item: &Value) -> SavedRemoteTransport {
+    let field = |key: &str| {
+        item.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    SavedRemoteTransport {
+        kind: item
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or(REMOTE_TRANSPORT_IROH)
+            .to_string(),
+        node_id: field("nodeId"),
+        relay_url: field("relayUrl"),
+        relay_authentication: field("relayAuthentication"),
+        // Keep the ticket: it is the only field carrying the host's direct
+        // addresses, and dropping it left a saved host reachable only through
+        // its relay.
+        ticket: field("ticket"),
+        direct_addrs: Vec::new(),
+    }
+}
+
+/// The dial target for a saved host, or `None` when it has no iroh transport.
+fn saved_host_target(host: &SavedRemoteHost) -> Option<RemoteControllerTarget> {
+    let iroh = host
+        .transports
+        .iter()
+        .find(|transport| transport.kind == REMOTE_TRANSPORT_IROH)?;
+    Some(RemoteControllerTarget {
+        host_id: host.host_id.clone(),
+        device_id: host.device_id.clone(),
+        device_token: host.device_token.clone(),
+        relay_url: iroh.relay_url.clone(),
+        node_id: iroh.node_id.clone(),
+        ticket: iroh.ticket.clone(),
+        relay_authentication: iroh.relay_authentication.clone(),
+        direct_addrs: iroh.direct_addrs.clone(),
+    })
+}
+
 /// Build the persistable host record from a `pairing.confirmed` payload.
 fn saved_host_from_confirmed(device_id: &str, payload: &Value) -> SavedRemoteHost {
     let field = |key: &str| {
@@ -1278,28 +1316,7 @@ fn saved_host_from_confirmed(device_id: &str, payload: &Value) -> SavedRemoteHos
         .map(|items| {
             items
                 .iter()
-                .map(|item| SavedRemoteTransport {
-                    kind: item
-                        .get("kind")
-                        .and_then(Value::as_str)
-                        .unwrap_or(REMOTE_TRANSPORT_IROH)
-                        .to_string(),
-                    node_id: item
-                        .get("nodeId")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    relay_url: item
-                        .get("relayUrl")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    relay_authentication: item
-                        .get("relayAuthentication")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                })
+                .map(saved_transport_from_json)
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -1801,6 +1818,7 @@ mod e2e {
                 node_id: String::new(),
                 ticket: host.iroh_endpoint_ticket().expect("ticket"),
                 relay_authentication: String::new(),
+                direct_addrs: Vec::new(),
             };
 
             // Controller A: create the session and verify output flows.
@@ -2367,6 +2385,66 @@ mod tests {
         assert_eq!(saved.transports.len(), 1);
         assert_eq!(saved.transports[0].node_id, "node-x");
         assert_eq!(saved.transports[0].relay_url, "https://relay");
+    }
+
+    #[test]
+    fn saved_host_keeps_the_endpoint_ticket() {
+        // The ticket is the only thing carrying the host's DIRECT addresses.
+        // Dropping it here leaves a saved host reachable only through its relay,
+        // so a relay outage strands a desktop that could have dialled the host
+        // straight over the LAN or a virtual network.
+        let payload = json!({
+            "hostId": "host-1",
+            "token": "device-token-1",
+            "transports": [{
+                "kind": "iroh",
+                "nodeId": "node-x",
+                "relayUrl": "https://relay",
+                "ticket": "endpoint-ticket-bytes",
+            }],
+        });
+
+        let saved = saved_host_from_confirmed("dev-1", &payload);
+
+        assert_eq!(saved.transports[0].ticket, "endpoint-ticket-bytes");
+    }
+
+    #[test]
+    fn saved_transport_reads_records_written_before_it_had_a_ticket() {
+        let legacy = json!({
+            "kind": "iroh",
+            "nodeId": "node-x",
+            "relayUrl": "https://relay",
+        });
+
+        let saved: SavedRemoteTransport = serde_json::from_value(legacy).expect("legacy record");
+
+        assert!(saved.ticket.is_empty());
+        assert!(saved.direct_addrs.is_empty());
+    }
+
+    #[test]
+    fn a_saved_host_dials_its_ticket_and_remembered_addresses() {
+        let host = SavedRemoteHost {
+            device_id: "dev-1".to_string(),
+            host_id: "host-1".to_string(),
+            host_name: String::new(),
+            device_token: "token".to_string(),
+            platform: String::new(),
+            transports: vec![SavedRemoteTransport {
+                kind: REMOTE_TRANSPORT_IROH.to_string(),
+                node_id: "node-x".to_string(),
+                relay_url: "https://relay".to_string(),
+                relay_authentication: String::new(),
+                ticket: "endpoint-ticket-bytes".to_string(),
+                direct_addrs: vec!["10.8.0.3:41234".to_string()],
+            }],
+        };
+
+        let target = saved_host_target(&host).expect("target");
+
+        assert_eq!(target.ticket, "endpoint-ticket-bytes");
+        assert_eq!(target.direct_addrs, vec!["10.8.0.3:41234".to_string()]);
     }
 
     #[test]

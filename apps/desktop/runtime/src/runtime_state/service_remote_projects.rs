@@ -209,7 +209,7 @@ impl RuntimeService {
         epoch: u64,
         controller: &crate::remote::RemoteController,
     ) -> Result<(), String> {
-        let info = controller.host_info()?;
+        let info = self.remote_controllers.host_info_via(device_id, controller)?;
         if self
             .remote_controllers
             .live_connection_epoch(device_id, controller)
@@ -464,7 +464,10 @@ impl RuntimeService {
             })
             .ok();
         match controller {
-            Some(controller) => match controller.host_info() {
+            Some(controller) => match self
+                .remote_controllers
+                .host_info_via(device_id, &controller)
+            {
                 Ok(info) if host_info_shares_projects(&info) => match self
                     .ensure_remote_project_catalog_ready(device_id, &controller)
                 {

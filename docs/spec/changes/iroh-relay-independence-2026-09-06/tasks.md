@@ -96,6 +96,27 @@ rather than by agreement.
 - [x] 5.5 Update `docs/protocol.md` with the added message and the capability that gates it, including its version note. Documented the field's meaning and the two safety rules instead — the wire format is unchanged, so there is no version note to add.
 - [x] 5.6 Verify all four peer-version combinations and record the observed behaviour: new host with old controller, old host with new controller, new with new, old with old. **New host + old controller:** the field was always sent and previously ignored; unchanged. **Old host + new controller:** a desktop host has sent it since `v1.8.0` (commit `25a93192`, 2026-06-10); an older desktop host, and any headless host predating this change, simply omit it and leave stored candidates untouched. **New + new:** stored addresses follow the host. **Old + old:** untouched.
 
+## 6. Desktop Controller Keeps The Addresses It Needs
+
+**What to build:** A desktop controller that can reach a saved host over a direct path when the relay is gone — the same capability tickets 1, 4, and 5 gave the phone.
+
+**Blocked by:** 1, 4, 5 — this is those tickets applied to the second controller.
+
+**Status:** done
+
+**Why this exists.** Tickets 4 and 5 were written as if there were one controller. There are two. Lowering the relay gate let the desktop reach the dial loop, but it had nothing to dial: `SavedRemoteTransport` had no ticket field at all, so a saved host was stored as node id + relay url and nothing else. Every direct address the host published at pairing time was parsed and thrown away. With the relay down, the desktop had only mDNS, and off-LAN it would report `no relay home, direct addresses unreachable` — the failure the earlier tickets were supposed to remove.
+
+- [x] 6.1 Add failing tests: a confirmed pairing keeps its endpoint ticket; a saved host dials that ticket and its remembered addresses; a record written before either field existed still loads.
+- [x] 6.2 Store the ticket and a bounded direct-address list on the saved transport, both `#[serde(default)]` so existing records load unchanged.
+- [x] 6.3 Keep the ticket when parsing `pairing.confirmed`, and dial it — `connect_saved` previously hardcoded an empty one, which was honest about the store but wrong about the host.
+- [x] 6.4 Remember the address of a working direct path, promoting on reuse and ageing out the unused, matching the mobile policy.
+- [x] 6.5 Adopt the candidates the host reports in `host.info`, refusing empty and undialable reports and carrying the remembered addresses across.
+- [x] 6.6 Put the adoption behind the manager's own `host_info` entry points rather than at each call site. The manager owns the store, so "saved addresses follow the host" is its invariant; every caller refreshes for free and a caller added later cannot forget to.
+
+**Reconnect deliberately unchanged.** The desktop's reconnect loop was checked against ticket 2 and needs none of it: it is a single loop with a monotonic counter, so it has no double-counting, and its 60s ceiling on a mains-powered workstation carries none of the battery cost that justified terminating on the phone. Not extending scope without evidence.
+
+**Known trade-off.** The address write happens inline on the transport's state callback. It is bounded — only a genuinely new address writes, and the list is capped — but a slow disk would briefly stall that callback. Moving it off-thread would need an owner for the queue; not worth it until a real stall is measured.
+
 ## Self-review corrections
 
 A two-axis review (standards + spec) after the five tickets found four real

@@ -8,8 +8,11 @@
 //! backoff reconnect loop is spawned. The desktop polls [`link_states`] to drive
 //! the per-project connection badge and to re-attach terminals on recovery.
 
-use super::controller::{RemoteController, new_device_id, parse_pairing_ticket};
-use super::controller_store::{RemoteControllerStore, SavedRemoteHost};
+use super::controller::{
+    RemoteController, new_device_id, parse_pairing_ticket, saved_transport_from_json,
+};
+use super::controller_store::{RemoteControllerStore, SavedRemoteHost, SavedRemoteTransport};
+use codux_protocol::REMOTE_TRANSPORT_IROH;
 use codux_remote_transport::RemoteTransportStateHandler;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -74,6 +77,23 @@ impl ControllerLinkPath {
     }
 }
 
+/// The peer address a `connected:path=direct;addr=…` state reports.
+///
+/// Only direct paths yield one worth keeping: a relay path's address is the
+/// relay's own, which the saved candidate already names and which says nothing
+/// about where the host is.
+fn direct_addr_from_transport_state(state: &str) -> Option<&str> {
+    let detail = state.strip_prefix("connected:path=")?;
+    let mut parts = detail.split(';');
+    if parts.next()? != "direct" {
+        return None;
+    }
+    parts
+        .find_map(|part| part.strip_prefix("addr="))
+        .map(str::trim)
+        .filter(|addr| !addr.is_empty())
+}
+
 /// Shared manager state captured (weakly) by transport callbacks and the
 /// reconnect loop, so a dropped link can evict + reconnect without a reference
 /// back to the owning `RuntimeService`.
@@ -131,6 +151,105 @@ impl ManagerShared {
     fn clear_path(&self, device_id: &str) {
         if let Ok(mut paths) = self.paths.lock() {
             paths.remove(device_id);
+        }
+    }
+
+    /// Record the address a live direct path is using, so a later dial can try
+    /// it even after the host moved away from what its ticket recorded.
+    ///
+    /// Runs on every path report of a live link, so the common case is "already
+    /// the most recent" — `with_direct_addr` reports that as `None` and nothing
+    /// is written.
+    fn remember_direct_addr(&self, device_id: &str, addr: &str) {
+        let Some(host) = self.store.find(device_id) else {
+            return;
+        };
+        let mut transports = host.transports.clone();
+        let Some(slot) = transports
+            .iter_mut()
+            .find(|transport| transport.kind == REMOTE_TRANSPORT_IROH)
+        else {
+            return;
+        };
+        let Some(updated) = slot.with_direct_addr(addr) else {
+            return;
+        };
+        *slot = updated;
+        self.persist_addresses(
+            SavedRemoteHost { transports, ..host },
+            "remembered_direct_addr",
+        );
+    }
+
+    /// Adopt the dial candidates the host reported in `host.info`.
+    ///
+    /// The host rebuilds these from its live endpoint on every reply, so this is
+    /// where a saved host's addresses stop being a pairing-time snapshot. An
+    /// empty report is not an instruction to forget — an older host omits the
+    /// field entirely, and discarding a working candidate on the strength of
+    /// silence would strand the device.
+    ///
+    /// The remembered direct addresses are carried across: the two sources are
+    /// independent fallbacks and neither may erase the other.
+    fn adopt_reported_transports(&self, device_id: &str, info: &serde_json::Value) {
+        let Some(reported) = info.get("transports").and_then(|value| value.as_array()) else {
+            return;
+        };
+        let mut next: Vec<SavedRemoteTransport> = reported
+            .iter()
+            .map(saved_transport_from_json)
+            .filter(|transport| {
+                codux_remote_transport::is_dialable_iroh_transport(
+                    &transport.kind,
+                    &transport.ticket,
+                    &transport.node_id,
+                    &transport.relay_url,
+                )
+            })
+            .collect();
+        if next.is_empty() {
+            return;
+        }
+        let Some(host) = self.store.find(device_id) else {
+            return;
+        };
+        for transport in &mut next {
+            if let Some(previous) = host
+                .transports
+                .iter()
+                .find(|item| item.kind == transport.kind)
+            {
+                transport.direct_addrs = previous.direct_addrs.clone();
+            }
+        }
+        if next == host.transports {
+            return;
+        }
+        self.persist_addresses(
+            SavedRemoteHost {
+                transports: next,
+                ..host
+            },
+            "adopted_host_transports",
+        );
+    }
+
+    /// Persist an address update, which is an optimisation rather than part of
+    /// any connection.
+    ///
+    /// A failure here must not break the live link — the addresses in memory are
+    /// still correct and the connection using them is unaffected — but it must
+    /// not vanish either: the next cold start would silently fall back to stale
+    /// addresses with no record of why.
+    fn persist_addresses(&self, host: SavedRemoteHost, reason: &str) {
+        let device_id = host.device_id.clone();
+        if let Err(error) = self.store.upsert(host) {
+            crate::runtime_trace::runtime_trace(
+                "remote",
+                &format!(
+                    "controller_addresses_not_persisted device={device_id} reason={reason} error={error}"
+                ),
+            );
         }
     }
 
@@ -313,6 +432,9 @@ impl ManagerShared {
                 }
                 if let Some(path) = ControllerLinkPath::from_transport_state(&state) {
                     shared.set_path(&device_id, path);
+                }
+                if let Some(addr) = direct_addr_from_transport_state(&state) {
+                    shared.remember_direct_addr(&device_id, addr);
                 }
             });
         })
@@ -741,6 +863,45 @@ impl RemoteControllerManager {
             .unwrap_or_default()
     }
 
+    /// Fetch a host's identity and capabilities, adopting the dial candidates it
+    /// reports along the way.
+    ///
+    /// The adoption lives here, not at the call sites, because "saved addresses
+    /// follow the host" is this manager's invariant: it owns the store. Every
+    /// caller that asks a host who it is refreshes the record for free, and a
+    /// caller added later cannot forget to.
+    pub fn host_info(&self, device_id: &str) -> Result<serde_json::Value, String> {
+        let info = self.controller_for(device_id)?.host_info()?;
+        self.shared.adopt_reported_transports(device_id, &info);
+        Ok(info)
+    }
+
+    /// [`Self::host_info`] for a caller that already holds the controller it
+    /// wants to ask — an epoch-guarded path, where re-resolving the device could
+    /// hand back a different connection than the one being validated.
+    pub fn host_info_via(
+        &self,
+        device_id: &str,
+        controller: &RemoteController,
+    ) -> Result<serde_json::Value, String> {
+        let info = controller.host_info()?;
+        self.shared.adopt_reported_transports(device_id, &info);
+        Ok(info)
+    }
+
+    /// [`Self::host_info`] for callers that must block on the connect.
+    pub fn host_info_blocking(
+        &self,
+        device_id: &str,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, String> {
+        let info = self
+            .controller_for_blocking(device_id, timeout)?
+            .host_info()?;
+        self.shared.adopt_reported_transports(device_id, &info);
+        Ok(info)
+    }
+
     pub fn controller_for(&self, device_id: &str) -> Result<Arc<RemoteController>, String> {
         if let Ok(connections) = self.shared.connections.lock()
             && let Some(controller) = connections
@@ -873,6 +1034,134 @@ impl RemoteControllerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn saved_host_with(transport: SavedRemoteTransport) -> SavedRemoteHost {
+        SavedRemoteHost {
+            device_id: "dev-1".to_string(),
+            host_id: "host-1".to_string(),
+            host_name: String::new(),
+            device_token: "token".to_string(),
+            platform: String::new(),
+            transports: vec![transport],
+        }
+    }
+
+    fn iroh_transport() -> SavedRemoteTransport {
+        SavedRemoteTransport {
+            kind: REMOTE_TRANSPORT_IROH.to_string(),
+            node_id: "node-x".to_string(),
+            relay_url: "https://relay.example".to_string(),
+            relay_authentication: String::new(),
+            ticket: "ticket-v1".to_string(),
+            direct_addrs: Vec::new(),
+        }
+    }
+
+    fn manager_with(host: SavedRemoteHost) -> RemoteControllerManager {
+        let dir = std::env::temp_dir().join(format!(
+            "codux-controller-manager-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("support dir");
+        let manager = RemoteControllerManager::new(dir);
+        manager.shared.store.upsert(host).expect("seed host");
+        manager
+    }
+
+    #[test]
+    fn direct_addr_is_read_only_from_a_direct_path() {
+        assert_eq!(
+            direct_addr_from_transport_state("connected:path=direct;addr=10.8.0.3:41234"),
+            Some("10.8.0.3:41234")
+        );
+        // A relay path's address is the relay's own and says nothing about
+        // where the host is.
+        assert_eq!(
+            direct_addr_from_transport_state(
+                "connected:path=relay;addr=https://relay.example;relayUrl=https://relay.example"
+            ),
+            None
+        );
+        assert_eq!(direct_addr_from_transport_state("connected"), None);
+        assert_eq!(
+            direct_addr_from_transport_state("connected:path=direct"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_working_direct_path_is_remembered_and_promoted() {
+        let manager = manager_with(saved_host_with(iroh_transport()));
+
+        manager
+            .shared
+            .remember_direct_addr("dev-1", "10.8.0.3:41234");
+        manager
+            .shared
+            .remember_direct_addr("dev-1", "192.168.1.5:41234");
+
+        let saved = manager.shared.store.find("dev-1").expect("host");
+        assert_eq!(
+            saved.transports[0].direct_addrs,
+            vec![
+                "192.168.1.5:41234".to_string(),
+                "10.8.0.3:41234".to_string()
+            ],
+            "most recent first, no duplicates"
+        );
+    }
+
+    #[test]
+    fn a_reported_candidate_set_is_adopted_and_keeps_remembered_addresses() {
+        let mut transport = iroh_transport();
+        transport.direct_addrs = vec!["10.8.0.3:41234".to_string()];
+        let manager = manager_with(saved_host_with(transport));
+
+        manager.shared.adopt_reported_transports(
+            "dev-1",
+            &serde_json::json!({
+                "transports": [{
+                    "kind": "iroh",
+                    "nodeId": "node-x",
+                    "relayUrl": "",
+                    "ticket": "ticket-v2",
+                }],
+            }),
+        );
+
+        let saved = manager.shared.store.find("dev-1").expect("host");
+        assert_eq!(saved.transports[0].ticket, "ticket-v2", "adopted");
+        assert_eq!(
+            saved.transports[0].direct_addrs,
+            vec!["10.8.0.3:41234".to_string()],
+            "the two address sources are independent; neither may erase the other"
+        );
+    }
+
+    #[test]
+    fn silence_and_undialable_reports_leave_the_record_alone() {
+        let manager = manager_with(saved_host_with(iroh_transport()));
+
+        // No field at all: an older host build.
+        manager
+            .shared
+            .adopt_reported_transports("dev-1", &serde_json::json!({}));
+        // Present but empty.
+        manager
+            .shared
+            .adopt_reported_transports("dev-1", &serde_json::json!({ "transports": [] }));
+        // Present but carrying nothing the dial path would accept — adopting
+        // this would strand the device until it is re-paired.
+        manager.shared.adopt_reported_transports(
+            "dev-1",
+            &serde_json::json!({ "transports": [{ "kind": "iroh", "nodeId": "node-x" }] }),
+        );
+
+        let saved = manager.shared.store.find("dev-1").expect("host");
+        assert_eq!(saved.transports[0].ticket, "ticket-v1");
+        assert_eq!(saved.transports[0].relay_url, "https://relay.example");
+    }
 
     fn manager(name: &str) -> RemoteControllerManager {
         RemoteControllerManager::new(

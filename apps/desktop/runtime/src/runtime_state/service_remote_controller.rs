@@ -183,9 +183,7 @@ impl RuntimeService {
 
     /// Fetch a remote host's identity/capabilities (also a reachability check).
     pub fn remote_host_info(&self, device_id: &str) -> Result<serde_json::Value, String> {
-        self.remote_controllers
-            .controller_for(device_id)?
-            .host_info()
+        self.remote_controllers.host_info(device_id)
     }
 
     pub fn remote_host_info_blocking(
@@ -193,8 +191,7 @@ impl RuntimeService {
         device_id: &str,
     ) -> Result<serde_json::Value, String> {
         self.remote_controllers
-            .controller_for_blocking(device_id, REMOTE_CONNECT_TIMEOUT)?
-            .host_info()
+            .host_info_blocking(device_id, REMOTE_CONNECT_TIMEOUT)
     }
 
     pub fn remote_host_metrics(
