@@ -38,6 +38,33 @@ fields and missing fields. For terminal recovery, v3.2 hosts advertise:
 - `terminalViewport.ownership`, `state`, `scroll`, `keyframe`.
 - `domains.hostMetrics` for pull-based remote host resource metrics.
 
+## Host Transport Addresses
+
+`host.info.transports` carries the host's current dial candidates. The host
+recomputes them from its live endpoint on every reply, so the set reflects where
+the host is now, not where it was when the controller paired with it.
+
+Controllers should replace their stored candidates for that host with the
+reported set. A pairing ticket is a snapshot taken once and never refreshed; a
+host that has since changed network, address, or gained an interface is
+unreachable through it, and adopting each report is what keeps stored addresses
+following the host.
+
+Two rules keep this safe:
+
+- An empty or absent `transports` is not an instruction to forget. Older hosts
+  omit it, and discarding a working candidate set on the strength of silence
+  would strand the device. Controllers keep what they have.
+- A candidate carrying an endpoint ticket is dialable even with an empty
+  `relayUrl`. The ticket serialises the host's direct addresses, so a host with
+  no reachable relay is still reachable on a shared LAN or virtual network.
+  Controllers must not require a relay URL to accept a candidate.
+
+Controllers may additionally remember addresses they have successfully reached a
+host on and dial them alongside the reported set. That is a purely local
+fallback, requires no host support, and is independent of this field — neither
+source may erase the other.
+
 ## Host Metrics
 
 `host.metrics` is a controller-initiated request/reply over the same transport

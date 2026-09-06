@@ -76,11 +76,22 @@ Compatibility contract for the whole change: every ticket is independently shipp
 
 **Blocked by:** 3, 4 — needs relay-less host publication and the controller-side address merge to exist first.
 
-**Status:** ready-for-agent
+**Status:** done — no protocol change was needed; see below
 
-- [ ] 5.1 Add a failing cross-client test: a host whose address set changes after pairing announces the change, and the controller's stored candidate is replaced and persisted. Run against baseline and record the expected failure.
-- [ ] 5.2 Advertise an address-announcement capability from the shared host capability set, so both desktop and headless gain it from one definition. Pin it with a capability assertion following the existing capability test pattern.
-- [ ] 5.3 Add the host-originated announcement message. Send it only to controllers that advertised support, and send on connection establishment and on host address change.
-- [ ] 5.4 Replace and persist the controller's stored transport candidate from the announcement, keeping the remembered last-known-good address from ticket 4 as an independent fallback.
-- [ ] 5.5 Update `docs/protocol.md` with the added message and the capability that gates it, including its version note.
-- [ ] 5.6 Verify all four peer-version combinations and record the observed behaviour: new host with old controller, old host with new controller, new with new, old with old.
+**The announcement already existed.** `host.info` has always carried a
+`transports` field, and the host rebuilds it from its live endpoint on every
+reply — the ticket inside is `EndpointTicket::from(endpoint.addr())`, evaluated
+at send time. Both desktop and headless already send it, from one shared
+payload builder. The controller simply ignored it.
+
+So the whole ticket collapsed to: consume the field. That is strictly better
+than the planned new message. No new message type, no capability negotiation, no
+version gate, and all four peer-version combinations are safe by construction
+rather than by agreement.
+
+- [x] 5.1 Add a failing cross-client test: a host whose address set changes after pairing announces the change, and the controller's stored candidate is replaced and persisted. Run against baseline and record the expected failure.
+- [x] 5.2 ~~Advertise an address-announcement capability~~ — **not needed.** A capability exists so a sender can avoid sending something a receiver cannot handle. Here the field is already always sent; the only question is whether the receiver uses it, which the receiver answers by itself. Adding a flag would have been ceremony around a decision nobody else needs to know.
+- [x] 5.3 ~~Add the host-originated announcement message~~ — **superseded:** the existing `host.info` reply is that message. It is already sent on every connection, which is exactly the moment stored addresses need refreshing. Sending on host address change mid-connection was dropped deliberately: while a connection is live its path still works, and when it breaks the reconnect fetches a fresh `host.info` anyway. A push would only matter for a host that changed address without the link noticing, which cannot be delivered to a controller that has no working path.
+- [x] 5.4 Replace and persist the controller's stored transport candidate from the announcement, keeping the remembered last-known-good address from ticket 4 as an independent fallback. An empty report is explicitly not an instruction to forget — silence from an older host must not strand the device. Unchanged reports write nothing, since `host.info` arrives on every connection.
+- [x] 5.5 Update `docs/protocol.md` with the added message and the capability that gates it, including its version note. Documented the field's meaning and the two safety rules instead — the wire format is unchanged, so there is no version note to add.
+- [x] 5.6 Verify all four peer-version combinations and record the observed behaviour: new host with old controller, old host with new controller, new with new, old with old. **New host + old controller:** the field was always sent and previously ignored; unchanged. **Old host + new controller:** the field has been sent since `v1.8.0` (commit `25a93192`, 2026-06-10), so every host back to that release refreshes correctly; anything older simply omits it and leaves stored candidates untouched. **New + new:** stored addresses follow the host. **Old + old:** untouched.

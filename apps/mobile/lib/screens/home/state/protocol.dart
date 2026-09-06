@@ -104,6 +104,10 @@ extension _HomePageProtocol on HomeController {
                 hostName: payload['name']?.toString(),
               );
             }
+            // The host recomputes these from its live endpoint every time, so
+            // this is where stored addresses stop being a pairing-time snapshot
+            // and start following the host.
+            _refreshStoredTransports(target, payload['transports']);
           }
           _markRemoteProtocolReady(
             force:

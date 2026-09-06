@@ -72,6 +72,33 @@ class RemoteTransportCandidate {
     if (relayAuthentication.isNotEmpty)
       'relayAuthentication': relayAuthentication,
   };
+
+  // A value, so a freshly reported candidate set can be compared against the
+  // stored one. The host reports its addresses on every connection, and the
+  // common case is that nothing changed — without this, every connection would
+  // look like a change and rewrite the device store.
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RemoteTransportCandidate &&
+          other.kind == kind &&
+          other.role == role &&
+          other.url == url &&
+          other.nodeId == nodeId &&
+          other.relayUrl == relayUrl &&
+          other.ticket == ticket &&
+          other.relayAuthentication == relayAuthentication;
+
+  @override
+  int get hashCode => Object.hash(
+    kind,
+    role,
+    url,
+    nodeId,
+    relayUrl,
+    ticket,
+    relayAuthentication,
+  );
 }
 
 List<String> _stringListFromJson(Object? value) {

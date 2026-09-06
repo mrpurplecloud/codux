@@ -100,6 +100,69 @@ class RemoteDeviceController {
     );
   }
 
+  /// Adopt the dial candidates [deviceId] just reported for itself.
+  ///
+  /// A stored candidate is a snapshot from pairing time; the host recomputes
+  /// its own from its live endpoint on every `host.info`. Taking the reported
+  /// set is how stored addresses follow a host that moved, instead of freezing
+  /// at whatever was true when the two were first paired.
+  ///
+  /// An empty report changes nothing: a host that told us nothing has not told
+  /// us to forget what we have, and discarding a working candidate set on the
+  /// strength of silence would strand the device. Reports `updatedDevice: null`
+  /// when nothing changed, so the caller can skip a disk write — `host.info`
+  /// arrives on every connection and usually says the same thing.
+  ///
+  /// Other stored fields, including the remembered direct addresses, are left
+  /// untouched: the two address sources are independent fallbacks and neither
+  /// may erase the other.
+  RemoteDeviceUpdateResult replaceTransports({
+    required List<StoredDevice> devices,
+    required StoredDevice? activeDevice,
+    required String deviceId,
+    required List<RemoteTransportCandidate> transports,
+  }) {
+    if (transports.isEmpty) {
+      return RemoteDeviceUpdateResult(
+        state: preserveActive(devices: devices, activeDevice: activeDevice),
+        updatedDevice: null,
+      );
+    }
+    StoredDevice? updated;
+    final next = devices.map((item) {
+      if (item.deviceId != deviceId) return item;
+      if (_sameTransports(item.transports, transports)) return item;
+      updated = item.copyWith(transports: transports);
+      return updated!;
+    }).toList();
+    if (updated == null) {
+      return RemoteDeviceUpdateResult(
+        state: preserveActive(devices: devices, activeDevice: activeDevice),
+        updatedDevice: null,
+      );
+    }
+    return RemoteDeviceUpdateResult(
+      state: RemoteDeviceState(
+        devices: List.unmodifiable(next),
+        activeDevice: activeDevice?.deviceId == deviceId
+            ? updated
+            : _deviceById(next, activeDevice?.deviceId) ?? _firstOrNull(next),
+      ),
+      updatedDevice: updated,
+    );
+  }
+
+  bool _sameTransports(
+    List<RemoteTransportCandidate> a,
+    List<RemoteTransportCandidate> b,
+  ) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i += 1) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
   /// Record that [deviceId] was just reached at [addr], so the next dial can try
   /// it alongside the addresses frozen into the pairing ticket.
   ///

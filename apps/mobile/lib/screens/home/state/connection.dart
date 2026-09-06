@@ -164,6 +164,30 @@ extension _HomePageConnection on HomeController {
     }
   }
 
+  /// Adopt the dial candidates the host just reported for itself, so the stored
+  /// ones track where it actually is rather than where it was at pairing time.
+  ///
+  /// Silently does nothing when the host reported none — an older host, or one
+  /// with nothing to say. Keeping what we have is strictly safer than
+  /// discarding a working candidate set on the strength of silence.
+  void _refreshStoredTransports(StoredDevice target, Object? value) {
+    final reported = remoteTransportCandidatesFromJson(value);
+    if (reported.isEmpty) return;
+    final result = _deviceController.replaceTransports(
+      devices: _devices,
+      activeDevice: _activeDevice ?? target,
+      deviceId: target.deviceId,
+      transports: reported,
+    );
+    if (result.updatedDevice == null) return;
+    CoduxLog.info(
+      '[codux-flutter-remote] host transports refreshed device=${target.deviceId} count=${reported.length}',
+    );
+    _devices = result.state.devices;
+    _activeDevice = result.state.activeDevice;
+    unawaited(_storage.saveDevices(result.state.devices));
+  }
+
   /// Remember the address a live direct path is using, so a later dial can try
   /// it even if the host has moved away from what the pairing ticket recorded.
   ///
