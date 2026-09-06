@@ -110,7 +110,8 @@ impl AIRuntimeBridge {
 
     pub fn prepare(&self) -> Result<(), String> {
         self.stage_assets()?;
-        self.strip_managed_hook_configs("prepare")
+        self.strip_managed_hook_configs("prepare");
+        Ok(())
     }
 
     /// The runtime is non-intrusive by design: it never installs hooks into the
@@ -119,19 +120,33 @@ impl AIRuntimeBridge {
     /// entries a prior build left behind, leaving each CLI genuinely hookless.
     ///
     /// Idempotent and no-write once clean, so it is safe to run on every start.
-    fn strip_managed_hook_configs(&self, phase: &str) -> Result<(), String> {
-        let _guard = self
-            .hook_config_lock
-            .lock()
-            .map_err(|_| "AI runtime hook config lock poisoned.".to_string())?;
-        uninstall_managed_hook_configs_in(&self.home_dir)?;
+    ///
+    /// Never fatal: these are leftovers from older builds, not something this
+    /// runtime needs. A config it cannot read or write (permissions, non-UTF-8,
+    /// transient I/O) is left untouched and reported, and the next start tries
+    /// again — taking the whole AI runtime down over it would cost the user far
+    /// more than a stale hook entry does.
+    fn strip_managed_hook_configs(&self, phase: &str) {
+        let Ok(_guard) = self.hook_config_lock.lock() else {
+            runtime_log_line(
+                "runtime-hooks",
+                &format!("{phase} skipped: hook config lock poisoned"),
+            );
+            return;
+        };
+        if let Err(error) = uninstall_managed_hook_configs_in(&self.home_dir) {
+            runtime_log_line(
+                "runtime-hooks",
+                &format!("{phase} cleanup failed, retrying on next start: {error}"),
+            );
+            return;
+        }
         self.log_hook_config_status(phase);
-        Ok(())
     }
 
     pub fn start_event_processing_background(&self) -> Result<(), String> {
         if self.started.load(Ordering::Acquire) {
-            self.strip_managed_hook_configs("ensure-started")?;
+            self.strip_managed_hook_configs("ensure-started");
             return Ok(());
         }
         let _guard = self
@@ -139,7 +154,7 @@ impl AIRuntimeBridge {
             .lock()
             .map_err(|_| "AI runtime startup lock poisoned.".to_string())?;
         if self.started.load(Ordering::Acquire) {
-            self.strip_managed_hook_configs("ensure-started")?;
+            self.strip_managed_hook_configs("ensure-started");
             return Ok(());
         }
         self.prepare()?;

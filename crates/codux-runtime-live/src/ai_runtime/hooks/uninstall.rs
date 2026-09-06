@@ -24,10 +24,17 @@ use std::path::Path;
 pub fn uninstall_managed_hook_configs_in(home_dir: &Path) -> Result<(), String> {
     for config in LEGACY_JSON_HOOK_CONFIGS {
         let path = legacy_json_hook_path(home_dir, config);
-        let removed_managed_hooks = uninstall_tool_hooks(&path, config.tool, config.definitions)?;
-        if config.tool == "codex" && removed_managed_hooks {
+        // Codex's trust blocks are cleared while hooks.json still names the
+        // managed hooks, and the check that decides it is read-only: a failed
+        // or interrupted pass leaves the same evidence behind, so the next run
+        // clears the trust again instead of stranding it forever. (The trust is
+        // only cleared alongside a managed hook — a config whose hooks are all
+        // the user's own keeps the trust they reviewed.)
+        if config.tool == "codex" && has_managed_tool_hooks(&path, config.tool, config.definitions)?
+        {
             uninstall_codex_config(&path)?;
         }
+        uninstall_tool_hooks(&path, config.tool, config.definitions)?;
     }
     for driver in ai_runtime_tool_drivers() {
         match driver.hook {
@@ -65,8 +72,43 @@ fn uninstall_tool_hooks(
     if tool == "kiro" {
         return uninstall_kiro_tool_hooks(path, definitions);
     }
-    if !path.exists() {
+    let Some(stripped) = stripped_tool_hooks(path, tool, definitions)? else {
         return Ok(false);
+    };
+    if !stripped.removed_managed_hooks {
+        return Ok(false);
+    }
+    write_json_object(path, stripped.root)?;
+    Ok(true)
+}
+
+/// A config with every codux-managed hook removed, and whether one was there.
+struct StrippedToolHooks {
+    root: Map<String, Value>,
+    removed_managed_hooks: bool,
+}
+
+/// Whether this config still carries a codux-managed hook entry. Reads only, so
+/// asking costs nothing and can be repeated until the write that answers it
+/// actually lands.
+fn has_managed_tool_hooks(
+    path: &Path,
+    tool: &str,
+    definitions: &[LegacyHookDefinition],
+) -> Result<bool, String> {
+    Ok(stripped_tool_hooks(path, tool, definitions)?
+        .is_some_and(|stripped| stripped.removed_managed_hooks))
+}
+
+/// The config as it would be without any codux-managed hook. `None` when the
+/// file is absent (nothing to strip, nothing to create).
+fn stripped_tool_hooks(
+    path: &Path,
+    tool: &str,
+    definitions: &[LegacyHookDefinition],
+) -> Result<Option<StrippedToolHooks>, String> {
+    if !path.exists() {
+        return Ok(None);
     }
     let mut root = load_json_object(path)?;
     let mut hooks = root
@@ -98,15 +140,13 @@ fn uninstall_tool_hooks(
         );
     }
 
-    if !removed_managed_hooks {
-        return Ok(false);
-    }
-
     if !hooks.is_empty() {
         root.insert("hooks".to_string(), Value::Object(hooks));
     }
-    write_json_object(path, root)?;
-    Ok(true)
+    Ok(Some(StrippedToolHooks {
+        root,
+        removed_managed_hooks,
+    }))
 }
 
 /// Kiro's flat-array uninstall: entries sit directly under each event key, so
@@ -328,6 +368,77 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&config_path).unwrap(),
             trusted_config
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_uninstall_retries_trust_cleanup_after_a_failed_pass() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home =
+            std::env::temp_dir().join(format!("codux-codex-trust-retry-{}", uuid::Uuid::new_v4()));
+        let codex_dir = home.join(".codex");
+        let hooks_path = codex_dir.join("hooks.json");
+        let config_path = codex_dir.join("config.toml");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let managed_hooks = serde_json::json!({
+            "hooks": {
+                "SessionStart": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": "'/tmp/codux/dmux-ai-state.sh' 'codex-session-start' 'codux' 'codex'"
+                    }]
+                }]
+            }
+        })
+        .to_string();
+        std::fs::write(&hooks_path, &managed_hooks).unwrap();
+        let stale_trust = format!(
+            "[features]\nhooks = true\n\n[hooks.state.\"{}:session_start:0:0\"]\ntrusted_hash = \"sha256:stale\"\n",
+            hooks_path.display()
+        );
+        std::fs::write(&config_path, &stale_trust).unwrap();
+
+        // The trust cleanup cannot land this pass — neither when the config
+        // cannot be read (a failed read must not be mistaken for "no config")
+        // nor when it cannot be written.
+        for mode in [0o000, 0o444] {
+            std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(mode)).unwrap();
+            if std::fs::read_to_string(&config_path).is_ok()
+                && std::fs::write(&config_path, &stale_trust).is_ok()
+            {
+                // Running as root: permissions cannot make this fail.
+                std::fs::remove_dir_all(home).unwrap();
+                return;
+            }
+            assert!(
+                uninstall_managed_hook_configs_in(&home).is_err(),
+                "mode {mode:o} must report the failure"
+            );
+            // The managed hook is still on disk, so the next pass still knows
+            // the trust block is dead.
+            assert!(
+                std::fs::read_to_string(&hooks_path)
+                    .unwrap()
+                    .contains("codex-session-start"),
+                "mode {mode:o} must keep the retry evidence"
+            );
+        }
+
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        uninstall_managed_hook_configs_in(&home).unwrap();
+
+        assert!(
+            !std::fs::read_to_string(&config_path)
+                .unwrap()
+                .contains("trusted_hash")
+        );
+        assert!(
+            !std::fs::read_to_string(&hooks_path)
+                .unwrap()
+                .contains("codex-session-start")
         );
         std::fs::remove_dir_all(home).unwrap();
     }

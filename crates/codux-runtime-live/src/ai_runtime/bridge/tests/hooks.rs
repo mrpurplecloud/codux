@@ -504,6 +504,55 @@ fn omp_wrapper_preserves_explicit_args_and_passthrough_commands() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn unreadable_codex_config_does_not_take_the_ai_runtime_down() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = std::env::temp_dir().join(format!("codux-ai-bridge-hook-fail-{}", Uuid::new_v4()));
+    let home = dir.join("home");
+    let codex_dir = home.join(".codex");
+    let hooks_path = codex_dir.join("hooks.json");
+    let config_path = codex_dir.join("config.toml");
+    fs::create_dir_all(&codex_dir).unwrap();
+    fs::write(
+        &hooks_path,
+        serde_json::json!({
+            "hooks": {
+                "SessionStart": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": "'/tmp/codux/dmux-ai-state.sh' 'codex-session-start' 'codux' 'codex'"
+                    }]
+                }]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(&config_path, "[features]\nhooks = true\n").unwrap();
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read_to_string(&config_path).is_ok() {
+        // Running as root: permissions cannot make this fail.
+        fs::remove_dir_all(dir).unwrap();
+        return;
+    }
+    let bridge = AIRuntimeBridge::with_paths(dir.join("root"), dir.join("temp"), home);
+
+    // A config codux cannot clean is reported and retried later; the runtime
+    // itself must still come up.
+    bridge.prepare().unwrap();
+
+    // Untouched, so the next start still knows there is something to clean.
+    assert!(
+        fs::read_to_string(&hooks_path)
+            .unwrap()
+            .contains("codex-session-start")
+    );
+    fs::set_permissions(&config_path, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn bridge_prepare_strips_codux_hooks_and_keeps_user_hooks() {
     let dir = std::env::temp_dir().join(format!("codux-ai-bridge-file-{}", Uuid::new_v4()));

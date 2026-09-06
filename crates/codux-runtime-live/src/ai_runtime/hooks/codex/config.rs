@@ -12,8 +12,16 @@ pub(in crate::ai_runtime::hooks) fn uninstall_codex_config(
         .parent()
         .map(|parent| parent.join("config.toml"))
         .ok_or_else(|| "Codex hooks path has no parent directory.".to_string())?;
-    let Ok(existing) = fs::read_to_string(&config_path) else {
-        return Ok(());
+    // Only a missing config means "nothing to clean". Any other read failure
+    // (permissions, I/O, non-UTF-8) must stop the uninstall: reporting success
+    // would let the caller strip the managed hooks, and with them the evidence
+    // that this trust block still has to be cleared on a later run.
+    let existing = match fs::read_to_string(&config_path) {
+        Ok(existing) => existing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!("Failed to read {}: {error}", config_path.display()));
+        }
     };
     let mut lines = existing
         .replace("\r\n", "\n")
