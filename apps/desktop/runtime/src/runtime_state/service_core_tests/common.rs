@@ -52,8 +52,6 @@ fn wait_for_ai_history_loading_event(
     project_id: &str,
     project_path: &str,
 ) {
-    // Generous cap: the history indexer competes with the whole suite for
-    // scheduling; passing runs return on the first matching drain.
     for _ in 0..800 {
         let result = service.drain_ai_history_events();
         if result.events.iter().any(|event| {

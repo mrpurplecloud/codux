@@ -6,8 +6,9 @@ use super::state::{
 use super::types::{AIHistoryEvent, AIHistoryIndexerState, AIHistoryJob};
 use crate::normalized::{
     AIGlobalHistorySnapshot, AIHistoryProjectRequest, AIHistorySnapshot,
-    index_global_history_fresh_at, index_project_history_fresh_at, load_indexed_global_history_at,
-    load_indexed_project_history_at, project_history_source_fingerprint,
+    index_global_history_fresh_at_with_home, index_project_history_fresh_at_with_home,
+    load_indexed_global_history_at, load_indexed_project_history_at,
+    project_history_source_fingerprint_with_home,
 };
 use crate::trace::{runtime_trace, runtime_trace_elapsed};
 use crate::usage_store::AIUsageStore;
@@ -21,6 +22,7 @@ pub fn history_indexer_loop(
     rx: Receiver<AIHistoryJob>,
     events: Arc<Mutex<VecDeque<AIHistoryEvent>>>,
     state: Arc<Mutex<AIHistoryIndexerState>>,
+    history_home: PathBuf,
 ) {
     while let Ok(job) = rx.recv() {
         match job {
@@ -33,7 +35,7 @@ pub fn history_indexer_loop(
                     "ai-history",
                     &format!("global index start projects={}", projects.len()),
                 );
-                let result = run_global_index(database_path, projects);
+                let result = run_global_index(database_path, projects, &history_home);
                 if let Ok(snapshot) = &result {
                     push_history_event(
                         &events,
@@ -48,7 +50,13 @@ pub fn history_indexer_loop(
                 project,
                 database_path,
             } => {
-                let _ = refresh_project(&events, Arc::clone(&state), database_path, project);
+                let _ = refresh_project(
+                    &events,
+                    Arc::clone(&state),
+                    database_path,
+                    project,
+                    &history_home,
+                );
             }
             AIHistoryJob::RefreshGlobal {
                 projects,
@@ -89,6 +97,7 @@ fn refresh_project(
     state: Arc<Mutex<AIHistoryIndexerState>>,
     database_path: PathBuf,
     project: AIHistoryProjectRequest,
+    history_home: &Path,
 ) -> Result<super::AIHistoryProjectState, String> {
     runtime_trace(
         "ai-history",
@@ -109,7 +118,13 @@ fn refresh_project(
             detail: "indexing".to_string(),
         },
     );
-    let result = run_project_index(events, Arc::clone(&state), database_path, project.clone());
+    let result = run_project_index(
+        events,
+        Arc::clone(&state),
+        database_path,
+        project.clone(),
+        history_home,
+    );
     let finished_state = match result {
         Ok(snapshot) => {
             push_history_event(
@@ -156,11 +171,12 @@ fn run_project_index(
     state: Arc<Mutex<AIHistoryIndexerState>>,
     database_path: PathBuf,
     project: AIHistoryProjectRequest,
+    history_home: &Path,
 ) -> Result<AIHistorySnapshot, String> {
     let started_at = Instant::now();
     let project_id = project.id.clone();
     let project_path = project.path.clone();
-    let fingerprint = project_history_source_fingerprint(&project);
+    let fingerprint = project_history_source_fingerprint_with_home(&project, history_home);
     if project_source_fingerprint_unchanged(&state, &project_id, &fingerprint)
         && let Ok(Some(snapshot)) =
             load_indexed_project_history_at(database_path.clone(), project.clone())
@@ -181,9 +197,10 @@ fn run_project_index(
         return Ok(snapshot);
     }
     let progress_project = project.clone();
-    let snapshot = index_project_history_fresh_at(
+    let snapshot = index_project_history_fresh_at_with_home(
         project,
         AIUsageStore::at_path(database_path),
+        history_home,
         |progress, detail| {
             if let Ok(next_state) =
                 mark_project_progress(&state, &progress_project, progress, detail)
@@ -212,12 +229,14 @@ fn run_project_index(
 fn run_global_index(
     database_path: impl AsRef<Path>,
     projects: Vec<AIHistoryProjectRequest>,
+    history_home: &Path,
 ) -> Result<AIGlobalHistorySnapshot, String> {
     let started_at = Instant::now();
     let project_count = projects.len();
-    let snapshot = index_global_history_fresh_at(
+    let snapshot = index_global_history_fresh_at_with_home(
         projects,
         AIUsageStore::at_path(database_path.as_ref().to_path_buf()),
+        history_home,
     );
     runtime_trace_elapsed(
         "ai-history",

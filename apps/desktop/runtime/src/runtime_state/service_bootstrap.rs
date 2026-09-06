@@ -60,11 +60,23 @@ impl codux_runtime_core::ai_stats::RemoteAICurrentSessionProvider
     }
 }
 
+#[cfg(not(test))]
+fn runtime_ai_history_indexer(support_dir: &Path) -> AIHistoryIndexer {
+    AIHistoryIndexer::with_database_path(support_dir.join("ai-usage.sqlite3"))
+}
+
+#[cfg(test)]
+fn runtime_ai_history_indexer(support_dir: &Path) -> AIHistoryIndexer {
+    AIHistoryIndexer::with_database_path_and_history_home(
+        support_dir.join("ai-usage.sqlite3"),
+        support_dir.join("test-ai-history-home"),
+    )
+}
+
 impl RuntimeService {
     pub fn new(support_dir: PathBuf) -> Self {
         codux_ai_history::trace::set_trace_sink(crate::runtime_trace::runtime_trace);
-        let ai_history_indexer =
-            AIHistoryIndexer::with_database_path(support_dir.join("ai-usage.sqlite3"));
+        let ai_history_indexer = runtime_ai_history_indexer(&support_dir);
         let ai_runtime = shared_ai_runtime_bridge();
         let terminal_manager = shared_terminal_manager(Arc::clone(&ai_runtime));
         let project_activity = Arc::new(ProjectActivityCoordinator::new(

@@ -16,7 +16,19 @@ pub fn index_project_history_fresh_at<F>(
 where
     F: FnMut(f64, &'static str),
 {
-    load_project_history_with_store_or_fallback(project, &home_dir(), &store, &mut on_progress)
+    index_project_history_fresh_at_with_home(project, store, &home_dir(), &mut on_progress)
+}
+
+pub(crate) fn index_project_history_fresh_at_with_home<F>(
+    project: AIHistoryProjectRequest,
+    store: AIUsageStore,
+    home: &Path,
+    mut on_progress: F,
+) -> AIHistorySnapshot
+where
+    F: FnMut(f64, &'static str),
+{
+    load_project_history_with_store_or_fallback(project, home, &store, &mut on_progress)
 }
 
 pub fn project_history_source_fingerprint(
@@ -26,7 +38,7 @@ pub fn project_history_source_fingerprint(
     project_history_source_fingerprint_with_home(project, &home)
 }
 
-fn project_history_source_fingerprint_with_home(
+pub(crate) fn project_history_source_fingerprint_with_home(
     project: &AIHistoryProjectRequest,
     home: &Path,
 ) -> AIHistorySourceFingerprint {
@@ -173,12 +185,19 @@ pub fn index_global_history_fresh_at(
     projects: Vec<AIHistoryProjectRequest>,
     store: AIUsageStore,
 ) -> AIGlobalHistorySnapshot {
+    index_global_history_fresh_at_with_home(projects, store, &home_dir())
+}
+
+pub(crate) fn index_global_history_fresh_at_with_home(
+    projects: Vec<AIHistoryProjectRequest>,
+    store: AIUsageStore,
+    home: &Path,
+) -> AIGlobalHistorySnapshot {
     let mut total_tokens = 0;
     let mut cached_input_tokens = 0;
     let mut today_total_tokens = 0;
     let mut today_cached_input_tokens = 0;
     let mut project_count = 0;
-    let home = home_dir();
     let projects = projects
         .into_iter()
         .filter(|project| !project.path.trim().is_empty())
@@ -190,7 +209,7 @@ pub fn index_global_history_fresh_at(
 
     for project in projects {
         let snapshot =
-            load_project_history_with_store_or_fallback(project, &home, &store, &mut |_, _| {});
+            load_project_history_with_store_or_fallback(project, home, &store, &mut |_, _| {});
         total_tokens += snapshot.project_summary.project_total_tokens;
         cached_input_tokens += snapshot.project_summary.project_cached_input_tokens;
         today_total_tokens += snapshot.project_summary.today_total_tokens;

@@ -7,7 +7,7 @@ mod types;
 mod worker;
 
 use crate::normalized::{
-    AIGlobalHistorySnapshot, AIHistoryProjectRequest, project_history_source_fingerprint,
+    AIGlobalHistorySnapshot, AIHistoryProjectRequest, project_history_source_fingerprint_with_home,
     remove_indexed_history_session_at, rename_indexed_history_session_at,
 };
 use crate::trace::{runtime_trace, runtime_trace_elapsed};
@@ -31,6 +31,7 @@ pub struct AIHistoryIndexer {
     state: Arc<Mutex<AIHistoryIndexerState>>,
     events: Arc<Mutex<VecDeque<AIHistoryEvent>>>,
     database_path: PathBuf,
+    history_home: PathBuf,
 }
 
 impl fmt::Debug for AIHistoryIndexer {
@@ -64,6 +65,14 @@ impl AIHistoryIndexer {
     }
 
     pub fn with_database_path(database_path: PathBuf) -> Self {
+        Self::with_database_path_and_history_home(database_path, crate::paths::home_dir())
+    }
+
+    /// Opens one cache while discovering CLI history under an explicit home directory.
+    pub fn with_database_path_and_history_home(
+        database_path: PathBuf,
+        history_home: PathBuf,
+    ) -> Self {
         let (tx, rx) = sync_channel(16);
         let state = Arc::new(Mutex::new(AIHistoryIndexerState::default()));
         let events = Arc::new(Mutex::new(VecDeque::new()));
@@ -76,15 +85,19 @@ impl AIHistoryIndexer {
         );
         let worker_state = Arc::clone(&state);
         let worker_events = Arc::clone(&events);
+        let worker_history_home = history_home.clone();
         thread::Builder::new()
             .name("codux-ai-history-indexer".to_string())
-            .spawn(move || history_indexer_loop(rx, worker_events, worker_state))
+            .spawn(move || {
+                history_indexer_loop(rx, worker_events, worker_state, worker_history_home)
+            })
             .expect("failed to spawn AI history indexer worker");
         Self {
             tx,
             state,
             events,
             database_path,
+            history_home,
         }
     }
 
@@ -107,7 +120,8 @@ impl AIHistoryIndexer {
         // Fingerprinting scans every configured history source. A cache miss
         // cannot use the unchanged fast path, so let the worker fingerprint once.
         if cached_snapshot.is_some() {
-            let fingerprint = project_history_source_fingerprint(&project);
+            let fingerprint =
+                project_history_source_fingerprint_with_home(&project, &self.history_home);
             if project_source_fingerprint_unchanged(&self.state, &project.id, &fingerprint) {
                 let project_state = seed_project_state(&self.state, &project, cached_snapshot)?;
                 push_history_event(

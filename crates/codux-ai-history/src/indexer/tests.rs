@@ -4,11 +4,68 @@ use super::state::{
     set_project_source_fingerprint,
 };
 use super::types::AIHistoryIndexerState;
+use super::{AIHistoryEvent, AIHistoryIndexer};
 use crate::normalized::{
     AIHistoryProjectRequest, AIHistorySnapshot, AIHistorySourceFileFingerprint,
     AIHistorySourceFingerprint, AIProjectUsageSummary,
+    project_history_source_fingerprint_with_home,
 };
 use std::sync::{Arc, Mutex};
+
+#[test]
+fn configured_history_home_drives_worker_and_refresh_fingerprint() {
+    let root = std::env::temp_dir().join(format!(
+        "codux-indexer-history-home-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let history_home = root.join("history-home");
+    let project_path = root.join("project");
+    let project_path = project_path.to_string_lossy().to_string();
+    let claude_project_dir = history_home
+        .join(".claude/projects")
+        .join(project_path.replace(['/', '.'], "-"));
+    std::fs::create_dir_all(&claude_project_dir).unwrap();
+    std::fs::write(
+        claude_project_dir.join("session.jsonl"),
+        format!(
+            "{{\"type\":\"user\",\"sessionId\":\"s1\",\"cwd\":{project_path:?},\"timestamp\":\"2026-05-17T00:00:00Z\",\"message\":{{\"content\":\"hello\"}}}}\n\
+             {{\"type\":\"assistant\",\"sessionId\":\"s1\",\"cwd\":{project_path:?},\"timestamp\":\"2026-05-17T00:01:00Z\",\"uuid\":\"a1\",\"message\":{{\"model\":\"claude-sonnet\",\"usage\":{{\"input_tokens\":100,\"output_tokens\":50}}}}}}\n"
+        ),
+    )
+    .unwrap();
+    let project = AIHistoryProjectRequest {
+        id: "project-1".to_string(),
+        name: "Project".to_string(),
+        path: project_path,
+    };
+    let indexer = AIHistoryIndexer::with_database_path_and_history_home(
+        root.join("ai-usage.sqlite3"),
+        history_home.clone(),
+    );
+
+    let global = indexer.global_summary(vec![project.clone()]).unwrap();
+    assert_eq!(global.total_tokens, 150);
+
+    set_project_source_fingerprint(
+        &indexer.state,
+        &project.id,
+        project_history_source_fingerprint_with_home(&project, &history_home),
+    );
+    indexer.drain_events();
+    indexer.refresh_project(project).unwrap();
+    let events = indexer.drain_events();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AIHistoryEvent::ProjectState { state } if !state.is_loading && !state.queued
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AIHistoryEvent::ProjectState { state } if state.is_loading || state.queued
+    )));
+
+    drop(indexer);
+    let _ = std::fs::remove_dir_all(root);
+}
 
 #[test]
 fn project_state_tracks_queue_progress_and_completion() {
