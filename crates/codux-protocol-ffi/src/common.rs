@@ -181,11 +181,16 @@ pub(crate) fn controller_transport_config_from_json(
                         .unwrap_or_default()
                         .to_string(),
                 })
+                // Same rule the dial path applies, from the same definition, so
+                // a candidate cannot survive this filter only to be rejected
+                // later — or be dropped here while the dialer would have used it.
                 .filter(|candidate| {
-                    !candidate.kind.trim().is_empty()
-                        && (!candidate.ticket.trim().is_empty()
-                            || (!candidate.node_id.trim().is_empty()
-                                && !candidate.relay_url.trim().is_empty()))
+                    codux_remote_transport::is_dialable_iroh_transport(
+                        &candidate.kind,
+                        &candidate.ticket,
+                        &candidate.node_id,
+                        &candidate.relay_url,
+                    )
                 })
                 .collect::<Vec<_>>()
         })
@@ -196,7 +201,26 @@ pub(crate) fn controller_transport_config_from_json(
         device_id: json_string_field(&value, "deviceId"),
         device_token: json_string_field(&value, "deviceToken"),
         transports,
+        direct_addrs: json_string_array_field(&value, "directAddrs"),
     })
+}
+
+/// Read a JSON array of strings, dropping blanks. Absent or malformed reads as
+/// empty: this carries best-effort hints, never anything a connection needs.
+fn json_string_array_field(value: &serde_json::Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn json_string_field(value: &serde_json::Value, key: &str) -> String {

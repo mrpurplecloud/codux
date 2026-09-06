@@ -126,6 +126,7 @@ extension _HomePageConnection on HomeController {
     String? relayUrl,
   }) {
     final connected = path != 'none';
+    final cleanedEndpoint = cleanRemoteTransportEndpoint(endpoint ?? '');
     _applyState(() {
       _transportConnected = connected;
       if (!connected) {
@@ -138,7 +139,6 @@ extension _HomePageConnection on HomeController {
         if (!_backgroundConnect && !_transportReady) {
           _status = _t('app.connecting');
         }
-        final cleanedEndpoint = cleanRemoteTransportEndpoint(endpoint ?? '');
         if (cleanedEndpoint.isNotEmpty) {
           _connectionEndpoint = cleanedEndpoint;
         } else if (path != _connectionPath) {
@@ -153,6 +153,38 @@ extension _HomePageConnection on HomeController {
       }
       _connectionPath = path;
     });
+    // After the rebuild, not inside it: this can write to disk, and a state
+    // callback is no place to start IO.
+    //
+    // Only a direct path yields an address worth dialling again. A relay path's
+    // address is the relay's own — already named by the ticket, and silent about
+    // where the host actually is.
+    if (connected && path == 'direct' && cleanedEndpoint.isNotEmpty) {
+      _rememberDirectAddr(cleanedEndpoint);
+    }
+  }
+
+  /// Remember the address a live direct path is using, so a later dial can try
+  /// it even if the host has moved away from what the pairing ticket recorded.
+  ///
+  /// Called on every path report, so the common case is "already the most
+  /// recent" — the controller reports no update then and nothing is written.
+  void _rememberDirectAddr(String addr) {
+    final active = _activeDevice;
+    if (active == null) return;
+    final result = _deviceController.rememberDirectAddr(
+      devices: _devices,
+      activeDevice: active,
+      deviceId: active.deviceId,
+      addr: addr,
+    );
+    if (result.updatedDevice == null) return;
+    CoduxLog.info(
+      '[codux-flutter-remote] remembered direct addr=$addr device=${active.deviceId}',
+    );
+    _devices = result.state.devices;
+    _activeDevice = result.state.activeDevice;
+    unawaited(_storage.saveDevices(result.state.devices));
   }
 
   bool _isCompatibleRemoteProtocol(Object? payload) {

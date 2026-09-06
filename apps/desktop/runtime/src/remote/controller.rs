@@ -420,6 +420,7 @@ impl RemoteController {
                 ticket: target.ticket.clone(),
                 relay_authentication: target.relay_authentication.clone(),
             }],
+            direct_addrs: Vec::new(),
         };
         let message_inner = Arc::clone(&inner);
         let transport = RemoteTransportFactory::connect_controller(

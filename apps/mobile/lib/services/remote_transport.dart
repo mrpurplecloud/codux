@@ -340,5 +340,10 @@ Map<String, dynamic> _controllerTransportConfig(StoredDevice device) {
     'deviceId': device.deviceId,
     'deviceToken': device.token,
     'transports': device.transports.map((item) => item.toJson()).toList(),
+    // Addresses we have actually reached this host on, merged into the dial set
+    // alongside the ticket's. The ticket is frozen at pairing time; these follow
+    // the host. Always sent, empty included, so the native side never has to
+    // distinguish "no history" from "old client".
+    'directAddrs': device.directAddrs,
   };
 }

@@ -1094,6 +1094,27 @@ struct ControllerEndpoint {
     generation: u64,
 }
 
+/// Fold addresses this controller has previously reached the host on into the
+/// dial set its ticket provides.
+///
+/// The ticket is a snapshot taken at pairing time and never refreshed, so a host
+/// that has since moved — new network, new lease, a virtual interface that came
+/// up later — is unreachable through it alone. An address that carried a working
+/// connection is the cheapest evidence available that the host may still answer
+/// there, and adding it costs nothing: `EndpointAddr` holds a set, so an address
+/// the ticket already lists merges away instead of being dialled twice.
+///
+/// Unparseable entries are dropped rather than failing the dial. Stored data
+/// outlives the code that wrote it, and one bad row must not cost the user a
+/// connection the ticket alone could have made.
+fn with_remembered_addrs(addr: EndpointAddr, remembered: &[String]) -> EndpointAddr {
+    let parsed = remembered
+        .iter()
+        .filter_map(|value| value.trim().parse::<SocketAddr>().ok())
+        .map(TransportAddr::Ip);
+    addr.with_addrs(parsed)
+}
+
 /// Whether `candidate` carries enough for a controller to dial the host.
 ///
 /// A ticket alone is enough. It serialises the host's whole `EndpointAddr`,
@@ -1298,7 +1319,10 @@ impl RemoteIrohControllerTransport {
             .iter()
             .find(|candidate| is_dialable_iroh_candidate(candidate))
             .ok_or_else(|| "missing iroh transport candidate".to_string())?;
-        let endpoint_addr = candidate_endpoint_addr(candidate)?;
+        // The ticket says where the host was at pairing time; the remembered
+        // addresses say where we have actually reached it since. Dial both.
+        let endpoint_addr =
+            with_remembered_addrs(candidate_endpoint_addr(candidate)?, &config.direct_addrs);
         let relay_url = endpoint_addr
             .relay_urls()
             .next()
@@ -2343,6 +2367,68 @@ mod tests {
             ticket: ticket.to_string(),
             relay_authentication: String::new(),
         }
+    }
+
+    fn test_endpoint_id() -> iroh::EndpointId {
+        SecretKey::from_bytes(&[7u8; 32]).public()
+    }
+
+    #[test]
+    fn remembered_addresses_join_the_dial_set() {
+        // The ticket is a pairing-time snapshot. An address that carried a
+        // working connection since is the cheapest evidence available that the
+        // host may still be there.
+        let ticket_addr = EndpointAddr::new(test_endpoint_id())
+            .with_ip_addr("192.168.1.5:41234".parse().unwrap());
+
+        let merged = with_remembered_addrs(ticket_addr, &["10.8.0.3:41234".to_string()]);
+
+        let addrs: Vec<String> = merged.ip_addrs().map(|addr| addr.to_string()).collect();
+        assert!(addrs.contains(&"192.168.1.5:41234".to_string()));
+        assert!(addrs.contains(&"10.8.0.3:41234".to_string()));
+    }
+
+    #[test]
+    fn a_remembered_address_the_ticket_already_has_is_not_dialled_twice() {
+        let ticket_addr = EndpointAddr::new(test_endpoint_id())
+            .with_ip_addr("192.168.1.5:41234".parse().unwrap());
+
+        let merged = with_remembered_addrs(ticket_addr, &["192.168.1.5:41234".to_string()]);
+
+        assert_eq!(merged.ip_addrs().count(), 1);
+    }
+
+    #[test]
+    fn an_unusable_remembered_address_does_not_cost_the_connection() {
+        // Stored data outlives the code that wrote it. One unparseable row must
+        // not fail a dial that the ticket alone could have completed.
+        let ticket_addr = EndpointAddr::new(test_endpoint_id())
+            .with_ip_addr("192.168.1.5:41234".parse().unwrap());
+
+        let merged = with_remembered_addrs(
+            ticket_addr,
+            &[
+                "not-an-address".to_string(),
+                String::new(),
+                "   ".to_string(),
+                "10.8.0.3:41234".to_string(),
+            ],
+        );
+
+        let addrs: Vec<String> = merged.ip_addrs().map(|addr| addr.to_string()).collect();
+        assert_eq!(addrs.len(), 2);
+        assert!(addrs.contains(&"10.8.0.3:41234".to_string()));
+    }
+
+    #[test]
+    fn relay_urls_survive_the_merge() {
+        let ticket_addr = EndpointAddr::new(test_endpoint_id())
+            .with_relay_url(parse_relay_url("https://relay.example").expect("relay url"));
+
+        let merged = with_remembered_addrs(ticket_addr, &["10.8.0.3:41234".to_string()]);
+
+        assert_eq!(merged.relay_urls().count(), 1);
+        assert_eq!(merged.ip_addrs().count(), 1);
     }
 
     #[test]

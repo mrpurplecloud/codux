@@ -62,13 +62,13 @@ Compatibility contract for the whole change: every ticket is independently shipp
 
 **Blocked by:** 1 — needs the relay-less dial path to be reachable before a remembered address can be exercised.
 
-**Status:** ready-for-agent
+**Status:** done — see 4.4 for the eviction decision
 
-- [ ] 4.1 Add a failing test proving a successful connection records the address that carried it, and the next dial includes that address alongside the ticket's addresses. Run against baseline and record the expected failure.
-- [ ] 4.2 Persist the last-known-good address on the stored device record as an optional field. Records written by earlier builds SHALL remain readable with the field absent.
-- [ ] 4.3 Merge the remembered address into the dial address set without duplicating an address the ticket already carries.
-- [ ] 4.4 Clear or ignore a remembered address that has failed consistently, so a stale address cannot permanently displace the ticket's addresses.
-- [ ] 4.5 Cover the migration case: a device record from an earlier build loads, connects, and gains the field on first success.
+- [x] 4.1 Add a failing test proving a successful connection records the address that carried it, and the next dial includes that address alongside the ticket's addresses. Run against baseline and record the expected failure.
+- [x] 4.2 Persist the last-known-good address on the stored device record as an optional field. Records written by earlier builds SHALL remain readable with the field absent. **Stores a short list rather than a single address:** a host is commonly reachable at different addresses from different places — a LAN address at home, a virtual one over SD-WAN elsewhere — and keeping only the newest would make every change of location forget the address it is about to need again. The field is omitted from the JSON when empty, so a device that never connected stays byte-identical to a record written before it existed.
+- [x] 4.3 Merge the remembered address into the dial address set without duplicating an address the ticket already carries. Deduplication is structural: `EndpointAddr` holds a set, so a remembered address the ticket already lists merges away rather than being dialled twice. Unparseable stored entries are dropped rather than failing the dial — stored data outlives the code that wrote it.
+- [x] 4.4 ~~Clear or ignore a remembered address that has failed consistently~~ — **handled by recency instead of failure tracking.** Explicit failure counting would need the native dialer to report which address failed, threading per-address outcomes back through the FFI boundary for a small benefit: a stale entry costs one extra address in a dial that already tries several concurrently, is capped at three, and can never displace the ticket's own addresses. Promotion on success ages unused addresses out on its own. Revisit only if a real dial is measured to be slowed by it.
+- [x] 4.5 Cover the migration case: a device record from an earlier build loads, connects, and gains the field on first success.
 
 ## 5. Host Announces Its Current Address
 

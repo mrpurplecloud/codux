@@ -74,6 +74,14 @@ class RemoteTransportCandidate {
   };
 }
 
+List<String> _stringListFromJson(Object? value) {
+  if (value is! List) return const [];
+  return value
+      .map((item) => '$item'.trim())
+      .where((item) => item.isNotEmpty)
+      .toList(growable: false);
+}
+
 List<RemoteTransportCandidate> remoteTransportCandidatesFromJson(
   Object? value,
 ) {
@@ -100,7 +108,18 @@ class StoredDevice {
     required this.name,
     this.hostName,
     this.transports = const [],
+    this.directAddrs = const [],
   });
+
+  /// How many previously-working addresses to keep per device.
+  ///
+  /// More than one because a host is commonly reachable at different addresses
+  /// from different places — a LAN address at home, a virtual one over a VPN or
+  /// SD-WAN elsewhere — and remembering only the newest would make every change
+  /// of location forget the address it is about to need again. Small because
+  /// this is a hint list, not a routing table: every entry is dialled.
+  static const int maxDirectAddrs = 3;
+
   final String server;
   final String hostId;
   final String deviceId;
@@ -108,6 +127,34 @@ class StoredDevice {
   final String name;
   final String? hostName;
   final List<RemoteTransportCandidate> transports;
+
+  /// Socket addresses this device has actually reached the host on, most recent
+  /// first.
+  ///
+  /// The paired ticket is a snapshot from pairing time and never refreshes, so
+  /// on its own it cannot follow a host that changed address. These are merged
+  /// into the dial set as hints. Absent in records written before this existed,
+  /// which read as empty and behave exactly as before.
+  final List<String> directAddrs;
+
+  /// This device with [addr] promoted to the most recently used address.
+  ///
+  /// Returns the same instance when nothing would change, so callers can use
+  /// identity to decide whether a save is worth doing. An address that keeps
+  /// working keeps its place at the front; one that stops being used ages out
+  /// as newer ones are promoted past it, which is all the eviction this needs —
+  /// a stale entry costs one extra address in a dial that is already trying
+  /// several, and never displaces the ticket's own addresses.
+  StoredDevice withDirectAddr(String addr) {
+    final trimmed = addr.trim();
+    if (trimmed.isEmpty) return this;
+    if (directAddrs.isNotEmpty && directAddrs.first == trimmed) return this;
+    final next = [
+      trimmed,
+      ...directAddrs.where((item) => item != trimmed),
+    ].take(maxDirectAddrs).toList(growable: false);
+    return copyWith(directAddrs: next);
+  }
 
   /// The stored candidate for [kind], or null.
   ///
@@ -134,6 +181,7 @@ class StoredDevice {
     String? name,
     String? hostName,
     List<RemoteTransportCandidate>? transports,
+    List<String>? directAddrs,
   }) {
     return StoredDevice(
       server: server ?? this.server,
@@ -143,6 +191,7 @@ class StoredDevice {
       name: name ?? this.name,
       hostName: hostName ?? this.hostName,
       transports: transports ?? this.transports,
+      directAddrs: directAddrs ?? this.directAddrs,
     );
   }
 
@@ -156,6 +205,7 @@ class StoredDevice {
       name: '${json['name'] ?? ''}',
       hostName: json['hostName'] == null ? null : '${json['hostName']}',
       transports: transports,
+      directAddrs: _stringListFromJson(json['directAddrs']),
     );
   }
 
@@ -167,6 +217,9 @@ class StoredDevice {
     'name': name,
     if (hostName != null) 'hostName': hostName,
     'transports': transports.map((item) => item.toJson()).toList(),
+    // Omitted when empty so a record that never connected stays byte-identical
+    // to one written before this field existed.
+    if (directAddrs.isNotEmpty) 'directAddrs': directAddrs,
   };
 }
 

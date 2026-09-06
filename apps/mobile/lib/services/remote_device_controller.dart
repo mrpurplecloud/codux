@@ -100,6 +100,44 @@ class RemoteDeviceController {
     );
   }
 
+  /// Record that [deviceId] was just reached at [addr], so the next dial can try
+  /// it alongside the addresses frozen into the pairing ticket.
+  ///
+  /// Reports `updatedDevice: null` when nothing changed — an unknown device, or
+  /// an address that is already the most recent — so the caller can skip a disk
+  /// write. This runs on every path report of a live connection, so "no change"
+  /// is by far the common case.
+  RemoteDeviceUpdateResult rememberDirectAddr({
+    required List<StoredDevice> devices,
+    required StoredDevice? activeDevice,
+    required String deviceId,
+    required String addr,
+  }) {
+    StoredDevice? updated;
+    final next = devices.map((item) {
+      if (item.deviceId != deviceId) return item;
+      final promoted = item.withDirectAddr(addr);
+      if (identical(promoted, item)) return item;
+      updated = promoted;
+      return promoted;
+    }).toList();
+    if (updated == null) {
+      return RemoteDeviceUpdateResult(
+        state: preserveActive(devices: devices, activeDevice: activeDevice),
+        updatedDevice: null,
+      );
+    }
+    return RemoteDeviceUpdateResult(
+      state: RemoteDeviceState(
+        devices: List.unmodifiable(next),
+        activeDevice: activeDevice?.deviceId == deviceId
+            ? updated
+            : _deviceById(next, activeDevice?.deviceId) ?? _firstOrNull(next),
+      ),
+      updatedDevice: updated,
+    );
+  }
+
   RemoteDeviceRemoveResult remove({
     required List<StoredDevice> devices,
     required StoredDevice? activeDevice,

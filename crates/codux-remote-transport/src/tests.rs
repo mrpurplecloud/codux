@@ -36,6 +36,7 @@ async fn controller_factory_rejects_missing_iroh_candidate_before_network_dial()
         device_id: "device-1".to_string(),
         device_token: "token-1".to_string(),
         transports: Vec::new(),
+        direct_addrs: Vec::new(),
     };
 
     let error = match RemoteTransportFactory::connect_controller(
@@ -68,6 +69,7 @@ fn controller_config_prefers_iroh_candidate() {
             ticket: String::new(),
             relay_authentication: String::new(),
         }],
+        direct_addrs: Vec::new(),
     };
 
     assert_eq!(

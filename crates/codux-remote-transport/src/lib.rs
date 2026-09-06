@@ -142,6 +142,11 @@ pub struct RemoteControllerTransportConfig {
     pub device_id: String,
     pub device_token: String,
     pub transports: Vec<RemoteTransportCandidate>,
+    /// Socket addresses this controller has reached the host on before, most
+    /// recent first. Merged into the ticket's address set at dial time so a host
+    /// that moved since pairing is still reachable. Empty is normal: a device
+    /// paired but never connected has nothing to remember yet.
+    pub direct_addrs: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

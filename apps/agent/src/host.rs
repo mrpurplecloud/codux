@@ -1407,6 +1407,7 @@ pub async fn run_serve_smoke_async() -> Result<String, String> {
             ticket: host.iroh_endpoint_ticket().unwrap_or_default(),
             relay_authentication: String::new(),
         }],
+        direct_addrs: Vec::new(),
     };
     let controller = RemoteTransportFactory::connect_controller(
         &controller_config,
