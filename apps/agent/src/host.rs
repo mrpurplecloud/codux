@@ -65,9 +65,33 @@ pub struct AgentHostConfig {
 }
 
 type TransportSlot = Arc<Mutex<Option<Arc<dyn RemoteTransport>>>>;
-/// Our own iroh dial candidate `(node_id, relay_url)`, filled in after connect
-/// so `pairing.confirmed` can hand the controller a reconnect transport.
-type CandidateSlot = Arc<Mutex<Option<(String, String)>>>;
+/// Our own iroh dial candidate, filled in after connect so pairing can hand the
+/// controller a way back.
+///
+/// Named rather than a tuple, and carrying the endpoint ticket: as a pair of
+/// strings this could only describe a host reachable through a relay, so a
+/// relay-less host published an identity nobody could dial. The ticket is the
+/// only field encoding this host's direct addresses.
+#[derive(Clone, Debug)]
+struct AgentDialCandidate {
+    node_id: String,
+    relay_url: String,
+    ticket: String,
+}
+
+impl AgentDialCandidate {
+    fn as_transport(&self, relay_authentication: &str) -> codux_protocol::RemoteTransportCandidate {
+        codux_protocol::iroh_transport_candidate_with_ticket_and_authentication(
+            &self.relay_url,
+            &self.node_id,
+            &self.relay_url,
+            &self.ticket,
+            relay_authentication,
+        )
+    }
+}
+
+type CandidateSlot = Arc<Mutex<Option<AgentDialCandidate>>>;
 /// Devices watching a project's `ai.stats` (project_id -> device ids). A device
 /// registers by requesting `ai.stats`; the poller re-pushes fresh stats to them
 /// when the live AI runtime changes, so remote views tick like the desktop's.
@@ -120,7 +144,7 @@ impl AgentPairingState {
 
     fn publish(
         &self,
-        candidate: &(String, String),
+        candidate: &AgentDialCandidate,
         relay_authentication: &str,
     ) -> Result<String, String> {
         let credential = self
@@ -130,8 +154,7 @@ impl AgentPairingState {
             .map_err(|_| "agent pairing state is unavailable".to_string())?;
         Ok(pairing_ticket_url(
             &credential,
-            &candidate.0,
-            &candidate.1,
+            candidate,
             relay_authentication,
         ))
     }
@@ -163,8 +186,7 @@ impl AgentPairingState {
             .ok()
             .and_then(|candidate| candidate.clone());
         if let Some(candidate) = candidate.as_ref() {
-            let ticket =
-                pairing_ticket_url(&next, &candidate.0, &candidate.1, relay_authentication);
+            let ticket = pairing_ticket_url(&next, candidate, relay_authentication);
             crate::runstate::write_ticket_at(&self.ticket_path, &ticket)?;
         }
         let devices = crate::device_store::record_at(
@@ -176,16 +198,10 @@ impl AgentPairingState {
         )?;
         self.authorization.replace_after_write(&devices);
         let transports = candidate
-            .map(|(node_id, relay_url)| {
-                let transport =
-                    codux_protocol::iroh_transport_candidate_with_ticket_and_authentication(
-                        &relay_url,
-                        node_id,
-                        relay_url.clone(),
-                        "",
-                        relay_authentication,
-                    );
-                vec![codux_protocol::confirmed_transport_entry(&transport)]
+            .map(|candidate| {
+                vec![codux_protocol::confirmed_transport_entry(
+                    &candidate.as_transport(relay_authentication),
+                )]
             })
             .unwrap_or_default();
         Ok(json!({
@@ -1146,7 +1162,11 @@ async fn connect_serving_host(
         *guard = Some(Arc::clone(&host));
     }
     if let (Ok(mut guard), Some((node_id, relay_url))) = (candidate.lock(), host.iroh_candidate()) {
-        *guard = Some((node_id, relay_url));
+        *guard = Some(AgentDialCandidate {
+            node_id,
+            relay_url,
+            ticket: host.iroh_endpoint_ticket().unwrap_or_default(),
+        });
     }
     spawn_ai_stats_poller(
         Arc::clone(&slot),
@@ -1320,12 +1340,18 @@ pub async fn run_host(cfg: AgentHostConfig) -> Result<(), String> {
     if !node_id.is_empty() {
         println!("  node:   {node_id}");
         println!("  relay:  {relay}");
-        // The pairing QR carries nodeId + relayUrl (NOT the bulky iroh endpoint
-        // ticket) so it stays small and phone-scannable — matching the desktop
-        // host's format. The controller dials from nodeId + relayUrl and the full
-        // ticket is exchanged after it connects.
-        let pairing =
-            pairing.publish(&(node_id.clone(), relay.clone()), &cfg.relay_authentication)?;
+        // Hand the QR builder the whole candidate and let it decide what to
+        // omit: with a relay it drops the bulky endpoint ticket to stay
+        // phone-scannable, and without one it keeps it, because nodeId alone
+        // encodes an identity with no way to reach it.
+        let pairing = pairing.publish(
+            &AgentDialCandidate {
+                node_id: node_id.clone(),
+                relay_url: relay.clone(),
+                ticket: host.iroh_endpoint_ticket().unwrap_or_default(),
+            },
+            &cfg.relay_authentication,
+        )?;
         println!("  pair:   run `codux link` or `codux qrcode`");
         if verbose_startup_output() {
             println!("pairingTicket={pairing}");
@@ -1370,21 +1396,16 @@ fn verbose_startup_output() -> bool {
 /// pairing credential is single-use and rotates after confirmation.
 fn pairing_ticket_url(
     credential: &AgentPairingCredential,
-    node_id: &str,
-    relay_url: &str,
+    candidate: &AgentDialCandidate,
     relay_authentication: &str,
 ) -> String {
     use base64::Engine;
-    // Build the dial candidate and serialize it through the SHARED payload
-    // builder so the desktop and agent hosts emit byte-identical QR transports —
-    // the ticket-free shape (nodeId + relayUrl) is defined once in codux_protocol.
-    let candidate = codux_protocol::iroh_transport_candidate_with_ticket_and_authentication(
-        relay_url,
-        node_id,
-        relay_url,
-        "",
-        relay_authentication,
-    );
+    // Serialize through the SHARED payload builder so the desktop and agent
+    // hosts emit byte-identical QR transports. That builder decides what the QR
+    // can afford to omit — it drops the ticket only when a relay makes it
+    // redundant — so this passes the candidate whole rather than pre-emptying
+    // fields it cannot judge.
+    let candidate = candidate.as_transport(relay_authentication);
     let payload = codux_protocol::pairing_payload(
         &credential.code,
         &credential.secret,
@@ -2014,10 +2035,11 @@ mod tests {
         let state =
             AgentPairingState::with_paths(data_dir.join("devices.json"), ticket_path).unwrap();
         let first = state.active.lock().unwrap().clone();
-        let candidate = Arc::new(Mutex::new(Some((
-            "node-1".to_string(),
-            "https://relay.example".to_string(),
-        ))));
+        let candidate: CandidateSlot = Arc::new(Mutex::new(Some(AgentDialCandidate {
+            node_id: "node-1".to_string(),
+            relay_url: "https://relay.example".to_string(),
+            ticket: "endpoint-ticket-bytes".to_string(),
+        })));
         let request = codux_protocol::RemoteTransportPairingRequest {
             device_id: "phone-1".to_string(),
             device_name: "Phone".to_string(),
@@ -2041,5 +2063,77 @@ mod tests {
         assert!(!state.device_store_path.exists());
 
         let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn agent_confirmation_hands_the_controller_the_endpoint_ticket() {
+        // Through the real producer, not a hand-written payload. The ticket is
+        // the only field carrying this host's direct addresses; a confirmation
+        // without it leaves the controller able to reach us only via a relay.
+        let data_dir = std::env::temp_dir().join(format!(
+            "codux-agent-confirm-ticket-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let state = AgentPairingState::with_paths(
+            data_dir.join("devices.json"),
+            data_dir.join("pairing-ticket.txt"),
+        )
+        .unwrap();
+        let credential = state.active.lock().unwrap().clone();
+        let candidate: CandidateSlot = Arc::new(Mutex::new(Some(AgentDialCandidate {
+            node_id: "node-1".to_string(),
+            relay_url: "https://relay.example".to_string(),
+            ticket: "endpoint-ticket-bytes".to_string(),
+        })));
+        let request = codux_protocol::RemoteTransportPairingRequest {
+            device_id: "phone-1".to_string(),
+            device_name: "Phone".to_string(),
+            platform: Some("ios".to_string()),
+            pairing_id: Some(credential.pairing_id.clone()),
+            pairing_code: Some(credential.code.clone()),
+            pairing_secret: Some(credential.secret.clone()),
+        };
+
+        let confirmed = state
+            .confirm(request, &candidate, "host-1", "Agent", "")
+            .expect("confirmation");
+
+        assert_eq!(
+            confirmed["transports"][0]["ticket"], "endpoint-ticket-bytes",
+            "the confirmation must carry the ticket the controller persists"
+        );
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn a_relay_less_agent_publishes_a_scannable_pairing_url() {
+        // A host with no reachable relay still has to be pairable: its QR must
+        // carry the ticket, since nodeId alone encodes an identity with no route.
+        let credential = new_agent_pairing_credential().expect("credential");
+        let url = pairing_ticket_url(
+            &credential,
+            &AgentDialCandidate {
+                node_id: "node-1".to_string(),
+                relay_url: String::new(),
+                ticket: "endpoint-ticket-bytes".to_string(),
+            },
+            "",
+        );
+
+        use base64::Engine;
+        let encoded = url
+            .strip_prefix("codux://pair?payload=")
+            .expect("pair url shape");
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(encoded)
+            .expect("payload decodes");
+        let payload: Value = serde_json::from_slice(&decoded).expect("payload parses");
+
+        codux_protocol::parse_pairing_payload(&payload)
+            .expect("a relay-less host must still produce a usable pairing payload");
+        assert_eq!(payload["transports"][0]["ticket"], "endpoint-ticket-bytes");
     }
 }

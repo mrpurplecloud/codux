@@ -279,8 +279,49 @@ void main() {
     },
   );
 
+  test('confirmed device keeps the endpoint ticket the host sent', () async {
+    final payload = await parsePairingPayload(
+      embeddedPairingQr({
+        'code': '205503D6',
+        'secret': 'pairing-secret',
+        'pairingId': 'pair-1',
+        'transports': [irohCandidate(ticket: 'endpoint-ticket')],
+      }),
+    );
+
+    final confirmed = confirmedDevice(
+      payload: payload,
+      name: 'Phone',
+      confirmed: const RelayEnvelope(
+        type: 'pairing.confirmed',
+        payload: {
+          'hostId': 'host-1',
+          'deviceId': 'device-1',
+          'token': '',
+          'transports': [
+            {
+              'kind': RemoteTransportKind.iroh,
+              'url': 'https://relay.example',
+              'nodeId': 'node-1',
+              'relayUrl': 'https://relay.example',
+              'ticket': 'confirmed-endpoint-ticket',
+            },
+          ],
+        },
+      ),
+    );
+
+    // The ticket is the only field carrying the host's direct addresses.
+    // Discarding it here left the device reachable only through its relay.
+    expect(confirmed.transports.single.ticket, 'confirmed-endpoint-ticket');
+    expect(
+      (confirmed.toJson()['transports'] as List).single,
+      containsPair('ticket', 'confirmed-endpoint-ticket'),
+    );
+  });
+
   test(
-    'confirmed device strips ephemeral iroh ticket before persistence',
+    'a relay-less confirmation is still persisted with its ticket',
     () async {
       final payload = await parsePairingPayload(
         embeddedPairingQr({
@@ -303,19 +344,17 @@ void main() {
             'transports': [
               {
                 'kind': RemoteTransportKind.iroh,
-                'url': 'https://relay.example',
                 'nodeId': 'node-1',
-                'relayUrl': 'https://relay.example',
+                'ticket': 'relay-less-ticket',
               },
             ],
           },
         ),
       );
 
-      expect(confirmed.transports.single.ticket, isEmpty);
-      expect(confirmed.toJson()['transports'], [
-        irohCandidate(url: 'https://relay.example'),
-      ]);
+      final stored = confirmed.transportByKind(RemoteTransportKind.iroh);
+      expect(stored?.ticket, 'relay-less-ticket');
+      expect(stored?.relayUrl, isEmpty);
     },
   );
 }

@@ -85,6 +85,9 @@ void main() {
     final iroh = devices.single.transportByKind(RemoteTransportKind.iroh);
     expect(iroh?.nodeId, 'node-1');
     expect(iroh?.relayUrl, 'https://relay.example');
-    expect(iroh?.ticket, isEmpty);
+    // Load must not quietly rewrite what was stored. Rebuilding each candidate
+    // field by field dropped the endpoint ticket on every app start, so a
+    // device paired with direct addresses lost them at the next launch.
+    expect(iroh?.ticket, 'endpoint-ticket');
   });
 }

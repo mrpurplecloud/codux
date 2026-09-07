@@ -45,19 +45,16 @@ class StorageService {
     return normalized;
   }
 
+  /// Drop transports this build cannot dial, keeping the rest as stored.
+  ///
+  /// Previously rebuilt each survivor field by field, which quietly discarded
+  /// the endpoint ticket on every app start — so a device that had one after
+  /// pairing lost it on the next launch, and with it the host's direct
+  /// addresses. Filtering is the whole job; the candidates pass through
+  /// untouched.
   StoredDevice _normalizeDeviceTransport(StoredDevice device) {
     final transports = device.transports
         .where((candidate) => candidate.kind == RemoteTransportKind.iroh)
-        .map(
-          (candidate) => RemoteTransportCandidate(
-            kind: candidate.kind,
-            role: candidate.role,
-            url: candidate.url,
-            nodeId: candidate.nodeId,
-            relayUrl: candidate.relayUrl,
-            relayAuthentication: candidate.relayAuthentication,
-          ),
-        )
         .toList();
     return device.copyWith(transports: transports);
   }

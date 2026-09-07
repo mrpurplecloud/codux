@@ -75,17 +75,14 @@ List<RemoteTransportCandidate> _confirmedTransports(
   final transports = remoteTransportCandidatesFromJson(value);
   if (transports.isEmpty) return const [];
   return transports.map((candidate) {
-    if (candidate.kind != RemoteTransportKind.iroh) {
+    if (candidate.kind != RemoteTransportKind.iroh ||
+        candidate.url.trim().isNotEmpty) {
       return candidate;
     }
-    return RemoteTransportCandidate(
-      kind: candidate.kind,
-      role: candidate.role,
-      url: candidate.url.trim().isEmpty ? fallbackServer : candidate.url,
-      nodeId: candidate.nodeId,
-      relayUrl: candidate.relayUrl,
-      relayAuthentication: candidate.relayAuthentication,
-    );
+    // Fill in the dial url only. `copyWith`, not a rebuild: listing the fields
+    // by hand here is what silently dropped the endpoint ticket — the one field
+    // carrying the host's direct addresses — on its way into storage.
+    return candidate.copyWith(url: fallbackServer);
   }).toList();
 }
 

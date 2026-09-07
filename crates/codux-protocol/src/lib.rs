@@ -418,14 +418,14 @@ pub fn iroh_transport_candidate_with_ticket_and_authentication(
     }
 }
 
-/// One transport entry for a pairing QR / `codux://pair?payload=` URL. Encodes
-/// the MINIMUM needed to dial — `nodeId` + `relayUrl` (+ relay auth) — and
-/// deliberately omits the bulky iroh endpoint `ticket` (it ~doubles QR density
-/// and hurts scan reliability); the host re-sends the full transport set on
-/// `pairing.confirmed` once the controller connects. THE single definition of
-/// the pairing-QR transport shape — shared by every Rust host so a format change
-/// happens in one place, not once per host.
-pub fn pairing_transport_entry(candidate: &RemoteTransportCandidate) -> Value {
+/// Every field of `candidate` that is present, as a JSON object.
+///
+/// The two pairing serializers below differ only in what they leave out, so
+/// they share the reading and each states its own omission. Building the full
+/// object here also means a field added to the candidate reaches both by
+/// default — the previous hand-rolled copies silently dropped anything new,
+/// which is how the endpoint ticket went missing from the whole pairing chain.
+fn transport_entry_fields(candidate: &RemoteTransportCandidate) -> serde_json::Map<String, Value> {
     let mut item = serde_json::Map::new();
     item.insert("kind".to_string(), json!(candidate.kind));
     let non_empty = |value: &Option<String>| {
@@ -435,35 +435,60 @@ pub fn pairing_transport_entry(candidate: &RemoteTransportCandidate) -> Value {
             .filter(|value| !value.is_empty())
             .map(str::to_string)
     };
-    if let Some(node_id) = non_empty(&candidate.node_id) {
-        item.insert("nodeId".to_string(), json!(node_id));
+    for (key, value) in [
+        ("nodeId", &candidate.node_id),
+        ("relayUrl", &candidate.relay_url),
+        ("relayAuthentication", &candidate.relay_authentication),
+        ("ticket", &candidate.ticket),
+        ("url", &candidate.url),
+    ] {
+        if let Some(value) = non_empty(value) {
+            item.insert(key.to_string(), json!(value));
+        }
     }
-    if let Some(relay_url) = non_empty(&candidate.relay_url) {
-        item.insert("relayUrl".to_string(), json!(relay_url));
-    }
-    if let Some(authentication) = non_empty(&candidate.relay_authentication) {
-        item.insert("relayAuthentication".to_string(), json!(authentication));
+    item
+}
+
+/// One transport entry for a pairing QR / `codux://pair?payload=` URL.
+///
+/// Omits the dial `url` (the controller learns it on connect) and, when the
+/// host has a relay, the bulky endpoint `ticket` — it roughly doubles QR
+/// density and hurts scan reliability, and `nodeId` + `relayUrl` is enough to
+/// dial a host that has a relay home.
+///
+/// A host WITHOUT a relay is the exception, and the ticket stays. Dropping it
+/// there leaves a QR encoding an identity and no way to reach it, which this
+/// module's own parser then rejects — an unusable QR is a worse outcome than a
+/// dense one.
+///
+/// THE single definition of the pairing-QR transport shape, shared by every Rust
+/// host so a format change happens in one place.
+pub fn pairing_transport_entry(candidate: &RemoteTransportCandidate) -> Value {
+    let mut item = transport_entry_fields(candidate);
+    item.remove("url");
+    let has_relay = candidate
+        .relay_url
+        .as_deref()
+        .is_some_and(|relay| !relay.trim().is_empty());
+    if has_relay {
+        item.remove("ticket");
     }
     Value::Object(item)
 }
 
-/// One transport entry for a `pairing.confirmed` reply: the slim QR form (from
-/// [`pairing_transport_entry`]) PLUS the dial `url` the controller persists after
-/// connecting. Shared so the desktop and agent hosts emit IDENTICAL confirm
-/// transports instead of each hand-rolling the same object.
+/// One transport entry for a `pairing.confirmed` reply.
+///
+/// Carries everything, including the endpoint ticket. This reply has no density
+/// budget, and it is the controller's one chance to persist the host's direct
+/// addresses: the ticket is the only field that encodes them, so a controller
+/// that never receives it can only ever reach the host through a relay.
+///
+/// Deliberately NOT built from [`pairing_transport_entry`]. They answer to
+/// different constraints — one is squeezed into a QR, the other must be
+/// complete — and expressing the complete one as "the sparse one, plus a field"
+/// is what silently propagated the QR's omissions into persistent storage.
 pub fn confirmed_transport_entry(candidate: &RemoteTransportCandidate) -> Value {
-    let mut entry = pairing_transport_entry(candidate);
-    if let (Some(map), Some(url)) = (
-        entry.as_object_mut(),
-        candidate
-            .url
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty()),
-    ) {
-        map.insert("url".to_string(), json!(url));
-    }
-    entry
+    Value::Object(transport_entry_fields(candidate))
 }
 
 /// The full pairing payload (`code` / `secret` / `pairingId` / `transports`)
@@ -1327,6 +1352,67 @@ mod tests {
         assert!(payloads[1].get("screenWrappedRows").is_none());
         assert!(payloads[2].get("screenData").is_none());
         assert!(payloads[2].get("screenWrappedRows").is_none());
+    }
+
+    fn iroh_candidate(relay_url: &str, ticket: &str) -> RemoteTransportCandidate {
+        iroh_transport_candidate_with_ticket_and_authentication(
+            relay_url, "node-x", relay_url, ticket, "",
+        )
+    }
+
+    #[test]
+    fn a_relay_less_pairing_qr_carries_the_ticket() {
+        // Omitting the ticket keeps the QR sparse, and a host with a relay can
+        // be dialled from node id + relay alone. A host WITHOUT one cannot: drop
+        // its ticket and the QR encodes an identity with no way to reach it,
+        // which our own parser then rejects. Density is worth less than a QR
+        // that works.
+        let entry = pairing_transport_entry(&iroh_candidate("", "endpoint-ticket-bytes"));
+
+        assert_eq!(entry["ticket"], "endpoint-ticket-bytes");
+        assert_eq!(entry["nodeId"], "node-x");
+    }
+
+    #[test]
+    fn a_relayed_pairing_qr_stays_slim() {
+        let entry = pairing_transport_entry(&iroh_candidate(
+            "https://relay.example",
+            "endpoint-ticket-bytes",
+        ));
+
+        assert!(
+            entry.get("ticket").is_none(),
+            "a relay is enough to dial, so the bulky ticket stays out of the QR"
+        );
+        assert_eq!(entry["relayUrl"], "https://relay.example");
+    }
+
+    #[test]
+    fn a_confirmation_always_carries_the_ticket() {
+        // Unlike the QR, this reply has no density budget, and it is the one
+        // chance the controller gets to persist the host's direct addresses.
+        let entry =
+            confirmed_transport_entry(&iroh_candidate("https://relay.example", "ticket-bytes"));
+
+        assert_eq!(entry["ticket"], "ticket-bytes");
+        assert_eq!(entry["relayUrl"], "https://relay.example");
+    }
+
+    #[test]
+    fn a_pairing_payload_round_trips_a_relay_less_host() {
+        // End to end through the real producer and the real parser, which is
+        // where a relay-less host was being turned into an unusable QR.
+        let payload = pairing_payload(
+            "1234",
+            "secret",
+            "pair-1",
+            &[iroh_candidate("", "endpoint-ticket-bytes")],
+        );
+
+        let parsed = parse_pairing_payload(&payload).expect("relay-less QR must be usable");
+
+        let transport = &parsed.transports[0];
+        assert_eq!(transport.ticket.as_deref(), Some("endpoint-ticket-bytes"));
     }
 
     #[test]
