@@ -185,8 +185,25 @@ pub(crate) fn controller_transport_config_from_json(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let relay_url = json_string_field(&value, "relayUrl");
+    // The host publishes the relay it is *connected to* and omits the key when
+    // it has none, so a host whose relay was unreachable at startup reports a
+    // candidate with no relay at all. `relayUrl` here is the relay agreed at
+    // pairing, which the phone stores separately and the host never overwrites
+    // — the last relay route it has. A reported relay still wins: only one of
+    // them can be the relay the host is actually homed on, so this is a
+    // fallback, not a second route.
+    let transports = transports
+        .into_iter()
+        .map(|mut candidate| {
+            if candidate.relay_url.trim().is_empty() {
+                candidate.relay_url = relay_url.clone();
+            }
+            candidate
+        })
+        .collect();
     Ok(RemoteControllerTransportConfig {
-        relay_url: json_string_field(&value, "relayUrl"),
+        relay_url,
         host_id: json_string_field(&value, "hostId"),
         device_id: json_string_field(&value, "deviceId"),
         device_token: json_string_field(&value, "deviceToken"),
@@ -325,6 +342,45 @@ fn transport_event_priority(kind: TransportEventKind) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn a_relay_less_report_falls_back_to_the_relay_from_pairing() {
+        // The product promise is that a phone reaches its host on any network:
+        // direct when it can, relay when it cannot. A host whose relay is
+        // unreachable at startup publishes no relay, so without this the dial
+        // would have only direct routes -- exactly the case a relay covers.
+        let config = controller_transport_config_from_json(
+            r#"{
+                "relayUrl": "https://paired-relay.example",
+                "transports": [{ "kind": "iroh", "nodeId": "node-1", "ticket": "t" }]
+            }"#,
+        )
+        .expect("config");
+        assert_eq!(
+            config.transports[0].relay_url, "https://paired-relay.example",
+            "a report with no relay must fall back to the one agreed at pairing"
+        );
+    }
+
+    #[test]
+    fn a_reported_relay_wins_over_the_one_from_pairing() {
+        // Only one relay can be the one the host is actually homed on, so the
+        // fresh report replaces the stored guess rather than joining it.
+        let config = controller_transport_config_from_json(
+            r#"{
+                "relayUrl": "https://paired-relay.example",
+                "transports": [{
+                    "kind": "iroh",
+                    "nodeId": "node-1",
+                    "relayUrl": "https://live-relay.example"
+                }]
+            }"#,
+        )
+        .expect("config");
+        assert_eq!(config.transports[0].relay_url, "https://live-relay.example");
+    }
+
     use super::*;
     use serde_json::json;
 

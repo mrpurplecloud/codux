@@ -47,8 +47,9 @@ impl RemoteService {
 
     fn refresh_devices_local(&self) -> Result<RemoteSummary, String> {
         let settings = self.update_raw_settings(|raw| {
-            if !remote_settings_from_raw(raw).is_enabled {
-                return Ok(remote_settings_from_raw(raw));
+            let settings = remote_settings_from_raw(raw);
+            if !settings.is_enabled {
+                return Ok(settings);
             }
             for device in cached_devices_mut(raw)?.iter_mut() {
                 if let Some(device) = device.as_object_mut() {

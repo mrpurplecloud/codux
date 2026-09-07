@@ -249,7 +249,6 @@ impl ManagerShared {
                             relay_authentication: transport.relay_authentication.clone(),
                         },
                         &transport.direct_addrs,
-                        "",
                     )
                     .is_ok()
                 })

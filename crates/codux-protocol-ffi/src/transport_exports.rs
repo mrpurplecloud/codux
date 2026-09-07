@@ -125,7 +125,7 @@ pub extern "C" fn codux_controller_transport_config_summary_json(
     let usable = config
         .transports
         .iter()
-        .filter(|candidate| build_iroh_dial_target(candidate, &config.direct_addrs, &config.relay_url).is_ok())
+        .filter(|candidate| build_iroh_dial_target(candidate, &config.direct_addrs).is_ok())
         .collect::<Vec<_>>();
     let preferred = preferred_controller_transport_kind(
         usable

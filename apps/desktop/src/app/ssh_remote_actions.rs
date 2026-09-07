@@ -495,6 +495,14 @@ impl CoduxApp {
         T: FnOnce(&mut Self, Result<(SettingsSummary, RemoteSummary), String>, &mut Context<Self>)
             + 'static,
     {
+        if self.remote_transport_busy {
+            // Say so rather than swallowing the click: the drain this is
+            // waiting on lasts as long as whatever the phone asked for, and a
+            // control that snaps back with no explanation reads as broken.
+            self.status_message = "remote transport change already in progress".to_string();
+            self.invalidate_remote_panel(cx);
+            return;
+        }
         self.remote_transport_busy = true;
         cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
             let result = codux_runtime::async_runtime::spawn_blocking(work)
@@ -511,9 +519,6 @@ impl CoduxApp {
     }
 
     pub(super) fn toggle_remote_host(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.remote_transport_busy {
-            return;
-        }
         let next = !self.state.remote.enabled;
         let service = self.runtime_service.clone();
         self.spawn_remote_transport_change(
@@ -589,9 +594,6 @@ impl CoduxApp {
         reset_devices: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.remote_transport_busy {
-            return;
-        }
         let service = self.runtime_service.clone();
         self.spawn_remote_transport_change(
             cx,
@@ -625,9 +627,6 @@ impl CoduxApp {
         reset_devices: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.remote_transport_busy {
-            return;
-        }
         let service = self.runtime_service.clone();
         self.spawn_remote_transport_change(
             cx,
@@ -663,9 +662,6 @@ impl CoduxApp {
         reset_devices: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.remote_transport_busy {
-            return;
-        }
         let service = self.runtime_service.clone();
         self.spawn_remote_transport_change(
             cx,
