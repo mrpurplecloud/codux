@@ -873,8 +873,9 @@ impl RemoteControllerManager {
     /// caller that asks a host who it is refreshes the record for free, and a
     /// caller added later cannot forget to.
     pub fn host_info(&self, device_id: &str) -> Result<serde_json::Value, String> {
-        let info = self.controller_for(device_id)?.host_info()?;
-        self.shared.adopt_reported_transports(device_id, &info);
+        let controller = self.controller_for(device_id)?;
+        let info = controller.host_info()?;
+        self.adopt_if_current(device_id, &controller, &info);
         Ok(info)
     }
 
@@ -887,8 +888,28 @@ impl RemoteControllerManager {
         controller: &RemoteController,
     ) -> Result<serde_json::Value, String> {
         let info = controller.host_info()?;
-        self.shared.adopt_reported_transports(device_id, &info);
+        self.adopt_if_current(device_id, controller, &info);
         Ok(info)
+    }
+
+    /// Adopt reported addresses only when the connection that reported them is
+    /// still this device's live link.
+    ///
+    /// A reply describes the connection that produced it. A request can outlive
+    /// its connection — the link drops and a reconnect replaces it while the
+    /// reply is still in flight — and the answer then describes a link nobody
+    /// uses. Persisting it would overwrite the newer connection's addresses with
+    /// older ones. Callers checked this, but only after the write had happened.
+    fn adopt_if_current(
+        &self,
+        device_id: &str,
+        controller: &RemoteController,
+        info: &serde_json::Value,
+    ) {
+        if self.live_connection_epoch(device_id, controller).is_none() {
+            return;
+        }
+        self.shared.adopt_reported_transports(device_id, info);
     }
 
     /// [`Self::host_info`] for callers that must block on the connect.
@@ -897,10 +918,9 @@ impl RemoteControllerManager {
         device_id: &str,
         timeout: Duration,
     ) -> Result<serde_json::Value, String> {
-        let info = self
-            .controller_for_blocking(device_id, timeout)?
-            .host_info()?;
-        self.shared.adopt_reported_transports(device_id, &info);
+        let controller = self.controller_for_blocking(device_id, timeout)?;
+        let info = controller.host_info()?;
+        self.adopt_if_current(device_id, &controller, &info);
         Ok(info)
     }
 
@@ -1239,6 +1259,36 @@ mod tests {
         assert_eq!(
             manager.live_connection_epoch("device-1", &new),
             Some(next_epoch)
+        );
+    }
+
+    #[test]
+    fn a_superseded_connection_cannot_write_its_reply_into_the_store() {
+        // A `host.info` request can outlive the connection that sent it: the
+        // link drops, a reconnect replaces it, and the reply arrives describing
+        // a link nobody uses. Persisting it would overwrite the live
+        // connection's addresses with older ones.
+        let manager = manager("codux-controller-superseded-adopt");
+        save_test_host(&manager, "device-1");
+        let superseded = test_controller("device-1");
+
+        manager.adopt_if_current(
+            "device-1",
+            &superseded,
+            &serde_json::json!({
+                "transports": [{
+                    "kind": "iroh",
+                    "nodeId": "node-x",
+                    "relayUrl": "https://relay.example",
+                    "ticket": "ticket-from-a-dead-link",
+                }],
+            }),
+        );
+
+        let saved = manager.shared.store.find("device-1").expect("host");
+        assert!(
+            saved.transports.is_empty(),
+            "a reply from a connection that is no longer live must not be stored"
         );
     }
 
