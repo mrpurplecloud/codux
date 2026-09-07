@@ -16,7 +16,8 @@ use codux_protocol::{
 };
 use futures_util::StreamExt;
 use iroh::{
-    Endpoint, EndpointAddr, RelayMap, RelayMode, RelayUrl, SecretKey, TransportAddr, Watcher,
+    Endpoint, EndpointAddr, RelayConfig, RelayMap, RelayMode, RelayUrl, SecretKey,
+    TransportAddr, Watcher,
     endpoint::{Connection, PathEvent, RecvStream, SendStream, presets},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
@@ -3265,6 +3266,43 @@ mod tests {
         );
         assert!(!candidate.ticket.is_empty());
         assert!(build_iroh_dial_target(&candidate, &[]).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_relay_that_never_connects_is_absent_from_everything_the_host_publishes() {
+        // Two things hang on this. The QR serializer treats a non-empty
+        // `relayUrl` as a usable route and drops the direct-address ticket, so
+        // publishing a relay we have no path to produces an unusable QR. And
+        // the phone replaces its stored candidate with whatever the host
+        // reports, so if the ticket did not keep the configured relay, a host
+        // that starts while its relay is down would erase the phone's only
+        // relay route -- leaving it stranded the next time it has no direct
+        // path.
+        crate::install_rustls_crypto_provider();
+        let relay: RelayUrl = "https://relay.invalid.example"
+            .parse()
+            .expect("relay url");
+        let endpoint = Endpoint::builder(presets::N0)
+            .alpns(vec![CODUX_REMOTE_ALPN.to_vec()])
+            .relay_mode(RelayMode::Custom(RelayMap::from_iter([RelayConfig::new(
+                relay.clone(),
+                None,
+            )])))
+            .bind()
+            .await
+            .expect("bind endpoint with an unroutable relay");
+
+        assert!(
+            connected_relay_url(&endpoint).is_none(),
+            "a relay that never completes must not read as connected"
+        );
+        assert_eq!(
+            endpoint.addr().relay_urls().count(),
+            0,
+            "a configured relay that never completed is not in the endpoint's own \
+             address set either, so the ticket cannot carry it as a fallback -- \
+             whatever the phone had stored is all it will have"
+        );
     }
 
     #[tokio::test]

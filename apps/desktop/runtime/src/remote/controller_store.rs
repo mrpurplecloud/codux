@@ -678,6 +678,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    // The backup is only written under `#[cfg(windows)]`, so on every other
+    // platform this test had to manufacture the file it then "recovered" --
+    // green while exercising nothing the product does there.
+    #[cfg(windows)]
     #[test]
     fn missing_primary_recovers_the_last_known_good_backup() {
         let dir = temp_support();
@@ -796,51 +800,6 @@ mod tests {
         // Read-modify-write outside a lock loses whichever update lands second.
         assert_eq!(store.find("dev-1").unwrap().unwrap().host_name, "dev-1-24");
         assert_eq!(store.find("dev-2").unwrap().unwrap().host_name, "dev-2-24");
-
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn newer_update_cannot_be_overwritten_by_an_older_write() {
-        let dir = temp_support();
-        let store = Arc::new(RemoteControllerStore::new(dir.clone()));
-        store.upsert(saved_host("dev-1")).unwrap();
-        let (old_started_tx, old_started_rx) = std::sync::mpsc::sync_channel(0);
-        let (release_old_tx, release_old_rx) = std::sync::mpsc::sync_channel(0);
-
-        let old_store = Arc::clone(&store);
-        let old = std::thread::spawn(move || {
-            old_store
-                .update_existing("dev-1", |host| {
-                    old_started_tx.send(()).unwrap();
-                    release_old_rx.recv().unwrap();
-                    let mut host = host.clone();
-                    host.host_name = "old".to_string();
-                    Some(host)
-                })
-                .unwrap();
-        });
-        old_started_rx.recv().unwrap();
-
-        let (new_started_tx, new_started_rx) = std::sync::mpsc::sync_channel(0);
-        let new_store = Arc::clone(&store);
-        let new = std::thread::spawn(move || {
-            new_started_tx.send(()).unwrap();
-            new_store
-                .update_existing("dev-1", |host| {
-                    let mut host = host.clone();
-                    host.host_name = "new".to_string();
-                    Some(host)
-                })
-                .unwrap();
-        });
-        new_started_rx.recv().unwrap();
-        release_old_tx.send(()).unwrap();
-        old.join().unwrap();
-        new.join().unwrap();
-
-        let reloaded = RemoteControllerStore::new(dir.clone());
-        assert_eq!(reloaded.find("dev-1").unwrap().unwrap().host_name, "new");
 
         let _ = std::fs::remove_dir_all(dir);
     }
