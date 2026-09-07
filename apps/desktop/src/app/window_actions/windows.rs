@@ -336,6 +336,7 @@ impl CoduxApp {
             ssh_draft_key_passphrase: String::new(),
             selected_remote_device_id,
             remote_reconnecting: false,
+            remote_transport_busy: false,
             remote_pairing_sheet_open: false,
             remote_pairing_creating: false,
             remote_pairing_error: None,

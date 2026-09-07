@@ -483,24 +483,86 @@ impl CoduxApp {
         self.invalidate_remote_panel(cx);
     }
 
+    /// Enabling, disabling or reconfiguring the transport hands ownership of the
+    /// running one back, which waits for every in-flight host callback to drain
+    /// first. A callback spans a whole envelope dispatch, so the wait is as long
+    /// as whatever the phone asked for — a `git push` over a slow link, say.
+    /// That must not happen on the UI thread, and a second click must not race
+    /// the first one's result.
+    fn spawn_remote_transport_change<T, F>(&mut self, cx: &mut Context<Self>, work: F, apply: T)
+    where
+        F: FnOnce() -> Result<(SettingsSummary, RemoteSummary), String> + Send + 'static,
+        T: FnOnce(&mut Self, Result<(SettingsSummary, RemoteSummary), String>, &mut Context<Self>)
+            + 'static,
+    {
+        self.remote_transport_busy = true;
+        cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
+            let result = codux_runtime::async_runtime::spawn_blocking(work)
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+            let _ = this.update(cx, |app, cx| {
+                app.remote_transport_busy = false;
+                apply(app, result, cx);
+            });
+        })
+        .detach();
+        self.invalidate_remote_panel(cx);
+    }
+
     pub(super) fn toggle_remote_host(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.remote_transport_busy {
+            return;
+        }
         let next = !self.state.remote.enabled;
-        match self.runtime_service.set_remote_enabled(next) {
-            Ok(remote) => {
-                let settings = self.runtime_service.reload_state().settings;
+        let service = self.runtime_service.clone();
+        self.spawn_remote_transport_change(
+            cx,
+            move || {
+                service
+                    .set_remote_enabled(next)
+                    .map(|remote| (service.reload_state().settings, remote))
+            },
+            |app, result, cx| {
+                match result {
+                    Ok((settings, remote)) => {
+                        app.apply_settings_summary(settings);
+                        app.state.remote = remote;
+                        app.normalize_selected_remote_device();
+                        app.status_message = format!(
+                            "remote host setting saved: {}",
+                            if app.state.remote.enabled {
+                                "on"
+                            } else {
+                                "off"
+                            }
+                        );
+                    }
+                    Err(error) => {
+                        app.status_message = format!("failed to save remote setting: {error}")
+                    }
+                }
+                app.invalidate_remote_panel(cx);
+            },
+        );
+    }
+
+    fn apply_remote_relay_result(
+        &mut self,
+        result: Result<(SettingsSummary, RemoteSummary), String>,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok((settings, remote)) => {
                 self.apply_settings_summary(settings);
                 self.state.remote = remote;
+                self.remote_reconnecting = self.state.remote.status == "connecting";
                 self.normalize_selected_remote_device();
-                self.status_message = format!(
-                    "remote host setting saved: {}",
-                    if self.state.remote.enabled {
-                        "on"
-                    } else {
-                        "off"
-                    }
-                );
+                self.status_message = "remote relay setting saved".to_string();
             }
-            Err(error) => self.status_message = format!("failed to save remote setting: {error}"),
+            Err(error) => {
+                self.status_message = format!("failed to save remote relay setting: {error}");
+            }
         }
         self.invalidate_remote_panel(cx);
     }
@@ -527,22 +589,15 @@ impl CoduxApp {
         reset_devices: bool,
         cx: &mut Context<Self>,
     ) {
-        match self
-            .runtime_service
-            .set_remote_relay_url_with_device_reset(&relay_url, reset_devices)
-        {
-            Ok((settings, remote)) => {
-                self.apply_settings_summary(settings);
-                self.state.remote = remote;
-                self.remote_reconnecting = self.state.remote.status == "connecting";
-                self.normalize_selected_remote_device();
-                self.status_message = "remote relay setting saved".to_string();
-            }
-            Err(error) => {
-                self.status_message = format!("failed to save remote relay setting: {error}");
-            }
+        if self.remote_transport_busy {
+            return;
         }
-        self.invalidate_remote_panel(cx);
+        let service = self.runtime_service.clone();
+        self.spawn_remote_transport_change(
+            cx,
+            move || service.set_remote_relay_url_with_device_reset(&relay_url, reset_devices),
+            |app, result, cx| app.apply_remote_relay_result(result, cx),
+        );
     }
 
     pub(super) fn set_remote_relay_authentication(
@@ -570,22 +625,20 @@ impl CoduxApp {
         reset_devices: bool,
         cx: &mut Context<Self>,
     ) {
-        match self
-            .runtime_service
-            .set_remote_relay_authentication_with_device_reset(&relay_authentication, reset_devices)
-        {
-            Ok((settings, remote)) => {
-                self.apply_settings_summary(settings);
-                self.state.remote = remote;
-                self.remote_reconnecting = self.state.remote.status == "connecting";
-                self.normalize_selected_remote_device();
-                self.status_message = "remote relay setting saved".to_string();
-            }
-            Err(error) => {
-                self.status_message = format!("failed to save remote relay setting: {error}");
-            }
+        if self.remote_transport_busy {
+            return;
         }
-        self.invalidate_remote_panel(cx);
+        let service = self.runtime_service.clone();
+        self.spawn_remote_transport_change(
+            cx,
+            move || {
+                service.set_remote_relay_authentication_with_device_reset(
+                    &relay_authentication,
+                    reset_devices,
+                )
+            },
+            |app, result, cx| app.apply_remote_relay_result(result, cx),
+        );
     }
 
     pub(super) fn set_remote_relay_preset(
@@ -610,22 +663,15 @@ impl CoduxApp {
         reset_devices: bool,
         cx: &mut Context<Self>,
     ) {
-        match self
-            .runtime_service
-            .set_remote_relay_preset_with_device_reset(&relay_preset, reset_devices)
-        {
-            Ok((settings, remote)) => {
-                self.apply_settings_summary(settings);
-                self.state.remote = remote;
-                self.remote_reconnecting = self.state.remote.status == "connecting";
-                self.normalize_selected_remote_device();
-                self.status_message = "remote relay setting saved".to_string();
-            }
-            Err(error) => {
-                self.status_message = format!("failed to save remote relay setting: {error}");
-            }
+        if self.remote_transport_busy {
+            return;
         }
-        self.invalidate_remote_panel(cx);
+        let service = self.runtime_service.clone();
+        self.spawn_remote_transport_change(
+            cx,
+            move || service.set_remote_relay_preset_with_device_reset(&relay_preset, reset_devices),
+            |app, result, cx| app.apply_remote_relay_result(result, cx),
+        );
     }
 
     fn remote_relay_change_requires_confirmation(&self) -> bool {

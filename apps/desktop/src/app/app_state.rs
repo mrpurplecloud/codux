@@ -356,6 +356,12 @@ pub struct CoduxApp {
     pub(in crate::app) ssh_draft_key_passphrase: String,
     pub(in crate::app) selected_remote_device_id: Option<String>,
     pub(in crate::app) remote_reconnecting: bool,
+    /// Set while a transport start, stop or relay change is in flight on a
+    /// blocking thread. Those calls take as long as it takes the host to drain
+    /// its in-flight callbacks, so they cannot run on the UI thread; and while
+    /// one is running a second click would race its result against the first,
+    /// leaving the transport in whichever state happened to return last.
+    pub(in crate::app) remote_transport_busy: bool,
     pub(in crate::app) remote_pairing_sheet_open: bool,
     pub(in crate::app) remote_pairing_creating: bool,
     pub(in crate::app) remote_pairing_error: Option<String>,
