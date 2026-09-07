@@ -387,6 +387,12 @@ class _CoduxHomePageState extends State<CoduxHomePage>
         ? (c._workspaceMode != WorkspaceMode.review &&
               c._editingFilePath == null)
         : (c._workspaceMode == WorkspaceMode.terminal);
+    // The session this pane is being built for. Input callbacks below carry it,
+    // so a gesture on the frame the user is actually looking at cannot land on
+    // a session they switched to since — the switch changes the controller's
+    // current session immediately, but the pane still shows the old one until
+    // it rebuilds.
+    final paneSessionId = c._sessionId;
     final terminalBody = RemoteTerminalPane(
       connected: c._isConnected,
       showTerminal: c._hasShownTerminal,
@@ -431,9 +437,10 @@ class _CoduxHomePageState extends State<CoduxHomePage>
         if (c._terminalSelectedText == text) return;
         c._applyState(() => c._terminalSelectedText = text);
       },
-      onSendKey: c._sendTerminalKey,
+      onSendKey: (data) => c._sendTerminalKey(data, fromSession: paneSessionId),
       canForwardScroll: c._ownsTerminalViewport,
-      onSendScroll: c._sendTerminalScroll,
+      onSendScroll: (data) =>
+          c._sendTerminalScroll(data, fromSession: paneSessionId),
       onToggleKeyboard: c._toggleTerminalKeyboard,
       onRequestKeyboard: c._requestTerminalKeyboard,
       onPaste: c._pasteToTerminal,

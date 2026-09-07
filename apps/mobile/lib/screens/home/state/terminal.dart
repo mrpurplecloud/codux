@@ -573,8 +573,27 @@ extension _HomePageTerminal on HomeController {
     _terminalInputBatcher.add(data);
   }
 
-  void _sendTerminalKey(String data) {
+  /// Whether input produced on the frame built for [fromSession] may still be
+  /// sent.
+  ///
+  /// A session switch changes the current session immediately, while the pane
+  /// keeps showing the previous one until it rebuilds. A gesture in that gap
+  /// belongs to what the user was looking at, not to what the controller has
+  /// since selected — sending it would type into the wrong terminal.
+  ///
+  /// A null [fromSession] means the caller has no frame to speak for (a
+  /// toolbar action, a paste); those follow the current session as before.
+  bool _inputBelongsToCurrentSession(String? fromSession) {
+    if (fromSession == null || fromSession == _sessionId) return true;
+    CoduxLog.debug(
+      '[codux-flutter-input] drop stale gesture from=$fromSession current=${_sessionId ?? ''}',
+    );
+    return false;
+  }
+
+  void _sendTerminalKey(String data, {String? fromSession}) {
     if (data.isEmpty) return;
+    if (!_inputBelongsToCurrentSession(fromSession)) return;
     _terminalInputBatcher.flush();
     _sendInputNow(data, source: 'key');
   }
@@ -589,8 +608,9 @@ extension _HomePageTerminal on HomeController {
   /// scrolling is a read: it must not claim the viewport, because the handoff
   /// resizes the host PTY to this device's grid and the reflow costs the top of
   /// the scrollback.
-  void _sendTerminalScroll(String data) {
+  void _sendTerminalScroll(String data, {String? fromSession}) {
     if (data.isEmpty || !_ownsTerminalViewport()) return;
+    if (!_inputBelongsToCurrentSession(fromSession)) return;
     _terminalInputBatcher.flush();
     _sendInputNow(data, source: 'scroll', claimViewport: false);
   }
