@@ -82,6 +82,29 @@ void main() {
   test('flushes pending printable input before control keys', () {
     final timers = <_FakeTimer>[];
     final sent = <String>[];
+    final activation = TerminalActivation('session-a');
+    final batcher = TerminalInputBatcher(
+      activeActivation: () => activation,
+      send: (owner, data) => sent.add('${owner.sessionId}:$data'),
+      timerFactory: (delay, callback) {
+        final timer = _FakeTimer(callback);
+        timers.add(timer);
+        return timer;
+      },
+    );
+
+    batcher.add(activation: activation, data: 'git status');
+    batcher.add(activation: activation, data: '\r');
+
+    // Order is the whole point: a shell that receives the newline first runs an
+    // empty line and then leaves the command sitting unexecuted.
+    expect(sent, ['session-a:git status', 'session-a:\r']);
+    expect(batcher.hasPendingData, isFalse);
+  });
+
+  test('a control key on a new activation drops the old one\'s buffer', () {
+    final timers = <_FakeTimer>[];
+    final sent = <String>[];
     final activationA = TerminalActivation('session-a');
     var activeActivation = activationA;
     final batcher = TerminalInputBatcher(

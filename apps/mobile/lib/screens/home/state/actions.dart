@@ -23,8 +23,9 @@ extension _HomePageActions on HomeController {
   }
 
   Future<void> _removeDevice(StoredDevice device) async {
-    final snapshot = await _storage.applyRequiredDeviceMutation(
+    final snapshot = await _applyRequiredDeviceMutation(
       DeviceRemoved(device.deviceId),
+      reason: 'remove-device',
     );
     if (snapshot == null) return;
     if (_activeDevice?.deviceId == device.deviceId) {
@@ -78,8 +79,9 @@ extension _HomePageActions on HomeController {
       ),
     );
     if (hostName == null) return;
-    final snapshot = await _storage.applyRequiredDeviceMutation(
+    final snapshot = await _applyRequiredDeviceMutation(
       DeviceHostNameChanged(device.deviceId, hostName),
+      reason: 'rename-device',
     );
     if (snapshot != null) _publishDeviceSnapshot(snapshot);
   }

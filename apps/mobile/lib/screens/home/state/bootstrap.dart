@@ -24,7 +24,16 @@ extension _HomePageBootstrap on HomeController {
     }
     await _loadDeviceName();
     final loadedSettings = await _storage.loadSettings();
-    await _storage.initializeDevices();
+    try {
+      // Best-effort repair of the stored list. It must not be able to stop the
+      // app from starting: before this, a failed normalization write threw
+      // before `_applyState` ever ran and left a blank startup screen.
+      await _storage.initializeDevices();
+    } catch (error) {
+      CoduxLog.warn(
+        '[codux-flutter-storage] device normalization failed error=$error',
+      );
+    }
     final lastDeviceId = await _storage.loadLastDeviceId();
     final deviceSnapshot = await _storage.currentDeviceSnapshot();
     final devices = deviceSnapshot.devices;
@@ -123,6 +132,28 @@ extension _HomePageBootstrap on HomeController {
       _devices = nextState.devices;
       _activeDevice = nextState.activeDevice;
     });
+  }
+
+  /// A required mutation reports its write failure by throwing, and every
+  /// caller here is fired from a dialog callback with nothing awaiting it — so
+  /// an uncaught failure became an unhandled async error and the user saw the
+  /// device still listed with no explanation. Failing is still failing: the
+  /// caller gets null and stops, and the reason reaches the status line.
+  Future<DeviceSnapshot?> _applyRequiredDeviceMutation(
+    DeviceMutation mutation, {
+    required String reason,
+  }) async {
+    try {
+      return await _storage.applyRequiredDeviceMutation(mutation);
+    } catch (error) {
+      CoduxLog.warn(
+        '[codux-flutter-storage] required device mutation failed reason=$reason error=$error',
+      );
+      if (mounted) {
+        _applyState(() => _status = '${_t('remote.error')}: $error');
+      }
+      return null;
+    }
   }
 
   Future<DeviceSnapshot?> _applyBackgroundDeviceMutation(
