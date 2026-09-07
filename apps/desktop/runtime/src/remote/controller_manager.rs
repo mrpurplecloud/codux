@@ -249,8 +249,32 @@ impl ManagerShared {
                             relay_authentication: transport.relay_authentication.clone(),
                         },
                         &transport.direct_addrs,
+                        "",
                     )
                     .is_ok()
+                })
+                // Only now, on candidates the dial path would already accept:
+                // the host publishes the relay it is *connected to* and omits
+                // the key when it has none, so a host that started while its
+                // relay was down reports no relay at all, and its ticket
+                // carries none either. Keeping the one we already know leaves a
+                // relay route for the case direct dialling cannot cover.
+                //
+                // Deliberately after the filter, not before. A report carrying
+                // nothing else usable must still be rejected -- lending it a
+                // remembered relay would let it pass and then overwrite the
+                // ticket it did not bring, stranding the device until it is
+                // re-paired.
+                .map(|mut transport| {
+                    if transport.relay_url.trim().is_empty()
+                        && let Some(previous) = host
+                            .transports
+                            .iter()
+                            .find(|item| item.kind == transport.kind)
+                    {
+                        transport.relay_url = previous.relay_url.clone();
+                    }
+                    transport
                 })
                 .collect();
             if next.is_empty() || next == host.transports {

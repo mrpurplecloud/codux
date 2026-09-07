@@ -102,6 +102,9 @@ impl TicketTransport {
                 relay_authentication: self.relay_authentication.clone(),
             },
             &[],
+            // A pairing ticket is the pairing: there is no earlier relay to
+            // fall back to yet.
+            "",
         )
         .is_ok()
     }

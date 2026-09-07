@@ -1514,7 +1514,7 @@ fn select_controller_dial_target(
 ) -> Result<(&RemoteTransportCandidate, IrohDialTarget), String> {
     let mut first_error = None;
     for candidate in &config.transports {
-        match build_iroh_dial_target(candidate, &config.direct_addrs) {
+        match build_iroh_dial_target(candidate, &config.direct_addrs, &config.relay_url) {
             Ok(target) => return Ok((candidate, target)),
             Err(error) if first_error.is_none() => first_error = Some(error),
             Err(_) => {}
@@ -2522,9 +2522,19 @@ pub struct IrohDialTarget {
     controller_relay_url: Option<RelayUrl>,
 }
 
+/// Assemble every route to the host that this controller knows.
+///
+/// `paired_relay` is the relay agreed when the device was paired. It is kept
+/// alongside whatever the host reports rather than replaced by it: iroh dials
+/// direct paths first and only falls back to a relay, so an extra relay costs a
+/// route that may fail, while having none leaves a phone on a network where
+/// direct dialling cannot work with nothing left to try. A host whose relay is
+/// unreachable at startup reports no relay, and its ticket carries none either,
+/// so this is often the only relay route in the set.
 pub fn build_iroh_dial_target(
     candidate: &RemoteTransportCandidate,
     remembered: &[String],
+    paired_relay: &str,
 ) -> Result<IrohDialTarget, String> {
     if candidate.kind != codux_protocol::REMOTE_TRANSPORT_IROH {
         return Err(format!(
@@ -2575,8 +2585,14 @@ pub fn build_iroh_dial_target(
         "" => None,
         relay_url => parse_relay_url(relay_url).ok(),
     };
-    if let Some(relay_url) = reported_relay.as_ref() {
-        addr = addr.with_relay_url(relay_url.clone());
+    for relay_url in [
+        reported_relay.clone(),
+        parse_relay_url(paired_relay.trim()).ok(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        addr = addr.with_relay_url(relay_url);
     }
     addr = with_remembered_addrs(addr, remembered);
     if addr.is_empty() {
@@ -2691,6 +2707,36 @@ mod tests {
         SecretKey::from_bytes(&[7u8; 32]).public()
     }
 
+    #[test]
+    fn the_paired_relay_stays_a_route_when_the_host_reports_none() {
+        // The product promise is that a phone reaches its host on any network:
+        // direct when it can, relay when it cannot. So a dial must not end up
+        // with zero relay routes while the phone still knows one.
+        //
+        // A host whose relay is unreachable reports an empty relayUrl, and its
+        // ticket carries no relay either -- see
+        // `a_relay_that_never_connects_is_absent_from_everything_the_host_publishes`.
+        // The relay agreed at pairing time is then the only one left anywhere,
+        // and it is the route that covers the case direct dialling cannot: a
+        // phone on cellular with no path to the host's addresses.
+        let candidate = iroh_candidate(&test_endpoint_id().to_string(), "", "");
+        let target = build_iroh_dial_target(
+            &candidate,
+            &["10.8.0.3:41234".to_string()],
+            "https://paired-relay.example",
+        )
+        .expect("a node id plus a remembered address is dialable");
+
+        assert!(
+            target
+                .endpoint_addr
+                .relay_urls()
+                .any(|url| url.to_string().contains("paired-relay.example")),
+            "the relay from pairing must remain a route when the host reports none, \
+             or a phone that loses its direct path has nothing left to try"
+        );
+    }
+
     fn other_test_endpoint_id() -> iroh::EndpointId {
         SecretKey::from_bytes(&[8u8; 32]).public()
     }
@@ -2734,7 +2780,7 @@ mod tests {
             "https://relay.example",
             &ticket,
         );
-        let expected = build_iroh_dial_target(&first, &[]).unwrap_err();
+        let expected = build_iroh_dial_target(&first, &[], "").unwrap_err();
         let config = RemoteControllerTransportConfig {
             transports: vec![first, iroh_candidate("invalid-node-id", "", "")],
             ..Default::default()
@@ -2818,15 +2864,15 @@ mod tests {
     fn remembered_addresses_make_a_relay_less_candidate_dialable() {
         let candidate = iroh_candidate(&test_endpoint_id().to_string(), "", "");
 
-        assert!(build_iroh_dial_target(&candidate, &["10.8.0.3:41234".to_string()]).is_ok());
-        assert!(build_iroh_dial_target(&candidate, &[]).is_err());
+        assert!(build_iroh_dial_target(&candidate, &["10.8.0.3:41234".to_string()], "").is_ok());
+        assert!(build_iroh_dial_target(&candidate, &[], "").is_err());
     }
 
     #[test]
     fn a_node_id_and_a_remembered_address_build_a_dial_target() {
         let candidate = iroh_candidate(&test_endpoint_id().to_string(), "", "");
 
-        let target = build_iroh_dial_target(&candidate, &["10.8.0.3:41234".to_string()])
+        let target = build_iroh_dial_target(&candidate, &["10.8.0.3:41234".to_string()], "")
             .expect("node id + remembered address is dialable");
         let addr = target.endpoint_addr;
 
@@ -2845,7 +2891,7 @@ mod tests {
         );
 
         let target =
-            build_iroh_dial_target(&candidate, &[]).expect("must fall back to node id + relay");
+            build_iroh_dial_target(&candidate, &[], "").expect("must fall back to node id + relay");
         let addr = target.endpoint_addr;
 
         assert_eq!(addr.relay_urls().count(), 1);
@@ -2855,7 +2901,7 @@ mod tests {
     fn a_candidate_with_no_route_at_all_is_refused() {
         let candidate = iroh_candidate(&test_endpoint_id().to_string(), "", "");
 
-        assert!(build_iroh_dial_target(&candidate, &[]).is_err());
+        assert!(build_iroh_dial_target(&candidate, &[], "").is_err());
     }
 
     #[test]
@@ -2871,7 +2917,7 @@ mod tests {
         );
 
         let target =
-            build_iroh_dial_target(&candidate, &[]).expect("ticket plus relay is dialable");
+            build_iroh_dial_target(&candidate, &[], "").expect("ticket plus relay is dialable");
         let addr = target.endpoint_addr;
 
         assert_eq!(addr.id, test_endpoint_id());
@@ -2891,7 +2937,7 @@ mod tests {
             &ticket,
         );
 
-        let error = build_iroh_dial_target(&candidate, &[])
+        let error = build_iroh_dial_target(&candidate, &[], "")
             .expect_err("conflicting endpoint identities must fail closed");
 
         assert!(error.contains("identity mismatch"), "{error}");
@@ -2901,7 +2947,7 @@ mod tests {
     fn malformed_routes_do_not_make_a_candidate_dialable() {
         let candidate = iroh_candidate("not-a-node-id", "not-a-relay-url", "not-a-ticket");
 
-        assert!(build_iroh_dial_target(&candidate, &["not-a-socket-address".to_string()]).is_err());
+        assert!(build_iroh_dial_target(&candidate, &["not-a-socket-address".to_string()], "").is_err());
     }
 
     #[test]
@@ -2913,7 +2959,7 @@ mod tests {
             EndpointAddr::new(test_endpoint_id())
                 .with_ip_addr("192.168.1.5:41234".parse().unwrap()),
         );
-        assert!(build_iroh_dial_target(&iroh_candidate("", "", &ticket), &[]).is_ok());
+        assert!(build_iroh_dial_target(&iroh_candidate("", "", &ticket), &[], "").is_ok());
     }
 
     #[test]
@@ -2923,19 +2969,21 @@ mod tests {
         assert!(
             build_iroh_dial_target(
                 &iroh_candidate(&test_endpoint_id().to_string(), "https://relay.example", ""),
-                &[]
+                &[],
+                ""
             )
             .is_ok()
         );
         assert!(
             build_iroh_dial_target(
                 &iroh_candidate(&test_endpoint_id().to_string(), "", ""),
-                &[]
+                &[],
+                ""
             )
             .is_err()
         );
         assert!(
-            build_iroh_dial_target(&iroh_candidate("", "https://relay.example", ""), &[]).is_err()
+            build_iroh_dial_target(&iroh_candidate("", "https://relay.example", ""), &[], "").is_err()
         );
     }
 
@@ -2944,12 +2992,12 @@ mod tests {
         let mut candidate =
             iroh_candidate(&test_endpoint_id().to_string(), "https://relay.example", "");
         candidate.kind = "something-else".to_string();
-        assert!(build_iroh_dial_target(&candidate, &[]).is_err());
+        assert!(build_iroh_dial_target(&candidate, &[], "").is_err());
     }
 
     #[test]
     fn whitespace_is_not_a_ticket() {
-        assert!(build_iroh_dial_target(&iroh_candidate("", "", "   "), &[]).is_err());
+        assert!(build_iroh_dial_target(&iroh_candidate("", "", "   "), &[], "").is_err());
     }
 
     #[tokio::test]
@@ -3264,7 +3312,7 @@ mod tests {
             "this host has no relay home"
         );
         assert!(!candidate.ticket.is_empty());
-        assert!(build_iroh_dial_target(&candidate, &[]).is_ok());
+        assert!(build_iroh_dial_target(&candidate, &[], "").is_ok());
     }
 
     #[tokio::test]
