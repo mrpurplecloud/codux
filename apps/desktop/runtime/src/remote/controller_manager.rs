@@ -1612,6 +1612,74 @@ mod tests {
     }
 
     #[test]
+    fn a_report_without_a_relay_keeps_the_one_already_known() {
+        // A host publishes the relay it is connected to and omits the key when
+        // it has none, so a host that started while its relay was unreachable
+        // reports a relay-less candidate. Adopting that verbatim would leave
+        // this controller with only direct routes, which is exactly the case a
+        // relay exists to cover.
+        // The remembered address is what makes the relay-less report dialable
+        // at all; without it the report is rejected before inheritance and this
+        // would be testing the filter instead.
+        let mut saved = iroh_transport();
+        saved.direct_addrs = vec!["10.8.0.3:41234".to_string()];
+        let manager = manager_with(saved_host_with(saved));
+
+        manager.shared.adopt_reported_transports(
+            "dev-1",
+            &serde_json::json!({
+                "transports": [{
+                    "kind": "iroh",
+                    "nodeId": TEST_ENDPOINT_ID,
+                    "ticket": "ticket-v2"
+                }]
+            }),
+        );
+
+        let saved = manager
+            .shared
+            .store
+            .find("dev-1")
+            .expect("read host")
+            .expect("host");
+        assert_eq!(
+            saved.transports[0].ticket, "ticket-v2",
+            "the fresh report still wins on everything it carries"
+        );
+        assert_eq!(
+            saved.transports[0].relay_url, "https://relay.example",
+            "a report that omits the relay must not erase the one we know"
+        );
+    }
+
+    #[test]
+    fn a_reported_relay_replaces_the_one_already_known() {
+        // Only one relay can be the one the host is homed on, so a report that
+        // names one supersedes the stored guess rather than joining it.
+        let manager = manager_with(saved_host_with(iroh_transport()));
+
+        manager.shared.adopt_reported_transports(
+            "dev-1",
+            &serde_json::json!({
+                "transports": [{
+                    "kind": "iroh",
+                    "nodeId": TEST_ENDPOINT_ID,
+                    "ticket": "ticket-v2",
+                    "relayUrl": "https://moved-relay.example"
+                }]
+            }),
+        );
+
+        let saved = manager
+            .shared
+            .store
+            .find("dev-1")
+            .expect("read host")
+            .expect("host");
+        assert_eq!(saved.transports[0].relay_url, "https://moved-relay.example");
+    }
+
+    #[test]
     fn silence_and_undialable_reports_leave_the_record_alone() {
         let manager = manager_with(saved_host_with(iroh_transport()));
 

@@ -342,7 +342,6 @@ fn transport_event_priority(kind: TransportEventKind) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn a_relay_less_report_falls_back_to_the_relay_from_pairing() {
@@ -381,7 +380,6 @@ mod tests {
         assert_eq!(config.transports[0].relay_url, "https://live-relay.example");
     }
 
-    use super::*;
     use serde_json::json;
 
     #[test]
