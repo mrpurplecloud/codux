@@ -16,8 +16,7 @@ use codux_protocol::{
 };
 use futures_util::StreamExt;
 use iroh::{
-    Endpoint, EndpointAddr, RelayConfig, RelayMap, RelayMode, RelayUrl, SecretKey,
-    TransportAddr, Watcher,
+    Endpoint, EndpointAddr, RelayMap, RelayMode, RelayUrl, SecretKey, TransportAddr, Watcher,
     endpoint::{Connection, PathEvent, RecvStream, SendStream, presets},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
@@ -3279,6 +3278,7 @@ mod tests {
         // relay route -- leaving it stranded the next time it has no direct
         // path.
         crate::install_rustls_crypto_provider();
+        use iroh::RelayConfig;
         let relay: RelayUrl = "https://relay.invalid.example"
             .parse()
             .expect("relay url");
