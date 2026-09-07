@@ -416,12 +416,20 @@ impl RuntimeService {
             epoch,
             controller,
             || -> Result<(), String> {
+                // Reserve publication before mutating the authoritative local
+                // projection, the same ordering the catalog commit uses: a
+                // poisoned queue must not leave a committed attachment that can
+                // never produce its one generic refresh. The migration version
+                // advances after this returns, so a dropped refresh here would
+                // never be redone.
+                let mut events = self
+                    .hosted_runtime_events
+                    .lock()
+                    .map_err(|_| "Remote runtime event queue is poisoned.".to_string())?;
                 let change = store.attach_host_project_ids(device_id, &assignments)?;
                 if !change.is_empty() {
                     self.follow_remote_catalog_change(&change);
-                    if let Ok(mut events) = self.hosted_runtime_events.lock() {
-                        events.push_back(RemoteHostEvent::ProjectsChanged);
-                    }
+                    events.push_back(RemoteHostEvent::ProjectsChanged);
                 }
                 Ok(())
             },

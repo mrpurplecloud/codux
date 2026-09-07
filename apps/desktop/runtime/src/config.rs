@@ -400,11 +400,35 @@ fn read_snapshot(path: &Path) -> Map<String, Value> {
 }
 
 fn write_snapshot(path: &Path, snapshot: &Map<String, Value>) -> Result<(), String> {
+    let content = serde_json::to_string_pretty(snapshot).map_err(|error| error.to_string())?;
+    write_atomically(path, &format!("{content}\n"))
+}
+
+/// Write through a sibling temp file and rename over the target.
+///
+/// These files are the only authoritative copy of the user's settings and
+/// state -- nothing keeps a typed in-memory duplicate to fall back on. A
+/// truncate-then-write leaves a window where the file on disk is neither the
+/// old content nor the new one, and a reader landing there gets a parse error,
+/// which `read_snapshot` reports as an empty map: every setting reads as its
+/// default, and the next targeted write persists that emptiness over real data.
+/// Rename replaces in one step, so a reader sees one version or the other.
+///
+/// The temp file is a sibling so the rename stays within one filesystem, and it
+/// carries the process id because a crash between the two steps would otherwise
+/// leave a name that a later process could collide with.
+fn write_atomically(path: &Path, content: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    let content = serde_json::to_string_pretty(snapshot).map_err(|error| error.to_string())?;
-    fs::write(path, format!("{content}\n")).map_err(|error| error.to_string())
+    let mut temp = path.as_os_str().to_os_string();
+    temp.push(format!(".{}.tmp", std::process::id()));
+    let temp = PathBuf::from(temp);
+    fs::write(&temp, content).map_err(|error| error.to_string())?;
+    fs::rename(&temp, path).map_err(|error| {
+        let _ = fs::remove_file(&temp);
+        error.to_string()
+    })
 }
 
 fn read_value_snapshot(path: &Path) -> Result<Value, String> {
@@ -416,11 +440,8 @@ fn read_value_snapshot(path: &Path) -> Result<Value, String> {
 }
 
 fn write_value_snapshot(path: &Path, snapshot: &Value) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
     let content = serde_json::to_string_pretty(snapshot).map_err(|error| error.to_string())?;
-    fs::write(path, format!("{content}\n")).map_err(|error| error.to_string())
+    write_atomically(path, &format!("{content}\n"))
 }
 
 #[cfg(test)]

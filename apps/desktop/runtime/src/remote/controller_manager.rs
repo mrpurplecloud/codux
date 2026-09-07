@@ -797,7 +797,17 @@ impl ManagerShared {
         true
     }
 
-    fn stop_reconnect_for_absent_host(&self, device_id: &str, worker: u64) {
+    /// Give up this worker's claim on the slot. Two callers reach it: the host
+    /// disappeared from the store, and the worker's attempt was replaced while
+    /// it was setting up. Both mean "stop, and leave nothing claimed behind" --
+    /// every check here is against `worker`, so a replacement that already took
+    /// the slot keeps it.
+    ///
+    /// The slot must not survive with `reconnect_worker` set and no worker
+    /// running: `ensure_reconnect_loop` would see a claimed worker, decline to
+    /// spawn, and the device would stay "connecting" until it is forgotten and
+    /// re-paired.
+    fn abandon_reconnect_worker(&self, device_id: &str, worker: u64) {
         let Ok(mut lifecycle) = self.controllers.lock() else {
             return;
         };
@@ -837,7 +847,7 @@ impl ManagerShared {
             let host = match self.store.find(&device_id) {
                 Ok(Some(host)) => host,
                 Ok(None) => {
-                    self.stop_reconnect_for_absent_host(&device_id, worker);
+                    self.abandon_reconnect_worker(&device_id, worker);
                     return;
                 }
                 Err(error) => {
@@ -867,7 +877,11 @@ impl ManagerShared {
                 self.clear_path(&device_id);
             });
             if current.is_none() {
-                break;
+                // A replacement took the attempt while this worker was setting
+                // up. Leaving now without disclaiming would strand the slot:
+                // claimed by a worker that no longer exists.
+                self.abandon_reconnect_worker(&device_id, worker);
+                return;
             }
             // Trace every attempt: a stuck/looping reconnect was previously
             // invisible in the runtime log (one hung dial looked identical to
@@ -2308,7 +2322,7 @@ mod tests {
 
         manager
             .shared
-            .stop_reconnect_for_absent_host("device-1", stale_worker);
+            .abandon_reconnect_worker("device-1", stale_worker);
         assert_eq!(
             reconnect_worker_owner(&manager, "device-1"),
             Some(replacement_worker),
