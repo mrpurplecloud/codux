@@ -142,6 +142,11 @@ pub(crate) fn controller_transport_config_from_json(
 ) -> Result<RemoteControllerTransportConfig, String> {
     let value = serde_json::from_str::<serde_json::Value>(config_json)
         .map_err(|error| error.to_string())?;
+    // Read before filtering: a candidate with no relay and no ticket is still
+    // dialable when we have an address we reached this host on, so the filter
+    // below cannot judge one without knowing whether any exist.
+    let direct_addrs = json_string_array_field(&value, "directAddrs");
+    let has_remembered_addrs = !direct_addrs.is_empty();
     let transports = value
         .get("transports")
         .and_then(serde_json::Value::as_array)
@@ -190,6 +195,7 @@ pub(crate) fn controller_transport_config_from_json(
                         &candidate.ticket,
                         &candidate.node_id,
                         &candidate.relay_url,
+                        has_remembered_addrs,
                     )
                 })
                 .collect::<Vec<_>>()
@@ -201,7 +207,7 @@ pub(crate) fn controller_transport_config_from_json(
         device_id: json_string_field(&value, "deviceId"),
         device_token: json_string_field(&value, "deviceToken"),
         transports,
-        direct_addrs: json_string_array_field(&value, "directAddrs"),
+        direct_addrs,
     })
 }
 

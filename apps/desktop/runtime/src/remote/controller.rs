@@ -102,6 +102,8 @@ impl TicketTransport {
             &self.ticket,
             &self.node_id,
             &self.relay_url,
+            // A pairing ticket is first contact: nothing has been reached yet.
+            false,
         )
     }
 }

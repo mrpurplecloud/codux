@@ -195,32 +195,37 @@ impl ManagerShared {
         let Some(reported) = info.get("transports").and_then(|value| value.as_array()) else {
             return;
         };
-        let mut next: Vec<SavedRemoteTransport> = reported
+        let Some(host) = self.store.find(device_id) else {
+            return;
+        };
+        // Carry the remembered addresses over before judging: they survive the
+        // adoption, so a reported candidate with no relay and no ticket is still
+        // dialable when we have an address we reached this host on.
+        let next: Vec<SavedRemoteTransport> = reported
             .iter()
             .map(saved_transport_from_json)
+            .map(|mut transport| {
+                if let Some(previous) = host
+                    .transports
+                    .iter()
+                    .find(|item| item.kind == transport.kind)
+                {
+                    transport.direct_addrs = previous.direct_addrs.clone();
+                }
+                transport
+            })
             .filter(|transport| {
                 codux_remote_transport::is_dialable_iroh_transport(
                     &transport.kind,
                     &transport.ticket,
                     &transport.node_id,
                     &transport.relay_url,
+                    !transport.direct_addrs.is_empty(),
                 )
             })
             .collect();
         if next.is_empty() {
             return;
-        }
-        let Some(host) = self.store.find(device_id) else {
-            return;
-        };
-        for transport in &mut next {
-            if let Some(previous) = host
-                .transports
-                .iter()
-                .find(|item| item.kind == transport.kind)
-            {
-                transport.direct_addrs = previous.direct_addrs.clone();
-            }
         }
         if next == host.transports {
             return;

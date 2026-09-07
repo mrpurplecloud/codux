@@ -1143,12 +1143,16 @@ fn with_remembered_addrs(addr: EndpointAddr, remembered: &[String]) -> EndpointA
 /// candidate the controller will discard, and the controller must not discard
 /// one the host considers usable — so it lives in one named, tested function
 /// rather than as a condition inlined at the point of use.
-fn is_dialable_iroh_candidate(candidate: &RemoteTransportCandidate) -> bool {
+fn is_dialable_iroh_candidate(
+    candidate: &RemoteTransportCandidate,
+    has_remembered_addrs: bool,
+) -> bool {
     is_dialable_iroh_transport(
         &candidate.kind,
         &candidate.ticket,
         &candidate.node_id,
         &candidate.relay_url,
+        has_remembered_addrs,
     )
 }
 
@@ -1161,10 +1165,18 @@ pub fn is_dialable_iroh_transport(
     ticket: &str,
     node_id: &str,
     relay_url: &str,
+    has_remembered_addrs: bool,
 ) -> bool {
-    kind == codux_protocol::REMOTE_TRANSPORT_IROH
-        && (!ticket.trim().is_empty()
-            || (!node_id.trim().is_empty() && !relay_url.trim().is_empty()))
+    if kind != codux_protocol::REMOTE_TRANSPORT_IROH {
+        return false;
+    }
+    // A ticket carries identity and routes together.
+    if !ticket.trim().is_empty() {
+        return true;
+    }
+    // Otherwise we need an identity, plus at least one way to reach it — a
+    // relay, or an address this controller has already connected on.
+    !node_id.trim().is_empty() && (!relay_url.trim().is_empty() || has_remembered_addrs)
 }
 
 /// Whether `endpoint` currently has a relay home.
@@ -1331,12 +1343,13 @@ impl RemoteIrohControllerTransport {
         let candidate = config
             .transports
             .iter()
-            .find(|candidate| is_dialable_iroh_candidate(candidate))
+            .find(|candidate| {
+                is_dialable_iroh_candidate(candidate, !config.direct_addrs.is_empty())
+            })
             .ok_or_else(|| "missing iroh transport candidate".to_string())?;
         // The ticket says where the host was at pairing time; the remembered
         // addresses say where we have actually reached it since. Dial both.
-        let endpoint_addr =
-            with_remembered_addrs(candidate_endpoint_addr(candidate)?, &config.direct_addrs);
+        let endpoint_addr = candidate_dial_addr(candidate, &config.direct_addrs)?;
         let relay_url = endpoint_addr
             .relay_urls()
             .next()
@@ -2278,22 +2291,59 @@ fn iroh_relay_url(config: &RemoteHostTransportConfig) -> Result<Option<RelayUrl>
     parse_relay_url(trimmed).map(Some)
 }
 
-fn candidate_endpoint_addr(candidate: &RemoteTransportCandidate) -> Result<EndpointAddr, String> {
+/// Everywhere this controller might reach the host described by `candidate`,
+/// including `remembered` addresses it has actually connected on before.
+///
+/// An `EndpointAddr` is an identity plus a set of routes, and every route is
+/// worth having: iroh tries them together and keeps whichever answers. So this
+/// gathers rather than chooses.
+///
+/// The ticket is the richest source — it carries the host's own direct
+/// addresses — but a ticket that fails to parse says nothing about the node id
+/// and relay stored beside it, so a bad one degrades to the rest instead of
+/// failing the dial. Equally, a relay is one route among several rather than a
+/// requirement: node id plus an address we have reached the host on is a
+/// complete target, which is the whole point of remembering them.
+///
+/// Fails only when nothing usable remains: no identity, or an identity with no
+/// route at all.
+fn candidate_dial_addr(
+    candidate: &RemoteTransportCandidate,
+    remembered: &[String],
+) -> Result<EndpointAddr, String> {
     let ticket = candidate.ticket.trim();
-    if !ticket.is_empty() {
-        return EndpointTicket::from_str(ticket)
-            .map(EndpointAddr::from)
-            .map_err(|error| format!("invalid iroh endpoint ticket: {error}"));
+    let from_ticket = (!ticket.is_empty())
+        .then(|| {
+            EndpointTicket::from_str(ticket)
+                .map(EndpointAddr::from)
+                .ok()
+        })
+        .flatten();
+
+    let addr = match from_ticket {
+        Some(addr) => addr,
+        None => {
+            let endpoint_id = candidate
+                .node_id
+                .trim()
+                .parse()
+                .map_err(|error| format!("invalid iroh node id: {error}"))?;
+            let mut addr = EndpointAddr::new(endpoint_id);
+            if let Ok(relay_url) = parse_relay_url(&candidate.relay_url) {
+                addr = addr.with_relay_url(relay_url);
+            }
+            addr
+        }
+    };
+
+    let addr = with_remembered_addrs(addr, remembered);
+    if addr.is_empty() {
+        return Err(
+            "iroh candidate has no route: no usable ticket, relay, or remembered address"
+                .to_string(),
+        );
     }
-    let relay_url = parse_relay_url(&candidate.relay_url)?;
-    let endpoint_id = candidate
-        .node_id
-        .parse()
-        .map_err(|error| format!("invalid iroh node id: {error}"))?;
-    Ok(EndpointAddr::from_parts(
-        endpoint_id,
-        [TransportAddr::Relay(relay_url)],
-    ))
+    Ok(addr)
 }
 
 fn parse_relay_url(value: &str) -> Result<RelayUrl, String> {
@@ -2446,44 +2496,101 @@ mod tests {
     }
 
     #[test]
+    fn remembered_addresses_make_a_relay_less_candidate_dialable() {
+        // node id + an address we have reached the host on is a complete dial
+        // target. Judging dialability without looking at the remembered
+        // addresses discarded exactly the candidate they were stored to rescue.
+        assert!(is_dialable_iroh_transport(
+            codux_protocol::REMOTE_TRANSPORT_IROH,
+            "",
+            "node",
+            "",
+            true,
+        ));
+        assert!(!is_dialable_iroh_transport(
+            codux_protocol::REMOTE_TRANSPORT_IROH,
+            "",
+            "node",
+            "",
+            false,
+        ));
+    }
+
+    #[test]
+    fn a_node_id_and_a_remembered_address_build_a_dial_target() {
+        let candidate = iroh_candidate(&test_endpoint_id().to_string(), "", "");
+
+        let addr = candidate_dial_addr(&candidate, &["10.8.0.3:41234".to_string()])
+            .expect("node id + remembered address is dialable");
+
+        assert_eq!(addr.ip_addrs().count(), 1);
+        assert_eq!(addr.relay_urls().count(), 0);
+    }
+
+    #[test]
+    fn a_corrupt_ticket_falls_back_instead_of_failing_the_dial() {
+        // A ticket that will not parse says nothing about the node id and relay
+        // stored beside it. Giving up there threw away a working route.
+        let candidate = iroh_candidate(
+            &test_endpoint_id().to_string(),
+            "https://relay.example",
+            "not-a-ticket",
+        );
+
+        let addr = candidate_dial_addr(&candidate, &[]).expect("must fall back to node id + relay");
+
+        assert_eq!(addr.relay_urls().count(), 1);
+    }
+
+    #[test]
+    fn a_candidate_with_no_route_at_all_is_refused() {
+        let candidate = iroh_candidate(&test_endpoint_id().to_string(), "", "");
+
+        assert!(candidate_dial_addr(&candidate, &[]).is_err());
+    }
+
+    #[test]
     fn a_ticket_alone_is_enough_to_dial() {
         // The host may have no relay at all — a LAN-only or SD-WAN-only
         // deployment. Its ticket still serialises the direct addresses, which is
         // everything `connect` needs.
-        assert!(is_dialable_iroh_candidate(&iroh_candidate(
-            "",
-            "",
-            "ticket-bytes"
-        )));
+        assert!(is_dialable_iroh_candidate(
+            &iroh_candidate("", "", "ticket-bytes"),
+            false
+        ));
     }
 
     #[test]
     fn node_id_needs_a_relay_when_there_is_no_ticket() {
         // Without a ticket there are no direct addresses, so the only way to
         // reach the peer is to route through its relay.
-        assert!(is_dialable_iroh_candidate(&iroh_candidate(
-            "node",
-            "https://relay.example",
-            ""
-        )));
-        assert!(!is_dialable_iroh_candidate(&iroh_candidate("node", "", "")));
-        assert!(!is_dialable_iroh_candidate(&iroh_candidate(
-            "",
-            "https://relay.example",
-            ""
-        )));
+        assert!(is_dialable_iroh_candidate(
+            &iroh_candidate("node", "https://relay.example", ""),
+            false
+        ));
+        assert!(!is_dialable_iroh_candidate(
+            &iroh_candidate("node", "", ""),
+            false
+        ));
+        assert!(!is_dialable_iroh_candidate(
+            &iroh_candidate("", "https://relay.example", ""),
+            false
+        ));
     }
 
     #[test]
     fn a_candidate_of_another_kind_is_never_dialable_here() {
         let mut candidate = iroh_candidate("node", "https://relay.example", "ticket");
         candidate.kind = "something-else".to_string();
-        assert!(!is_dialable_iroh_candidate(&candidate));
+        assert!(!is_dialable_iroh_candidate(&candidate, false));
     }
 
     #[test]
     fn whitespace_is_not_a_ticket() {
-        assert!(!is_dialable_iroh_candidate(&iroh_candidate("", "", "   ")));
+        assert!(!is_dialable_iroh_candidate(
+            &iroh_candidate("", "", "   "),
+            false
+        ));
     }
 
     #[tokio::test]
@@ -2515,7 +2622,8 @@ mod tests {
             codux_protocol::REMOTE_TRANSPORT_IROH,
             &ticket,
             &node_id,
-            &relay_url
+            &relay_url,
+            false,
         ));
     }
 
