@@ -380,6 +380,7 @@ mod tests {
         assert_eq!(config.transports[0].relay_url, "https://live-relay.example");
     }
 
+    use super::*;
     use serde_json::json;
 
     #[test]
