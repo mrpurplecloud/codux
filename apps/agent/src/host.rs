@@ -195,8 +195,16 @@ impl AgentPairingState {
             .ok_or_else(|| "agent transport has no live dial candidate".to_string())?;
         let device_token = random_token()?;
         let next = new_agent_pairing_credential()?;
-        // Publish the next QR before replacing a device credential. Once the
-        // ticket exists, active state follows it so later errors retry from it.
+        // Publish the next QR before replacing the active credential. The
+        // published ticket is the authority; rotating first and failing to
+        // write would leave the agent holding a credential nobody can see,
+        // which no retry recovers from -- pairing would be dead until restart.
+        //
+        // The cost, stated because it is a real one: if the write fails, the
+        // code and secret this device just presented stay valid until some
+        // later write succeeds, so anyone who saw that QR can replay them in
+        // that window. Bricking pairing permanently is the worse of the two,
+        // but this is no longer a single-use credential in that case.
         let ticket = pairing_ticket_url(&next, &candidate, relay_authentication);
         crate::runstate::write_ticket_at(&self.ticket_path, &ticket)?;
         *active = next;
