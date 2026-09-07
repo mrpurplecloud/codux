@@ -1083,10 +1083,17 @@ struct SharedControllerEndpoint {
     // pooled endpoint: a single accept loop (the Router) serves iroh-blobs for
     // all of them from one store, so an incoming fetch always hits the store the
     // blob was published to. (The old per-transport accept loops raced on the
-    // shared endpoint and could serve from the wrong store.) Held here so they
-    // live as long as the pooled endpoint; dropping the entry aborts the Router.
+    // shared endpoint and could serve from the wrong store.)
+    //
+    // The Router is shared rather than owned: dropping it aborts the accept
+    // loop, and this entry is retired for reasons that say nothing about the
+    // connections running on it — a relay change, or one connect exhausting its
+    // dials. Retiring the entry used to kill blob serving for every live
+    // transport, so uploads and file writes failed on a link that was otherwise
+    // healthy. Now the pool holds one reference and each transport holds
+    // another; the loop stops when the last of them is gone.
     blob_store: MemStore,
-    _router: Router,
+    router: Arc<Router>,
     // Identity of THIS pooled build. A connect that fails its dials carries the
     // generation it dialed on and only retires the pool entry when it still
     // matches — so a late evict from an ABANDONED reconnect (the Dart layer gave
@@ -1106,6 +1113,10 @@ struct ControllerEndpoint {
     endpoint: Endpoint,
     blob_store: MemStore,
     generation: u64,
+    /// The blob accept loop, kept alive by whoever holds this. A transport must
+    /// retain it for as long as it serves blobs — the pool's own reference can
+    /// be retired at any time and for reasons unrelated to this connection.
+    router: Arc<Router>,
 }
 
 /// Fold addresses this controller has previously reached the host on into the
@@ -1220,6 +1231,7 @@ async fn acquire_controller_endpoint(
                 endpoint: shared.endpoint.clone(),
                 blob_store: shared.blob_store.clone(),
                 generation: shared.generation,
+                router: Arc::clone(&shared.router),
             });
         }
         // Relay changed under us — drop the old entry and build for the new one.
@@ -1275,17 +1287,19 @@ async fn acquire_controller_endpoint(
         )
         .spawn();
     let generation = SHARED_CONTROLLER_ENDPOINT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    let router = Arc::new(router);
     *guard = Some(SharedControllerEndpoint {
         relay_key: key,
         endpoint: endpoint.clone(),
         blob_store: blob_store.clone(),
-        _router: router,
+        router: Arc::clone(&router),
         generation,
     });
     Ok(ControllerEndpoint {
         endpoint,
         blob_store,
         generation,
+        router,
     })
 }
 
@@ -1325,6 +1339,14 @@ pub struct RemoteIrohControllerTransport {
     upload_tx: Mutex<Option<mpsc::Sender<RemoteTransportUpload>>>,
     closed: Arc<AtomicBool>,
     credentials: Arc<Mutex<ControllerCredentials>>,
+    /// The pooled blob accept loop, held for this connection's lifetime.
+    ///
+    /// Not read — its only job is to exist. The pool retires its own reference
+    /// when the relay changes or a connect exhausts its dials, neither of which
+    /// says anything about the connections already running on that endpoint;
+    /// without this the accept loop stopped underneath them and uploads failed
+    /// on an otherwise healthy link.
+    _router: Arc<Router>,
 }
 
 #[derive(Clone, Default)]
@@ -1365,6 +1387,7 @@ impl RemoteIrohControllerTransport {
             endpoint,
             blob_store,
             generation: endpoint_generation,
+            router,
         } = acquire_controller_endpoint(relay_url.as_ref(), &relay_authentication, &on_log).await?;
         // Read the relay state live off the endpoint, not from how it was built:
         // this endpoint is pooled and reused, and iroh may have acquired a relay
@@ -1482,9 +1505,13 @@ impl RemoteIrohControllerTransport {
             upload_tx: Mutex::new(Some(upload_tx)),
             closed: Arc::new(AtomicBool::new(false)),
             credentials: Arc::clone(&credentials),
+            _router: router,
         });
-        // Blobs are now served by the pool-level Router (see
+        // Blobs are served by the pool-level Router (see
         // acquire_controller_endpoint), so there's no per-transport accept loop.
+        // The reference above keeps that loop alive for this connection's
+        // lifetime: the pool can retire its own at any time, for reasons that
+        // say nothing about whether this link is still serving blobs.
         spawn_upload_writer(
             blob_store,
             transport.endpoint.clone(),
@@ -2591,6 +2618,53 @@ mod tests {
             &iroh_candidate("", "", "   "),
             false
         ));
+    }
+
+    #[tokio::test]
+    async fn retiring_the_pool_entry_leaves_a_live_connection_serving_blobs() {
+        // The pool retires an entry when the relay changes or a connect
+        // exhausts its dials — neither says anything about connections already
+        // running on that endpoint. Owning the accept loop from the entry meant
+        // retiring it stopped blob serving underneath them, so uploads and file
+        // writes failed on a link that was otherwise healthy.
+        let endpoint = direct_endpoint(vec![iroh_blobs::ALPN.to_vec()]).await;
+        let blob_store = new_blob_store();
+        let router = Arc::new(
+            Router::builder(endpoint.clone())
+                .accept(
+                    iroh_blobs::ALPN,
+                    BlobsProtocol::new(blob_store.as_ref(), None),
+                )
+                .spawn(),
+        );
+
+        // What a live transport holds.
+        let held_by_connection = Arc::clone(&router);
+        // What the pool holds, and then drops when the entry is retired.
+        let held_by_pool = Arc::clone(&router);
+        drop(router);
+        drop(held_by_pool);
+
+        assert_eq!(
+            Arc::strong_count(&held_by_connection),
+            1,
+            "the connection's reference must be the one keeping the loop alive"
+        );
+
+        // Still serving: a blob published now is fetchable over this endpoint.
+        let ticket = publish_blob_bytes(&blob_store, &endpoint, b"after-evict".to_vec())
+            .await
+            .expect("publish");
+        let peer_store = new_blob_store();
+        let peer = direct_endpoint(Vec::new()).await;
+        let bytes = fetch_blob_bytes(&peer_store, &peer, &ticket)
+            .await
+            .expect("the accept loop must outlive the pool entry");
+        assert_eq!(bytes, b"after-evict".to_vec());
+
+        drop(held_by_connection);
+        peer.close().await;
+        endpoint.close().await;
     }
 
     #[tokio::test]
