@@ -2398,6 +2398,26 @@ mod tests {
     }
 
     #[test]
+    fn a_worker_that_gives_up_leaves_nothing_claimed() {
+        // The reconnect loop reaches this when a replacement takes its attempt
+        // while it is setting up. A slot left claimed by a worker that has
+        // exited is permanently stuck: `ensure_reconnect_loop` sees an owner,
+        // declines to spawn, and the device reports "connecting" until it is
+        // forgotten and re-paired.
+        let manager = manager("codux-controller-worker-disown");
+        save_test_host(&manager, "device-1");
+        let worker = install_reconnect_worker(&manager, "device-1");
+        assert!(reconnect_worker_is_claimed(&manager, "device-1"));
+
+        manager.shared.abandon_reconnect_worker("device-1", worker);
+
+        assert!(
+            !reconnect_worker_is_claimed(&manager, "device-1"),
+            "a worker that stops must not leave the slot claimed"
+        );
+    }
+
+    #[test]
     fn stale_worker_cleanup_cannot_release_a_replacement_worker() {
         let manager = manager("codux-controller-stale-worker-cleanup");
         save_test_host(&manager, "device-1");

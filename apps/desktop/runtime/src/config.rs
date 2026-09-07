@@ -451,6 +451,34 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn an_atomic_write_leaves_no_temp_file_and_survives_a_stale_one() {
+        let path = temp_config_path("atomic-write");
+        // A crash between write and rename leaves a sibling behind; the next
+        // write must overwrite it rather than trip over it.
+        let mut stale = path.as_os_str().to_os_string();
+        stale.push(format!(".{}.tmp", std::process::id()));
+        fs::write(&stale, "{ truncated").expect("plant a stale temp file");
+
+        let mut snapshot = Map::new();
+        snapshot.insert("kept".to_string(), json!("value"));
+        write_snapshot(&path, &snapshot).expect("write");
+
+        assert_eq!(read_snapshot(&path).get("kept"), Some(&json!("value")));
+        let siblings: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with(path.file_name().unwrap().to_str().unwrap()))
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(
+            siblings.is_empty(),
+            "a completed write must leave no temp file behind: {siblings:?}"
+        );
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn document_store_keeps_root_arrays_in_memory_snapshot() {
         let path = temp_config_path("document-array");
         let store = ConfigDocumentStore::for_file(path.clone());
