@@ -161,24 +161,21 @@ impl ManagerShared {
     /// the most recent" — `with_direct_addr` reports that as `None` and nothing
     /// is written.
     fn remember_direct_addr(&self, device_id: &str, addr: &str) {
-        let Some(host) = self.store.find(device_id) else {
-            return;
-        };
-        let mut transports = host.transports.clone();
-        let Some(slot) = transports
-            .iter_mut()
-            .find(|transport| transport.kind == REMOTE_TRANSPORT_IROH)
-        else {
-            return;
-        };
-        let Some(updated) = slot.with_direct_addr(addr) else {
-            return;
-        };
-        *slot = updated;
-        self.persist_addresses(
-            SavedRemoteHost { transports, ..host },
-            "remembered_direct_addr",
-        );
+        // Read, change and write under the store's lock. Doing it here instead
+        // would race other updates, and would let a callback holding a host it
+        // read moments ago write it back after the user forgot the device.
+        let result = self.store.update_existing(device_id, |host| {
+            let mut transports = host.transports.clone();
+            let slot = transports
+                .iter_mut()
+                .find(|transport| transport.kind == REMOTE_TRANSPORT_IROH)?;
+            *slot = slot.with_direct_addr(addr)?;
+            Some(SavedRemoteHost {
+                transports,
+                ..host.clone()
+            })
+        });
+        self.report_address_write(device_id, "remembered_direct_addr", result);
     }
 
     /// Adopt the dial candidates the host reported in `host.info`.
@@ -195,60 +192,60 @@ impl ManagerShared {
         let Some(reported) = info.get("transports").and_then(|value| value.as_array()) else {
             return;
         };
-        let Some(host) = self.store.find(device_id) else {
-            return;
-        };
-        // Carry the remembered addresses over before judging: they survive the
-        // adoption, so a reported candidate with no relay and no ticket is still
-        // dialable when we have an address we reached this host on.
-        let next: Vec<SavedRemoteTransport> = reported
-            .iter()
-            .map(saved_transport_from_json)
-            .map(|mut transport| {
-                if let Some(previous) = host
-                    .transports
-                    .iter()
-                    .find(|item| item.kind == transport.kind)
-                {
-                    transport.direct_addrs = previous.direct_addrs.clone();
-                }
-                transport
-            })
-            .filter(|transport| {
-                codux_remote_transport::is_dialable_iroh_transport(
-                    &transport.kind,
-                    &transport.ticket,
-                    &transport.node_id,
-                    &transport.relay_url,
-                    !transport.direct_addrs.is_empty(),
-                )
-            })
-            .collect();
-        if next.is_empty() {
-            return;
-        }
-        if next == host.transports {
-            return;
-        }
-        self.persist_addresses(
-            SavedRemoteHost {
+        let reported: Vec<SavedRemoteTransport> =
+            reported.iter().map(saved_transport_from_json).collect();
+        let result = self.store.update_existing(device_id, |host| {
+            // Carry the remembered addresses over before judging: they survive
+            // the adoption, so a reported candidate with no relay and no ticket
+            // is still dialable when we have an address we reached this host on.
+            let next: Vec<SavedRemoteTransport> = reported
+                .iter()
+                .cloned()
+                .map(|mut transport| {
+                    if let Some(previous) = host
+                        .transports
+                        .iter()
+                        .find(|item| item.kind == transport.kind)
+                    {
+                        transport.direct_addrs = previous.direct_addrs.clone();
+                    }
+                    transport
+                })
+                .filter(|transport| {
+                    codux_remote_transport::is_dialable_iroh_transport(
+                        &transport.kind,
+                        &transport.ticket,
+                        &transport.node_id,
+                        &transport.relay_url,
+                        !transport.direct_addrs.is_empty(),
+                    )
+                })
+                .collect();
+            if next.is_empty() || next == host.transports {
+                return None;
+            }
+            Some(SavedRemoteHost {
                 transports: next,
-                ..host
-            },
-            "adopted_host_transports",
-        );
+                ..host.clone()
+            })
+        });
+        self.report_address_write(device_id, "adopted_host_transports", result);
     }
 
-    /// Persist an address update, which is an optimisation rather than part of
-    /// any connection.
+    /// Report the outcome of an address write, which is an optimisation rather
+    /// than part of any connection.
     ///
     /// A failure here must not break the live link — the addresses in memory are
     /// still correct and the connection using them is unaffected — but it must
     /// not vanish either: the next cold start would silently fall back to stale
     /// addresses with no record of why.
-    fn persist_addresses(&self, host: SavedRemoteHost, reason: &str) {
-        let device_id = host.device_id.clone();
-        if let Err(error) = self.store.upsert(host) {
+    fn report_address_write(
+        &self,
+        device_id: &str,
+        reason: &str,
+        result: Result<Option<SavedRemoteHost>, String>,
+    ) {
+        if let Err(error) = result {
             crate::runtime_trace::runtime_trace(
                 "remote",
                 &format!(

@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 /// One reconnectable transport candidate for a saved host. The iroh pairing
 /// ticket is single-use, so reconnect relies on `node_id` + `relay_url`.
@@ -88,20 +89,26 @@ pub struct SavedRemoteHost {
 
 pub struct RemoteControllerStore {
     path: PathBuf,
+    /// Serialises read-modify-write. Every mutation reads the whole file,
+    /// changes one host, and writes it all back, so two of them interleaving
+    /// silently discards one — and they arrive from transport callbacks on
+    /// whatever thread the link happens to be running on.
+    write_lock: Mutex<()>,
 }
 
 impl RemoteControllerStore {
     pub fn new(support_dir: PathBuf) -> Self {
         Self {
             path: support_dir.join("remote-controllers.json"),
+            write_lock: Mutex::new(()),
         }
     }
 
+    /// Saved hosts for display. An unreadable file reads as empty here — the UI
+    /// has nothing better to show — but see [`Self::load_for_write`]: emptiness
+    /// from a failed read must never reach a write.
     pub fn list(&self) -> Vec<SavedRemoteHost> {
-        fs::read_to_string(&self.path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<Vec<SavedRemoteHost>>(&text).ok())
-            .unwrap_or_default()
+        self.load().unwrap_or_default()
     }
 
     pub fn find(&self, device_id: &str) -> Option<SavedRemoteHost> {
@@ -112,7 +119,8 @@ impl RemoteControllerStore {
 
     /// Insert or replace a saved host (keyed by `device_id`).
     pub fn upsert(&self, host: SavedRemoteHost) -> Result<Vec<SavedRemoteHost>, String> {
-        let mut hosts = self.list();
+        let _guard = self.lock()?;
+        let mut hosts = self.load_for_write()?;
         if let Some(existing) = hosts
             .iter_mut()
             .find(|existing| existing.device_id == host.device_id)
@@ -126,10 +134,69 @@ impl RemoteControllerStore {
     }
 
     pub fn remove(&self, device_id: &str) -> Result<Vec<SavedRemoteHost>, String> {
-        let mut hosts = self.list();
+        let _guard = self.lock()?;
+        let mut hosts = self.load_for_write()?;
         hosts.retain(|host| host.device_id != device_id);
         self.save(&hosts)?;
         Ok(hosts)
+    }
+
+    /// Change a host that is still saved, and only if it is.
+    ///
+    /// The read, the change and the write happen under one lock, so concurrent
+    /// updates to different devices cannot discard each other — which a caller
+    /// doing `find` then `upsert` around its own edit cannot avoid.
+    ///
+    /// Absent means absent: a caller holding a host it read moments ago must not
+    /// be able to write it back after the user forgot the device. Returns the
+    /// stored host when `change` produced one, `None` when the device is gone or
+    /// `change` declined.
+    pub fn update_existing(
+        &self,
+        device_id: &str,
+        change: impl FnOnce(&SavedRemoteHost) -> Option<SavedRemoteHost>,
+    ) -> Result<Option<SavedRemoteHost>, String> {
+        let _guard = self.lock()?;
+        let mut hosts = self.load_for_write()?;
+        let Some(slot) = hosts.iter_mut().find(|host| host.device_id == device_id) else {
+            return Ok(None);
+        };
+        let Some(updated) = change(slot) else {
+            return Ok(None);
+        };
+        *slot = updated.clone();
+        self.save(&hosts)?;
+        Ok(Some(updated))
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+        self.write_lock
+            .lock()
+            .map_err(|_| "remote controller store lock is poisoned".to_string())
+    }
+
+    fn load(&self) -> Result<Vec<SavedRemoteHost>, String> {
+        let text = match fs::read_to_string(&self.path) {
+            Ok(text) => text,
+            // Nothing saved yet is not a failure.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(format!(
+                    "remote controller store could not be read: {error}"
+                ));
+            }
+        };
+        serde_json::from_str(&text)
+            .map_err(|error| format!("remote controller store could not be read: {error}"))
+    }
+
+    /// The saved hosts, refusing to guess when the file cannot be read.
+    ///
+    /// A write starts from what is already stored, so treating an unreadable
+    /// file as "no devices" would save an empty list over it and destroy every
+    /// pairing on the machine. Failing leaves the file untouched for recovery.
+    fn load_for_write(&self) -> Result<Vec<SavedRemoteHost>, String> {
+        self.load()
     }
 
     fn save(&self, hosts: &[SavedRemoteHost]) -> Result<(), String> {
@@ -137,13 +204,22 @@ impl RemoteControllerStore {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
         let text = serde_json::to_string_pretty(hosts).map_err(|error| error.to_string())?;
-        fs::write(&self.path, text).map_err(|error| error.to_string())
+        // Write beside the target and rename over it. A truncating write leaves
+        // a half-written file if the process dies mid-save, and that file is
+        // every pairing this machine has.
+        let temporary = self.path.with_extension("json.tmp");
+        fs::write(&temporary, text).map_err(|error| error.to_string())?;
+        fs::rename(&temporary, &self.path).map_err(|error| {
+            let _ = fs::remove_file(&temporary);
+            error.to_string()
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn temp_support() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -153,6 +229,107 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn saved_host(device_id: &str) -> SavedRemoteHost {
+        SavedRemoteHost {
+            device_id: device_id.to_string(),
+            host_id: "host-1".to_string(),
+            host_name: String::new(),
+            device_token: "token".to_string(),
+            platform: String::new(),
+            transports: vec![SavedRemoteTransport {
+                kind: "iroh".to_string(),
+                node_id: "node-abc".to_string(),
+                relay_url: "https://relay.example".to_string(),
+                relay_authentication: String::new(),
+                ticket: "ticket".to_string(),
+                direct_addrs: Vec::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn a_corrupt_file_is_never_silently_replaced_with_an_empty_one() {
+        let dir = temp_support();
+        let store = RemoteControllerStore::new(dir.clone());
+        store.upsert(saved_host("dev-1")).unwrap();
+        let path = dir.join("remote-controllers.json");
+        std::fs::write(&path, "{ this is not the array we wrote").unwrap();
+
+        // Reading degrades to empty for display, but writing must not: treating
+        // an unreadable file as "no devices" and saving over it destroys every
+        // pairing on the machine.
+        let error = store
+            .upsert(saved_host("dev-2"))
+            .expect_err("a write over an unreadable store must fail");
+        assert!(error.contains("could not be read"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{ this is not the array we wrote",
+            "the unreadable file must be left for recovery, not overwritten"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn updating_a_forgotten_device_does_not_resurrect_it() {
+        let dir = temp_support();
+        let store = RemoteControllerStore::new(dir.clone());
+        store.upsert(saved_host("dev-1")).unwrap();
+        store.remove("dev-1").unwrap();
+
+        // A path callback holding a host read before the removal must not write
+        // it back. Address bookkeeping is not a reason to re-pair a device the
+        // user just forgot.
+        let updated = store
+            .update_existing("dev-1", |host| {
+                let mut host = host.clone();
+                host.host_name = "resurrected".to_string();
+                Some(host)
+            })
+            .expect("no error");
+
+        assert!(updated.is_none());
+        assert!(store.find("dev-1").is_none());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn concurrent_updates_to_different_devices_do_not_overwrite_each_other() {
+        let dir = temp_support();
+        let store = Arc::new(RemoteControllerStore::new(dir.clone()));
+        store.upsert(saved_host("dev-1")).unwrap();
+        store.upsert(saved_host("dev-2")).unwrap();
+
+        let handles: Vec<_> = ["dev-1", "dev-2"]
+            .into_iter()
+            .map(|device_id| {
+                let store = Arc::clone(&store);
+                std::thread::spawn(move || {
+                    for index in 0..25 {
+                        store
+                            .update_existing(device_id, |host| {
+                                let mut host = host.clone();
+                                host.host_name = format!("{device_id}-{index}");
+                                Some(host)
+                            })
+                            .expect("update");
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Read-modify-write outside a lock loses whichever update lands second.
+        assert_eq!(store.find("dev-1").unwrap().host_name, "dev-1-24");
+        assert_eq!(store.find("dev-2").unwrap().host_name, "dev-2-24");
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
