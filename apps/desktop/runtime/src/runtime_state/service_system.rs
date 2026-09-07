@@ -240,7 +240,7 @@ impl RuntimeService {
 
     pub fn drain_remote_events(&self) -> Vec<RemoteHostEvent> {
         let mut events = self.remote_host.drain_events();
-        events.extend(self.sync_remote_project_catalogs());
+        self.sync_remote_project_catalogs();
         events.extend(self.drain_hosted_workspace_updates());
         if let Ok(mut hosted) = self.hosted_runtime_events.lock() {
             events.extend(hosted.drain(..));
@@ -313,13 +313,10 @@ impl RuntimeService {
         relay_url: &str,
         reset_devices: bool,
     ) -> Result<(SettingsSummary, RemoteSummary), String> {
-        let relay_url = relay_url.trim();
-        let relay_preset = if relay_url.is_empty() {
-            crate::remote::remote_relay_preset_for_url(relay_url)
-        } else {
-            "custom".to_string()
-        };
-        self.update_remote_relay_settings(relay_preset, relay_url.to_string(), reset_devices)
+        let relay_url = relay_url.to_string();
+        self.reconfigure_remote_relay(reset_devices, move |service| {
+            service.set_relay_url(&relay_url, reset_devices)
+        })
     }
 
     pub fn set_remote_relay_preset(
@@ -334,12 +331,10 @@ impl RuntimeService {
         relay_preset: &str,
         reset_devices: bool,
     ) -> Result<(SettingsSummary, RemoteSummary), String> {
-        let current = self.reload_settings();
-        let relay_preset =
-            crate::remote::normalize_remote_relay_preset(relay_preset, &current.remote_relay_url);
-        let relay_url =
-            crate::remote::remote_relay_url_for_preset(&relay_preset, &current.remote_relay_url);
-        self.update_remote_relay_settings(relay_preset, relay_url, reset_devices)
+        let relay_preset = relay_preset.to_string();
+        self.reconfigure_remote_relay(reset_devices, move |service| {
+            service.set_relay_preset(&relay_preset, reset_devices)
+        })
     }
 
     pub fn set_remote_relay_authentication_with_device_reset(
@@ -347,46 +342,26 @@ impl RuntimeService {
         relay_authentication: &str,
         reset_devices: bool,
     ) -> Result<(SettingsSummary, RemoteSummary), String> {
-        let relay_authentication = relay_authentication.trim().to_string();
-        let app_settings = self.update_app_settings(|settings| {
-            settings.remote.relay_authentication = relay_authentication;
-            if reset_devices {
-                settings.remote.cached_devices.clear();
-            }
-        })?;
-        if reset_devices {
-            self.remote_host.clear_pairing_state();
-        }
-        let remote = if app_settings.remote.is_enabled {
-            self.remote_host.reconnect()
-        } else {
-            self.remote_host.reload_snapshot_from_settings()
-        };
-        let settings = self.reload_settings();
-        Ok((settings, remote))
+        let relay_authentication = relay_authentication.to_string();
+        self.reconfigure_remote_relay(reset_devices, move |service| {
+            service.set_relay_authentication(&relay_authentication, reset_devices)
+        })
     }
 
-    fn update_remote_relay_settings(
+    fn reconfigure_remote_relay(
         &self,
-        relay_preset: String,
-        relay_url: String,
         reset_devices: bool,
+        update: impl FnOnce(&RemoteService) -> Result<(), String>,
     ) -> Result<(SettingsSummary, RemoteSummary), String> {
-        let app_settings = self.update_app_settings(|settings| {
-            settings.remote.relay_preset = relay_preset;
-            settings.remote.relay_url = relay_url;
+        let service = RemoteService::new(self.support_dir.clone());
+        let (result, remote) = self.remote_host.reconfigure_transport(|| {
+            update(&service)?;
             if reset_devices {
-                settings.remote.cached_devices.clear();
+                self.remote_host.clear_remote_device_connection_state();
             }
-        })?;
-        if reset_devices {
-            self.remote_host.clear_pairing_state();
-        }
-        let remote = if app_settings.remote.is_enabled {
-            self.remote_host.reconnect()
-        } else {
-            self.remote_host.reload_snapshot_from_settings()
-        };
+            Ok::<(), String>(())
+        });
+        result?;
         let settings = self.reload_settings();
         Ok((settings, remote))
     }
@@ -617,20 +592,19 @@ pub(crate) fn sync_pet_memberships_from_support_dir(
     support_dir: &std::path::Path,
 ) -> Result<PetSnapshot, String> {
     let store = PetStore::load_or_seed(support_dir.to_path_buf());
-    let migration_paths = if store.snapshot()?.state_version
-        < crate::pet::PetSnapshot::default().state_version
-    {
-        let usage_store =
-            crate::ai_usage_store::AIUsageStore::at_path(support_dir.join("ai-usage.sqlite3"));
-        let conn = usage_store.connect().map_err(|error| error.to_string())?;
-        usage_store
-            .indexed_project_paths(&conn)
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let migration_paths =
+        if store.snapshot()?.state_version < crate::pet::PetSnapshot::default().state_version {
+            let usage_store =
+                crate::ai_usage_store::AIUsageStore::at_path(support_dir.join("ai-usage.sqlite3"));
+            let conn = usage_store.connect().map_err(|error| error.to_string())?;
+            usage_store
+                .indexed_project_paths(&conn)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        };
     store.sync_memberships(
         pet_workspaces_from_support_dir(support_dir),
         migration_paths,

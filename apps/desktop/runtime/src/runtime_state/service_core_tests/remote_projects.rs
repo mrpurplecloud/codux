@@ -1473,6 +1473,7 @@ fn catalog_pushes_wait_until_legacy_migration_is_ready() {
             shares_catalog: true,
             sync_ready: false,
             version: None,
+            commit_pause: None,
         },
     );
     controller.route_test_message(
@@ -1486,7 +1487,7 @@ fn catalog_pushes_wait_until_legacy_migration_is_ready() {
         .unwrap(),
     );
 
-    assert!(service.sync_remote_project_catalogs().is_empty());
+    service.sync_remote_project_catalogs();
     let projects = service.project_list().projects;
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0].id, "legacy-desktop-id");
@@ -1543,6 +1544,110 @@ fn legacy_records_register_on_the_host_and_keep_their_desktop_ids() {
     assert_eq!(git["payload"]["projectId"], json!("p-host-1"));
 
     drop(host);
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn forget_between_legacy_registration_and_id_attachment_rejects_the_old_owner() {
+    let (service, support_dir, _catalog) =
+        remote_project_service("remote-project-legacy-owner-race", legacy_state());
+    let controller = service
+        .remote_controller_for_device("device-1")
+        .expect("live controller");
+    let epoch = service
+        .remote_controllers
+        .live_connection_epoch("device-1", controller.as_ref())
+        .unwrap();
+    let (accepted, resume) = service.pause_next_remote_project_commit_for_test(
+        "device-1",
+        epoch,
+        RemoteProjectCommitPoint::LegacyIds,
+    );
+    let stale_service = service.clone();
+    let migration = thread::spawn(move || {
+        stale_service.subscribe_remote_project_catalog("device-1", epoch, &controller)
+    });
+    accepted
+        .recv_timeout(Duration::from_secs(5))
+        .expect("old owner registered the legacy project");
+
+    service
+        .remote_controllers
+        .forget("device-1")
+        .expect("forget old owner");
+    resume.send(()).unwrap();
+    migration.join().unwrap().unwrap();
+
+    assert!(host_project_id_of(&support_dir, "legacy-desktop-id").is_none());
+    assert!(!migration_done(&support_dir));
+    let events = service.drain_remote_events();
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, RemoteHostEvent::ProjectsChanged))
+    );
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn forget_after_snapshot_commit_rejects_completion_but_preserves_publication() {
+    let (service, support_dir, catalog) =
+        remote_project_service("remote-project-marker-owner-race", empty_state());
+    catalog
+        .lock()
+        .unwrap()
+        .projects
+        .push(catalog_project("p-old", "Old", "/srv/old"));
+    let controller = service
+        .remote_controller_for_device("device-1")
+        .expect("live controller");
+    let epoch = service
+        .remote_controllers
+        .live_connection_epoch("device-1", controller.as_ref())
+        .unwrap();
+    let (accepted, resume) = service.pause_next_remote_project_commit_for_test(
+        "device-1",
+        epoch,
+        RemoteProjectCommitPoint::MigrationMarker,
+    );
+    let stale_service = service.clone();
+    let migration = thread::spawn(move || {
+        stale_service.subscribe_remote_project_catalog("device-1", epoch, &controller)
+    });
+    accepted
+        .recv_timeout(Duration::from_secs(5))
+        .expect("old owner reached migration completion");
+
+    service
+        .remote_controllers
+        .forget("device-1")
+        .expect("forget old owner");
+    resume.send(()).unwrap();
+    migration.join().unwrap().unwrap();
+
+    assert!(!migration_done(&support_dir));
+    assert!(
+        !service
+            .remote_project_sync
+            .lock()
+            .unwrap()
+            .get("device-1")
+            .is_some_and(|state| state.sync_ready)
+    );
+    let events = service.drain_remote_events();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, RemoteHostEvent::ProjectsChanged))
+            .count(),
+        1,
+        "the committed projection still needs one generic refresh"
+    );
+    assert_eq!(service.project_list().projects.len(), 1);
+
     drop(service);
     fs::remove_dir_all(support_dir).ok();
 }
@@ -2101,6 +2206,59 @@ fn a_replaced_connection_cannot_apply_its_stale_snapshot() {
         "an old controller cannot borrow the replacement's epoch"
     );
     assert_eq!(service.project_list().projects[0].path, "/srv/beta");
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn replacement_between_snapshot_admission_and_commit_rejects_the_old_owner() {
+    let (service, support_dir, catalog) =
+        remote_project_service("remote-project-snapshot-owner-race", empty_state());
+    let old_controller = service
+        .remote_controller_for_device("device-1")
+        .expect("first controller");
+    let old_epoch = service
+        .remote_controllers
+        .live_connection_epoch("device-1", old_controller.as_ref())
+        .unwrap();
+    let (accepted, resume) = service.pause_next_remote_project_commit_for_test(
+        "device-1",
+        old_epoch,
+        RemoteProjectCommitPoint::Snapshot,
+    );
+    let stale_service = service.clone();
+    let stale = thread::spawn(move || {
+        stale_service.apply_remote_project_snapshot(
+            "device-1",
+            old_epoch,
+            &json!({
+                "projects": [{ "id": "p-old", "name": "Old", "path": "/srv/old" }],
+                "version": 1
+            }),
+            &old_controller,
+        )
+    });
+    accepted
+        .recv_timeout(Duration::from_secs(5))
+        .expect("old owner reached the commit boundary");
+
+    connect_test_host(
+        &service,
+        "device-1",
+        codux_protocol::REMOTE_APP_AGENT,
+        catalog,
+    );
+    resume.send(()).unwrap();
+
+    assert!(!stale.join().unwrap().unwrap());
+    assert!(service.project_list().projects.is_empty());
+    assert!(
+        service
+            .project_activity_snapshot()
+            .tracked_projects
+            .is_empty()
+    );
+
     drop(service);
     fs::remove_dir_all(support_dir).ok();
 }

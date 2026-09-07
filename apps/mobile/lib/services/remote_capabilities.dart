@@ -60,6 +60,25 @@ class TerminalBufferCapability {
   }
 }
 
+class TerminalUploadCapability {
+  const TerminalUploadCapability({this.requestId = false});
+
+  final bool requestId;
+
+  static const fallback = TerminalUploadCapability();
+
+  factory TerminalUploadCapability.fromHostInfo(Object? payload) {
+    if (payload is! Map) return fallback;
+    final capabilities = payload['capabilities'];
+    if (capabilities is! Map) return fallback;
+    final terminalUpload = capabilities['terminalUpload'];
+    if (terminalUpload is! Map) return fallback;
+    return TerminalUploadCapability(
+      requestId: terminalUpload['requestId'] == true,
+    );
+  }
+}
+
 class RemoteResourceSubscriptionCapability {
   const RemoteResourceSubscriptionCapability([this.resources = const {}]);
 

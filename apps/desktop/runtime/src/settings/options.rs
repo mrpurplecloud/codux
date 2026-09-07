@@ -360,7 +360,3 @@ fn current_unix_seconds() -> i64 {
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
 }
-
-fn default_true() -> bool {
-    true
-}

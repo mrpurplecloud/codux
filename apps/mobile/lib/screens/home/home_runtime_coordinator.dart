@@ -29,6 +29,7 @@ class HomeRuntimeCoordinator {
     required this.outputController,
     required this.terminalInputSender,
     required this.terminalInputBatcher,
+    required this.flushTerminalInput,
     required this.terminalBufferRetry,
     required this.terminalBindingCoordinator,
     required this.captureSnapshot,
@@ -52,6 +53,7 @@ class HomeRuntimeCoordinator {
   final RemoteTerminalOutputController outputController;
   final TerminalInputReliableSender terminalInputSender;
   final TerminalInputBatcher terminalInputBatcher;
+  final VoidCallback flushTerminalInput;
   final TerminalBufferRetryCoordinator terminalBufferRetry;
   final RemoteTerminalBindingCoordinator terminalBindingCoordinator;
   final HomeRuntimeSnapshot Function() captureSnapshot;
@@ -177,7 +179,7 @@ class HomeRuntimeCoordinator {
         sessionId,
         reason: 'lru-evict',
       );
-      terminalInputSender.clear(sessionId: sessionId);
+      terminalInputSender.clearSession(sessionId);
     }
     if (evicted.isNotEmpty) {
       CoduxLog.info(
@@ -188,7 +190,7 @@ class HomeRuntimeCoordinator {
       trackTerminalBaselineRequest(bindSessionId);
     }
     if (plan.flushTerminalInput) {
-      terminalInputBatcher.flush();
+      flushTerminalInput();
     }
   }
 }

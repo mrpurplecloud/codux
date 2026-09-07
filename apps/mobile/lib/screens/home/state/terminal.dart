@@ -51,7 +51,7 @@ extension _HomePageTerminal on HomeController {
       // garble; the placeholder covers it until we take over.
       if (handedAway) return;
       if (becameInteractive) {
-        _flushPendingTerminalResize(force: true, sessionId: sessionId);
+        _flushPendingTerminalResize(force: true);
       }
     }
     final size = _terminalViewportController.reportedSize(sessionId);
@@ -248,7 +248,7 @@ extension _HomePageTerminal on HomeController {
     }
     _terminalOutputController.removeSession(id);
     _terminalBufferRetry.resetSession(id);
-    _terminalInputSender.clear(sessionId: id);
+    _terminalInputSender.clearSession(id);
     _terminalBindingCoordinator.clearSessionBaselineStale(id);
     _terminalViewportController.removeSession(id);
     _terminalBaselineResyncRequestedAt.remove(id);
@@ -276,20 +276,44 @@ extension _HomePageTerminal on HomeController {
   }
 
   void _handleTerminalUploaded(RelayEnvelope message) {
+    if (_terminalUploadReplyGuard.consumeAmbiguousLegacyReply(
+      message,
+      hostId: _activeDevice?.hostId,
+      runtimeInstanceId: _hostRuntimeInstanceId,
+    )) {
+      CoduxLog.info(
+        '[codux-flutter-upload] resolve retired legacy reply session=${message.sessionId ?? ''} device=${message.deviceId ?? ''}',
+      );
+      return;
+    }
+    final operation = _terminalUploadOperation;
+    if (operation == null ||
+        !operation.acceptsReply(
+          message,
+          activeOperation: _terminalUploadOperation,
+          activeSessionId: _sessionId,
+          activeDeviceId: _activeDevice?.deviceId,
+          activeTransport: _activeTransport,
+          mounted: mounted,
+          canUpload: _canUploadOverCurrentPath,
+        )) {
+      CoduxLog.info(
+        '[codux-flutter-upload] drop unmatched reply request=${message.requestId ?? ''} session=${message.sessionId ?? ''} device=${message.deviceId ?? ''}',
+      );
+      return;
+    }
     final payload = message.payload;
     if (payload is Map && payload['path'] != null) {
-      final completion = _terminalUploadCompletion;
-      if (completion != null && !completion.isCompleted) {
-        completion.complete();
-      }
-      _terminalUploadCompletion = null;
       final inserted = payload['inserted'] == true;
       final mode = payload['mode']?.toString();
       final tool = payload['tool']?.toString();
       final kind = payload['kind']?.toString();
       if (!inserted) {
         final path = '${payload['path']}';
-        _insertTerminalText('$path ');
+        final activation = _terminalActivation;
+        if (activation != null && activation.sessionId == operation.sessionId) {
+          _insertTerminalText('$path ', activation: activation);
+        }
       }
       _applyState(() {
         _terminalUploadLoading = false;
@@ -303,25 +327,18 @@ extension _HomePageTerminal on HomeController {
               )
             : _t('upload.imageSentPath');
       });
+      operation.completeFromReply();
     }
   }
 
-  StoredDevice? _updateDevice(String deviceId, {String? hostName}) {
-    final result = _deviceController.updateHostName(
-      devices: _devices,
-      activeDevice: _activeDevice,
-      deviceId: deviceId,
-      hostName: hostName,
+  void _updateDevice(String deviceId, {String? hostName}) {
+    if (hostName == null) return;
+    unawaited(
+      _applyBackgroundDeviceMutation(
+        DeviceHostNameChanged(deviceId, hostName),
+        reason: 'host-name',
+      ),
     );
-    final updated = result.updatedDevice;
-    if (updated != null) {
-      _applyState(() {
-        _devices = result.state.devices;
-        _activeDevice = result.state.activeDevice;
-      });
-      unawaited(_storage.saveDevices(result.state.devices));
-    }
-    return updated;
   }
 
   bool _retryTerminalBaseline(String sessionId) {
@@ -428,17 +445,16 @@ extension _HomePageTerminal on HomeController {
     if (mounted) _applyState(() {});
   }
 
-  void _sendTerminalResize(int cols, int rows, {String? sessionId}) {
-    // Cache the measured grid up front -- the very first measurement arrives
-    // before any session exists (the pane is laid out, then create is issued),
-    // so recording it here lets `_createTerminal` seed the host PTY with the
-    // phone's width and avoid the connect-time duplicate prompt line.
-    _terminalViewportController.recordMeasured(cols, rows);
+  void _sendOwnedTerminalResize(
+    int cols,
+    int rows, {
+    required TerminalActivation activation,
+  }) {
     // Handed off to another device: stay silent (claiming/resizing would steal
-    // it back). We still cached the measurement above for when we take over.
+    // it back). The view already cached this measurement for a later takeover.
     if (_remoteHandedAway) return;
-    final id = sessionId ?? _sessionId;
-    if (id == null) return;
+    final owner = activation;
+    final id = owner.sessionId;
     final resize = _terminalViewportController.resize(
       sessionId: id,
       cols: cols,
@@ -451,7 +467,7 @@ extension _HomePageTerminal on HomeController {
     // actually reaches the host; otherwise a repaint/TUI app keeps painting at
     // the host's old row count and leaves the bottom of the screen blank.
     if (!_terminalViewportInteractive && _terminalViewportClaimable) {
-      _claimTerminalViewport(sessionId: id);
+      _claimTerminalViewport(activation: owner);
     }
     if (!_terminalViewportClaimable || !_terminalViewportInteractive) return;
     final terminal = _terminalById(id);
@@ -476,10 +492,14 @@ extension _HomePageTerminal on HomeController {
     _terminalViewportController.markSent(id, resize);
   }
 
-  void _flushPendingTerminalResize({bool force = false, String? sessionId}) {
+  void _flushPendingTerminalResize({
+    bool force = false,
+    TerminalActivation? activation,
+  }) {
     if (_remoteHandedAway) return;
-    final id = sessionId ?? _sessionId;
-    if (id == null) return;
+    final owner = activation ?? _terminalActivation;
+    if (!_ownsTerminalActivation(owner)) return;
+    final id = owner!.sessionId;
     if (!_terminalViewportClaimable) return;
     if (!_terminalViewportInteractive) return;
     final terminal = _terminalById(id);
@@ -504,12 +524,13 @@ extension _HomePageTerminal on HomeController {
   }
 
   void _claimTerminalViewport({
-    String? sessionId,
+    TerminalActivation? activation,
     bool renewOnly = false,
     _TerminalViewportClaimIntent intent = _TerminalViewportClaimIntent.auto,
   }) {
-    final id = sessionId ?? _sessionId;
-    if (id == null || id.trim().isEmpty) return;
+    final owner = activation ?? _terminalActivation;
+    if (!_ownsTerminalActivation(owner)) return;
+    final id = owner!.sessionId;
     if (!_terminalViewportClaimable) return;
     final terminal = _terminalById(id);
     if (terminal == null || !_canResizeTerminal(terminal)) return;
@@ -559,95 +580,94 @@ extension _HomePageTerminal on HomeController {
 
   // Handoff: request ownership from whoever holds it now. The host's viewport
   // state response clears the placeholder and triggers the resize.
-  void _takeOverTerminalViewport({String? sessionId}) {
-    final id = sessionId ?? _sessionId;
-    if (id == null || id.trim().isEmpty) return;
+  void _takeOverTerminalViewport({required TerminalActivation activation}) {
+    if (!_ownsTerminalActivation(activation)) return;
     _claimTerminalViewport(
-      sessionId: id,
+      activation: activation,
       intent: _TerminalViewportClaimIntent.force,
     );
   }
 
-  void _queueTerminalTyping(String data) {
-    if (data.isEmpty) return;
-    _terminalInputBatcher.add(data);
+  bool _ownsTerminalActivation(TerminalActivation? activation) =>
+      activation != null && identical(_terminalActivation, activation);
+
+  void _queueTerminalTyping(
+    String data, {
+    required TerminalActivation activation,
+  }) {
+    if (data.isEmpty || !_ownsTerminalActivation(activation)) return;
+    _terminalInputBatcher.add(activation: activation, data: data);
   }
 
-  /// Whether input produced on the frame built for [fromSession] may still be
-  /// sent.
-  ///
-  /// A session switch changes the current session immediately, while the pane
-  /// keeps showing the previous one until it rebuilds. A gesture in that gap
-  /// belongs to what the user was looking at, not to what the controller has
-  /// since selected — sending it would type into the wrong terminal.
-  ///
-  /// A null [fromSession] means the caller has no frame to speak for (a
-  /// toolbar action, a paste); those follow the current session as before.
-  bool _inputBelongsToCurrentSession(String? fromSession) {
-    if (fromSession == null || fromSession == _sessionId) return true;
-    CoduxLog.debug(
-      '[codux-flutter-input] drop stale gesture from=$fromSession current=${_sessionId ?? ''}',
-    );
-    return false;
-  }
-
-  void _sendTerminalKey(String data, {String? fromSession}) {
-    if (data.isEmpty) return;
-    if (!_inputBelongsToCurrentSession(fromSession)) return;
-    _terminalInputBatcher.flush();
-    _sendInputNow(data, source: 'key');
+  void _sendTerminalKey(String data, {required TerminalActivation activation}) {
+    if (data.isEmpty || !_ownsTerminalActivation(activation)) return;
+    _terminalInputBatcher.flush(activation: activation);
+    _sendInputNow(data, activation: activation, source: 'key');
   }
 
   /// Whether this device may forward scrolling to the app right now — the only
   /// authority on that, read at gesture time because ownership is released (and
   /// taken away by another device) between frames.
-  bool _ownsTerminalViewport() =>
-      _terminalViewportInteractive && _sessionId != null;
+  bool _ownsTerminalViewport(TerminalActivation? activation) =>
+      _terminalViewportInteractive && _ownsTerminalActivation(activation);
 
   /// Forward a scroll gesture to the app that owns scrolling. Unlike a key,
   /// scrolling is a read: it must not claim the viewport, because the handoff
   /// resizes the host PTY to this device's grid and the reflow costs the top of
   /// the scrollback.
-  void _sendTerminalScroll(String data, {String? fromSession}) {
-    if (data.isEmpty || !_ownsTerminalViewport()) return;
-    if (!_inputBelongsToCurrentSession(fromSession)) return;
-    _terminalInputBatcher.flush();
-    _sendInputNow(data, source: 'scroll', claimViewport: false);
+  void _sendTerminalScroll(
+    String data, {
+    required TerminalActivation activation,
+  }) {
+    if (data.isEmpty || !_ownsTerminalViewport(activation)) return;
+    _terminalInputBatcher.flush(activation: activation);
+    _sendInputNow(
+      data,
+      activation: activation,
+      source: 'scroll',
+      claimViewport: false,
+    );
   }
 
-  void _insertTerminalText(String text) {
-    if (text.isEmpty) return;
-    _terminalInputBatcher.flush();
+  void _insertTerminalText(
+    String text, {
+    required TerminalActivation activation,
+  }) {
+    if (text.isEmpty || !_ownsTerminalActivation(activation)) return;
+    _terminalInputBatcher.flush(activation: activation);
     _sendInputNow(
       codux_terminal_core.terminalInsertInput(text),
+      activation: activation,
       source: 'insert',
     );
   }
 
+  void _flushTerminalInput() {
+    final activation = _terminalActivation;
+    if (activation != null) {
+      _terminalInputBatcher.flush(activation: activation);
+    }
+  }
+
   void _sendInputNow(
     String data, {
+    required TerminalActivation activation,
     required String source,
     bool claimViewport = true,
   }) {
     if (data.isEmpty) return;
-    var id = _sessionId;
-    if (id == null) {
-      CoduxLog.debug(
-        '[codux-flutter-input] no session, ensure terminal before input',
+    if (!_ownsTerminalActivation(activation)) {
+      CoduxLog.info(
+        '[codux-flutter-input] drop stale producer=${activation.sessionId} current=${_sessionId ?? ''}',
       );
-      _ensureTerminalForSelectedProject();
-      id = _sessionId;
-    }
-    if (id == null) {
-      _applyState(() => _status = _t('terminal.createOrSelectFirst'));
       return;
     }
     if (claimViewport) {
-      _claimTerminalViewport(sessionId: id);
-      _flushPendingTerminalResize(force: true, sessionId: id);
+      _claimTerminalViewport(activation: activation);
+      _flushPendingTerminalResize(force: true, activation: activation);
     }
     _terminalInputSender.send(
-      sessionId: id,
+      activation: activation,
       data: data,
       source: source,
       retry: data != '\u0003',

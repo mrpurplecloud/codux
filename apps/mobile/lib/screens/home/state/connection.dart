@@ -177,25 +177,30 @@ extension _HomePageConnection on HomeController {
     // report is usable before letting it replace a set that demonstrably is.
     // A host that reports something we could never dial has effectively told us
     // nothing, and adopting it would strand the device until it is re-paired.
-    if (!_hasDialableTransport(reported)) {
+    final current = _activeDevice?.deviceId == target.deviceId
+        ? _activeDevice!
+        : target;
+    if (!_hasDialableTransport(current, reported)) {
       CoduxLog.warn(
         '[codux-flutter-remote] ignored undialable host transports device=${target.deviceId} count=${reported.length}',
       );
       return;
     }
-    final result = _deviceController.replaceTransports(
-      devices: _devices,
-      activeDevice: _activeDevice ?? target,
-      deviceId: target.deviceId,
-      transports: reported,
+    unawaited(_rememberReportedTransports(target.deviceId, reported));
+  }
+
+  Future<void> _rememberReportedTransports(
+    String deviceId,
+    List<RemoteTransportCandidate> transports,
+  ) async {
+    final snapshot = await _applyBackgroundDeviceMutation(
+      DeviceTransportsReplaced(deviceId, transports),
+      reason: 'host-transports',
     );
-    if (result.updatedDevice == null) return;
+    if (snapshot == null) return;
     CoduxLog.info(
-      '[codux-flutter-remote] host transports refreshed device=${target.deviceId} count=${reported.length}',
+      '[codux-flutter-remote] host transports refreshed device=$deviceId count=${transports.length}',
     );
-    _devices = result.state.devices;
-    _activeDevice = result.state.activeDevice;
-    unawaited(_storage.saveDevices(result.state.devices));
   }
 
   /// Whether any of [candidates] is one the dial path would actually accept.
@@ -203,13 +208,10 @@ extension _HomePageConnection on HomeController {
   /// Answered by the native config parser rather than re-implemented here: it
   /// applies the same rule the dialer does, so this cannot drift from it. The
   /// summary reports the count that survived that filter.
-  bool _hasDialableTransport(List<RemoteTransportCandidate> candidates) {
-    final summary = codux_terminal_core.controllerTransportConfigSummary({
-      'transports': candidates.map((item) => item.toJson()).toList(),
-    });
-    final count = summary['transportCount'];
-    return count is int && count > 0;
-  }
+  bool _hasDialableTransport(
+    StoredDevice target,
+    List<RemoteTransportCandidate> candidates,
+  ) => hasDialableControllerTransport(target.copyWith(transports: candidates));
 
   /// Remember the address a live direct path is using, so a later dial can try
   /// it even if the host has moved away from what the pairing ticket recorded.
@@ -219,19 +221,21 @@ extension _HomePageConnection on HomeController {
   void _rememberDirectAddr(String addr) {
     final active = _activeDevice;
     if (active == null) return;
-    final result = _deviceController.rememberDirectAddr(
-      devices: _devices,
-      activeDevice: active,
-      deviceId: active.deviceId,
-      addr: addr,
+    unawaited(_rememberActiveDeviceDirectAddr(active.deviceId, addr));
+  }
+
+  Future<void> _rememberActiveDeviceDirectAddr(
+    String deviceId,
+    String addr,
+  ) async {
+    final snapshot = await _applyBackgroundDeviceMutation(
+      DeviceDirectAddrRemembered(deviceId, addr),
+      reason: 'direct-addr',
     );
-    if (result.updatedDevice == null) return;
+    if (snapshot == null) return;
     CoduxLog.info(
-      '[codux-flutter-remote] remembered direct addr=$addr device=${active.deviceId}',
+      '[codux-flutter-remote] remembered direct addr=$addr device=$deviceId',
     );
-    _devices = result.state.devices;
-    _activeDevice = result.state.activeDevice;
-    unawaited(_storage.saveDevices(result.state.devices));
   }
 
   bool _isCompatibleRemoteProtocol(Object? payload) {
@@ -366,13 +370,8 @@ extension _HomePageConnection on HomeController {
     return kind.isEmpty ? RemoteTransportKind.iroh : kind;
   }
 
-  bool _hasConnectableTransport(StoredDevice device) {
-    final kind = remotePreferredTransportKind(
-      device.transports,
-      pairing: false,
-    );
-    return kind.isNotEmpty && device.transportByKind(kind) != null;
-  }
+  bool _hasConnectableTransport(StoredDevice device) =>
+      hasDialableControllerTransport(device);
 
   void _clearLatencyProbe() {
     _latencyProbeTimer?.cancel();
@@ -538,7 +537,7 @@ extension _HomePageConnection on HomeController {
     _clearTerminal();
   }
 
-  bool _recordHostRuntimeInstance(Object? payload) {
+  bool _recordHostRuntimeInstance(Object? payload, {required String hostId}) {
     if (payload is! Map) return false;
     final next = payload['runtimeInstanceId']?.toString().trim();
     if (next == null || next.isEmpty) return false;
@@ -548,6 +547,7 @@ extension _HomePageConnection on HomeController {
     _resetRemoteRuntimeAfterHostRestart(
       'host-runtime-instance-changed:$previous->$next',
     );
+    _terminalUploadReplyGuard.resetAfterHostRestart(hostId);
     return true;
   }
 
@@ -631,7 +631,7 @@ extension _HomePageConnection on HomeController {
     _requestTerminalList(resetRetry: true);
     _sendHostInfoRequest();
     _mountVisibleTerminal(reason: 'foreground');
-    _terminalInputBatcher.flush();
+    _flushTerminalInput();
   }
 
   void _connect([StoredDevice? device, bool background = false]) {
@@ -681,6 +681,7 @@ extension _HomePageConnection on HomeController {
         previousDevice.deviceId != target.deviceId;
     _cancelRemoteSyncTimers();
     final generation = _remoteSyncController.beginConnectionGeneration();
+    _terminalUploadCapability = TerminalUploadCapability.fallback;
     if (switchingDevice) {
       _hostRuntimeInstanceId = null;
       _resetRemoteRuntime(keepProjects: false);

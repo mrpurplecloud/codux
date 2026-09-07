@@ -1,32 +1,32 @@
 impl SettingsService {
     pub fn toggle_update_enabled(&self) -> Result<SettingsSummary, String> {
-        let mut raw = self.raw_settings();
-        let update = update_mut(&mut raw)?;
-        let current = update
-            .get("enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        update.insert("enabled".to_string(), Value::Bool(!current));
-        self.save_raw_settings(&raw)?;
-        Ok(summary_from_raw(&raw))
+        self.update_raw_settings(|raw| {
+            let update = update_mut(raw)?;
+            let current = update
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            update.insert("enabled".to_string(), Value::Bool(!current));
+            Ok(summary_from_raw(raw))
+        })
     }
 
     pub fn cycle_update_channel(&self) -> Result<SettingsSummary, String> {
-        let mut raw = self.raw_settings();
-        let update = update_mut(&mut raw)?;
-        let current = update
-            .get("channel")
-            .and_then(Value::as_str)
-            .unwrap_or("stable");
-        let next = match current {
-            "stable" => "beta",
-            "beta" => "stable",
-            _ => "stable",
-        };
-        update.insert("channel".to_string(), Value::String(next.to_string()));
-        sync_update_endpoint_for_channel(update, next);
-        self.save_raw_settings(&raw)?;
-        Ok(summary_from_raw(&raw))
+        self.update_raw_settings(|raw| {
+            let update = update_mut(raw)?;
+            let current = update
+                .get("channel")
+                .and_then(Value::as_str)
+                .unwrap_or("stable");
+            let next = match current {
+                "stable" => "beta",
+                "beta" => "stable",
+                _ => "stable",
+            };
+            update.insert("channel".to_string(), Value::String(next.to_string()));
+            sync_update_endpoint_for_channel(update, next);
+            Ok(summary_from_raw(raw))
+        })
     }
 
     pub fn set_update_channel(&self, channel: &str) -> Result<SettingsSummary, String> {
@@ -35,12 +35,12 @@ impl SettingsService {
         } else {
             "stable"
         };
-        let mut raw = self.raw_settings();
-        let update = update_mut(&mut raw)?;
-        update.insert("channel".to_string(), Value::String(channel.to_string()));
-        sync_update_endpoint_for_channel(update, channel);
-        self.save_raw_settings(&raw)?;
-        Ok(summary_from_raw(&raw))
+        self.update_raw_settings(|raw| {
+            let update = update_mut(raw)?;
+            update.insert("channel".to_string(), Value::String(channel.to_string()));
+            sync_update_endpoint_for_channel(update, channel);
+            Ok(summary_from_raw(raw))
+        })
     }
 
     pub fn cycle_git_refresh(&self) -> Result<SettingsSummary, String> {

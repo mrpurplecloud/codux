@@ -89,22 +89,21 @@ pub struct TicketTransport {
 }
 
 impl TicketTransport {
-    /// Whether this transport carries enough to dial: a full ticket, or a node
-    /// id + relay url pair (the slim QR form).
-    ///
-    /// Delegates to the transport crate so this and the iroh dial path cannot
-    /// disagree about what is dialable. They previously each had their own copy,
-    /// and had already drifted: this one treated a whitespace-only ticket as
-    /// usable, the dial path did not.
+    /// Ask the real dial-target constructor; field presence cannot establish
+    /// that a ticket, identity or route parses and agrees with the others.
     fn is_dialable_iroh(&self) -> bool {
-        codux_remote_transport::is_dialable_iroh_transport(
-            &self.kind,
-            &self.ticket,
-            &self.node_id,
-            &self.relay_url,
-            // A pairing ticket is first contact: nothing has been reached yet.
-            false,
+        codux_remote_transport::build_iroh_dial_target(
+            &RemoteTransportCandidate {
+                kind: self.kind.clone(),
+                url: String::new(),
+                node_id: self.node_id.clone(),
+                relay_url: self.relay_url.clone(),
+                ticket: self.ticket.clone(),
+                relay_authentication: self.relay_authentication.clone(),
+            },
+            &[],
         )
+        .is_ok()
     }
 }
 
@@ -443,8 +442,8 @@ impl RemoteController {
     }
 
     /// Reconnect to a previously paired host (no fresh handshake — the host
-    /// caches our `device_id`). Uses the saved iroh `node_id` + `relay_url`,
-    /// since the original pairing ticket is single-use.
+    /// caches our `device_id`). Uses the complete saved iroh candidate plus this
+    /// controller's remembered direct addresses.
     pub async fn connect_saved(
         host: &SavedRemoteHost,
         on_state: RemoteTransportStateHandler,
@@ -1393,7 +1392,7 @@ mod e2e {
                 &config,
                 RemoteHostTransportHandlers {
                     on_message,
-                    on_upload: Arc::new(|_| Ok(())),
+                    on_upload: Arc::new(|_| Err("upload unsupported in test host".to_string())),
                     on_state: Arc::new(|_, _| {}),
                     on_pairing: Arc::new(|handshake| {
                         Some(json!({
@@ -1412,7 +1411,10 @@ mod e2e {
             .await
             .expect("host connects");
             *host_slot.lock().unwrap() = Some(Arc::clone(&host));
-            let endpoint_ticket = host.iroh_endpoint_ticket().expect("host ticket");
+            let endpoint_ticket = host
+                .current_dial_candidate()
+                .expect("host candidate")
+                .ticket;
 
             let ticket = PairingTicket {
                 code: "c".to_string(),
@@ -1509,7 +1511,7 @@ mod e2e {
                 &config,
                 RemoteHostTransportHandlers {
                     on_message,
-                    on_upload: Arc::new(|_| Ok(())),
+                    on_upload: Arc::new(|_| Err("upload unsupported in test host".to_string())),
                     on_state: Arc::new(|_, _| {}),
                     on_pairing: Arc::new(|handshake| {
                         Some(json!({
@@ -1528,7 +1530,10 @@ mod e2e {
             .await
             .expect("host connects");
             *host_slot.lock().unwrap() = Some(Arc::clone(&host));
-            let endpoint_ticket = host.iroh_endpoint_ticket().expect("host ticket");
+            let endpoint_ticket = host
+                .current_dial_candidate()
+                .expect("host candidate")
+                .ticket;
             // Keep the host alive for the duration of the test.
             std::mem::forget(host);
             let payload = json!({
@@ -1637,7 +1642,7 @@ mod e2e {
                 &config,
                 RemoteHostTransportHandlers {
                     on_message,
-                    on_upload: Arc::new(|_| Ok(())),
+                    on_upload: Arc::new(|_| Err("upload unsupported in test host".to_string())),
                     on_state: Arc::new(|_, _| {}),
                     on_pairing: Arc::new(|handshake| {
                         Some(json!({
@@ -1661,7 +1666,10 @@ mod e2e {
                 pairing_id: "p".to_string(),
                 transports: vec![TicketTransport {
                     kind: REMOTE_TRANSPORT_IROH.to_string(),
-                    ticket: host.iroh_endpoint_ticket().expect("ticket"),
+                    ticket: host
+                        .current_dial_candidate()
+                        .expect("host candidate")
+                        .ticket,
                     node_id: String::new(),
                     relay_url: String::new(),
                     relay_authentication: String::new(),
@@ -1797,7 +1805,7 @@ mod e2e {
                 &config,
                 RemoteHostTransportHandlers {
                     on_message,
-                    on_upload: Arc::new(|_| Ok(())),
+                    on_upload: Arc::new(|_| Err("upload unsupported in test host".to_string())),
                     on_state: Arc::new(|_, _| {}),
                     on_pairing: Arc::new(|_| None),
                     on_authorize: Arc::new(|_, _| true),
@@ -1818,7 +1826,10 @@ mod e2e {
                 device_token: String::new(),
                 relay_url: String::new(),
                 node_id: String::new(),
-                ticket: host.iroh_endpoint_ticket().expect("ticket"),
+                ticket: host
+                    .current_dial_candidate()
+                    .expect("host candidate")
+                    .ticket,
                 relay_authentication: String::new(),
                 direct_addrs: Vec::new(),
             };
@@ -1888,6 +1899,9 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use codux_protocol::RemoteTransportKind;
+
+    const TEST_ENDPOINT_ID: &str =
+        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
 
     struct NoopTransport;
     struct CapturingReplyTransport {
@@ -2326,7 +2340,13 @@ mod tests {
             "code": "1234",
             "secret": "s3cr3t",
             "pairingId": "pair-abc",
-            "transports": [{ "kind": "iroh", "ticket": "ticket-blob", "relayAuthentication": "auth" }],
+            "transports": [{
+                "kind": "iroh",
+                "nodeId": TEST_ENDPOINT_ID,
+                "relayUrl": "https://relay.example/",
+                "ticket": "ticket-blob",
+                "relayAuthentication": "auth",
+            }],
         });
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&payload).unwrap());
@@ -2359,12 +2379,16 @@ mod tests {
             "code": "1234",
             "secret": "s3cr3t",
             "pairingId": "pair-abc",
-            "transports": [{ "kind": "iroh", "nodeId": "node-x", "relayUrl": "https://relay.example/" }],
+            "transports": [{
+                "kind": "iroh",
+                "nodeId": TEST_ENDPOINT_ID,
+                "relayUrl": "https://relay.example/",
+            }],
         });
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&payload).unwrap());
         let ticket = parse_pairing_ticket(&encoded).expect("slim ticket should parse");
-        assert_eq!(ticket.transports[0].node_id, "node-x");
+        assert_eq!(ticket.transports[0].node_id, TEST_ENDPOINT_ID);
         assert_eq!(ticket.transports[0].relay_url, "https://relay.example/");
         assert!(ticket.transports[0].ticket.is_empty());
     }

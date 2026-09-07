@@ -32,17 +32,17 @@ impl SettingsService {
     }
 
     pub fn toggle_terminal_paste_images_as_paths(&self) -> Result<SettingsSummary, String> {
-        let mut raw = self.raw_settings();
-        let current = raw
-            .get("terminalPasteImagesAsPaths")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
-        raw.insert(
-            "terminalPasteImagesAsPaths".to_string(),
-            Value::Bool(!current),
-        );
-        self.save_raw_settings(&raw)?;
-        Ok(summary_from_raw(&raw))
+        self.update_raw_settings(|raw| {
+            let current = raw
+                .get("terminalPasteImagesAsPaths")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            raw.insert(
+                "terminalPasteImagesAsPaths".to_string(),
+                Value::Bool(!current),
+            );
+            Ok(summary_from_raw(raw))
+        })
     }
 
     pub fn set_terminal_scrollback_value(&self, lines: &str) -> Result<SettingsSummary, String> {

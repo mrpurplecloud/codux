@@ -8,11 +8,12 @@ use std::time::Instant;
 
 impl RemoteService {
     pub fn set_enabled(&self, enabled: bool) -> Result<RemoteSummary, String> {
-        let mut raw = self.raw_settings();
-        let remote = remote_settings_mut(&mut raw)?;
-        remote.insert("isEnabled".to_string(), Value::Bool(enabled));
-        self.save_raw_settings(&raw)?;
-        Ok(self.summary())
+        let settings = self.update_raw_settings(|raw| {
+            let remote = remote_settings_mut(raw)?;
+            remote.insert("isEnabled".to_string(), Value::Bool(enabled));
+            Ok(remote_settings_from_raw(raw))
+        })?;
+        Ok(remote_summary_from_settings(settings))
     }
 
     pub fn register_host(&self) -> Result<RemoteSummary, String> {
@@ -20,18 +21,11 @@ impl RemoteService {
     }
 
     pub async fn register_host_async(&self) -> Result<RemoteSummary, String> {
-        let mut raw = self.raw_settings();
-        let settings = self.register_host_in_raw_async(&mut raw).await?;
-        self.save_raw_settings(&raw)?;
+        let settings = self.update_raw_settings(|raw| self.register_host_in_raw(raw))?;
         Ok(remote_summary_from_settings(settings))
     }
 
-    pub fn reconnect(&self) -> Result<RemoteSummary, String> {
-        self.register_host()?;
-        self.refresh_devices()
-    }
-
-    pub(super) async fn register_host_in_raw_async(
+    pub(super) fn register_host_in_raw(
         &self,
         raw: &mut Map<String, Value>,
     ) -> Result<RemoteSettings, String> {

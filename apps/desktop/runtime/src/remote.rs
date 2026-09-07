@@ -11,7 +11,6 @@ mod registration;
 mod relay;
 mod settings;
 mod summary;
-mod sync;
 mod transport;
 mod transport_factory;
 mod types;

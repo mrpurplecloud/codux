@@ -44,9 +44,19 @@ pub(super) fn viewport_buffer_options(
 #[derive(Default)]
 struct CapturingTransport {
     messages: Mutex<Vec<(Option<String>, Vec<u8>)>>,
+    dial_candidate: Option<codux_remote_transport::RemoteTransportCandidate>,
 }
 
 impl CapturingTransport {
+    pub(super) fn with_dial_candidate(
+        dial_candidate: codux_remote_transport::RemoteTransportCandidate,
+    ) -> Self {
+        Self {
+            dial_candidate: Some(dial_candidate),
+            ..Self::default()
+        }
+    }
+
     pub(super) fn take_messages(&self) -> Vec<(Option<String>, Vec<u8>)> {
         self.messages
             .lock()
@@ -83,6 +93,10 @@ impl RemoteTransport for CapturingTransport {
             messages.push((device_id.map(str::to_string), data));
         }
         true
+    }
+
+    fn current_dial_candidate(&self) -> Option<codux_remote_transport::RemoteTransportCandidate> {
+        self.dial_candidate.clone()
     }
 
     async fn shutdown(&self) {}

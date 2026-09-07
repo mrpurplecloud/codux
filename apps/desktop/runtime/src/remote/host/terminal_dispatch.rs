@@ -592,41 +592,30 @@ impl RemoteHostRuntime {
         }
     }
 
-    pub(super) fn write_terminal_upload_file(
+    pub(super) fn insert_terminal_upload(
         &self,
         session_id: &str,
         name: &str,
         bytes: &[u8],
-    ) -> Result<PathBuf, String> {
-        let directory = remote_terminal_upload_directory(session_id);
-        fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-        let path = unique_remote_upload_path(&directory, name);
-        fs::write(&path, bytes).map_err(|error| error.to_string())?;
-        Ok(path)
-    }
-
-    pub(super) fn finish_terminal_upload(
-        &self,
-        device_id: Option<&str>,
-        session_id: &str,
-        path: PathBuf,
         kind: &str,
-    ) {
+    ) -> Result<RemoteTransportUploadOutcome, String> {
+        let directory = remote_terminal_upload_directory(session_id);
+        let path = runtime_upload::write_unique_upload_file(&directory, name, bytes)
+            .map_err(|error| error.to_string())?;
         let text = format!("{} ", terminal_upload_path_input(&path));
-        let _ = self.terminals.write(session_id, text.as_bytes());
-        self.send_terminal_data(
-            REMOTE_TERMINAL_UPLOADED,
-            device_id,
-            Some(session_id),
-            json!({
-                "path": path.to_string_lossy().to_string(),
-                "name": path.file_name().and_then(|value| value.to_str()).unwrap_or_default(),
-                "kind": kind,
-                "mode": "path",
-                "tool": Value::Null,
-                "inserted": true,
-            }),
-        );
+        if let Err(error) = self.terminals.write(session_id, text.as_bytes()) {
+            let _ = fs::remove_file(&path);
+            return Err(error.to_string());
+        }
+        Ok(RemoteTransportUploadOutcome {
+            path: path.to_string_lossy().to_string(),
+            name: path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_string(),
+            kind: kind.to_string(),
+        })
     }
 }
 
@@ -715,8 +704,4 @@ pub(crate) fn sanitized_remote_upload_name(value: &str) -> String {
 
 pub(crate) fn terminal_upload_path_input(path: &Path) -> String {
     runtime_upload::terminal_upload_path_input(path)
-}
-
-pub(crate) fn unique_remote_upload_path(directory: &Path, file_name: &str) -> PathBuf {
-    runtime_upload::unique_upload_path(directory, file_name)
 }

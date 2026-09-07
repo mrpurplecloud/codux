@@ -54,7 +54,7 @@ Compatibility contract for the whole change: every ticket is independently shipp
 - [x] 3.1 Add a failing test proving a host whose relay is unreachable still produces a transport candidate carrying a usable ticket. **Covered at the contract rather than through a live host:** asserting it end-to-end needs a real relay registration to time out, which costs the suite twelve seconds to prove something the contract already states. The dialability contract is tested directly instead, in both languages.
 - [x] 3.2 Change host endpoint bind so relay registration timeout is recorded rather than fatal, and the endpoint is retained rather than closed. Also removed the second gate below it, which failed startup outright when no relay URL could be resolved at all.
 - [x] 3.3 Allow candidate publication with an empty relay URL when no relay home exists. **Scope grew for a reason:** the acceptance rule existed in three places — the iroh dial path, the desktop controller's ticket parser, and implicitly in the mobile selector — and had already drifted, with the desktop copy treating a whitespace-only ticket as usable. Extracted as one exported, tested function; the desktop parser now delegates to it.
-- [x] 3.4 Verify an unmodified controller build tolerates a candidate with an empty relay URL, and record the observed behaviour in the ticket. **Found a blocker and fixed it:** the mobile selector additionally required a non-empty `url`, which holds the relay SERVER address and says nothing about iroh reachability. A relay-less host's candidate has an empty one, so the phone would have rejected it before the dial path — the one authority on dialability — ever saw it, and shown "re-pair required". Pinned with a regression test. The other consumers are clean: mobile transport-kind selection goes through the shared Rust rule via FFI and only inspects `kind`.
+- [x] 3.4 Verify an unmodified controller build tolerates a candidate with an empty relay URL, and record the observed behaviour in the ticket. **Found a blocker and fixed it:** the mobile selector additionally required a non-empty `url`, which holds the relay SERVER address and says nothing about iroh reachability. A relay-less host's candidate has an empty one, so the phone would have rejected it before the dial path — the one authority on dialability — ever saw it, and shown "re-pair required". Pinned with a regression test. Mobile selection now asks that shared Rust dialability rule through FFI instead of maintaining a field-presence copy.
 
 ## 4. Controller Remembers What Worked
 
@@ -78,18 +78,18 @@ Compatibility contract for the whole change: every ticket is independently shipp
 
 **Status:** done — no protocol change was needed; see below
 
-**The announcement already existed.** `host.info` has always carried a
-`transports` field, and the host rebuilds it from its live endpoint on every
-reply — the ticket inside is `EndpointTicket::from(endpoint.addr())`, evaluated
-at send time. Both desktop and headless already send it, from one shared
-payload builder. The controller simply ignored it.
+**The announcement shape already existed.** Desktop `host.info` already carried
+`transports`; the shared payload builder supported it, while the headless call
+site passed an empty list. Both hosts now rebuild that field from their live
+endpoint on every reply. The ticket is
+`EndpointTicket::from(endpoint.addr())`, evaluated at send time.
 
 So the whole ticket collapsed to: consume the field. That is strictly better
 than the planned new message. No new message type, no capability negotiation, no
 version gate, and all four peer-version combinations are safe by construction
 rather than by agreement.
 
-- [x] 5.1 Add a failing cross-client test: a host whose address set changes after pairing announces the change, and the controller's stored candidate is replaced and persisted. Run against baseline and record the expected failure.
+- [x] 5.1 Add a failing cross-client test: a host whose address set changes after pairing announces the change, and the controller's stored candidate is replaced and persisted. `host_info_candidate_is_adopted_persisted_and_keeps_remembered_addresses` now exercises the canonical host payload through the manager store and reloads it from disk.
 - [x] 5.2 ~~Advertise an address-announcement capability~~ — **not needed.** A capability exists so a sender can avoid sending something a receiver cannot handle. Here the field is already always sent; the only question is whether the receiver uses it, which the receiver answers by itself. Adding a flag would have been ceremony around a decision nobody else needs to know.
 - [x] 5.3 ~~Add the host-originated announcement message~~ — **superseded:** the existing `host.info` reply is that message. It is already sent on every connection, which is exactly the moment stored addresses need refreshing. Sending on host address change mid-connection was dropped deliberately: while a connection is live its path still works, and when it breaks the reconnect fetches a fresh `host.info` anyway. A push would only matter for a host that changed address without the link noticing, which cannot be delivered to a controller that has no working path.
 - [x] 5.4 Replace and persist the controller's stored transport candidate from the announcement, keeping the remembered last-known-good address from ticket 4 as an independent fallback. An empty report is explicitly not an instruction to forget — silence from an older host must not strand the device. Unchanged reports write nothing, since `host.info` arrives on every connection.
@@ -139,8 +139,8 @@ same defect ticket 1 fixed on the controller, left standing on the host one
 commit later: `relay_url` was captured at bind, so a host that started without a
 reachable relay and acquired one later kept advertising the empty startup value
 — inside the very payload ticket 5 added to make addresses follow the host. Two
-fields answering "where is this host" differently. Now read live, with the
-bind-time value as fallback.
+fields answering "where is this host" differently. Now one live endpoint read
+owns both fields; configured relay intent is not advertised as a working route.
 
 **Adoption bypassed the dialability authority.** `_refreshStoredTransports`
 checked only for an empty report before replacing stored candidates. A report

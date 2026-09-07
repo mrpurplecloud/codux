@@ -1328,6 +1328,7 @@ dependencies = [
 name = "codux-agent"
 version = "2.0.3-beta.8"
 dependencies = [
+ "async-trait",
  "base64",
  "chrono",
  "clap",

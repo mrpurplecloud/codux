@@ -151,12 +151,11 @@ impl RemoteHostRuntime {
             // to include a later live frame. The absolute history watermark then
             // removes any prefix that the atomic snapshot already covered.
             let output_seq = self.current_terminal_output_seq(session_id);
-            let viewport_max_lines = options
-                .viewport
-                .map(|viewport| viewport.rows.max(8) as usize);
-            let baseline =
-                self.terminals
-                    .baseline_snapshot(session_id, max_chars, viewport_max_lines)?;
+            let baseline = self.terminals.baseline_snapshot(
+                session_id,
+                max_chars,
+                options.viewport.is_some(),
+            )?;
             let (screen_data, screen_wrapped_rows) = (!baseline.screen.data.is_empty())
                 .then(|| {
                     (

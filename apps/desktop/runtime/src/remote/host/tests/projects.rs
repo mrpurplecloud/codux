@@ -33,9 +33,7 @@ fn secure_project_select_keeps_decrypted_device_id_for_scope_and_replies() {
     write_two_project_state(&support_dir);
     let runtime = Arc::new(RemoteHostRuntime::new(support_dir.clone()));
     let transport = Arc::new(CapturingTransport::default());
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(transport.clone());
-    }
+    runtime.set_transport_for_test(transport.clone());
     let encrypted = {
         let mut send_seq = HashMap::new();
         runtime
@@ -370,9 +368,7 @@ fn terminal_project_subscribe_returns_list_without_buffer_baseline() {
         Arc::clone(&terminals),
     ));
     let transport = Arc::new(CapturingTransport::default());
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(transport.clone());
-    }
+    runtime.set_transport_for_test(transport.clone());
     let session_id = terminals
         .create(
             TerminalPtyConfig {

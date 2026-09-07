@@ -1,16 +1,11 @@
 use super::*;
 
-/// A phone is told how far back it may scroll, not how tall its screen is.
-///
-/// The baseline reply is sized to the observer's viewport so it stays small.
-/// That size used to be passed as the scrollable window too, so the reply
-/// reported a session with exactly one screen of history and the controller
-/// disabled scrolling. Because the number tracked the viewport, it also moved
-/// whenever the viewport did — a phone mid-layout briefly reports a handful of
-/// rows, and the history it could reach shrank to match.
+/// Full screen capacity is history plus visible grid. The screen owns that
+/// budget; a baseline must not reinterpret its history budget as total rows and
+/// hide one viewport from the oldest end.
 #[cfg(unix)]
 #[test]
-fn baseline_reports_the_scrollable_window_not_the_viewport_height() {
+fn remote_baseline_reports_full_screen_capacity() {
     let manager = TerminalManager::new();
     let terminal_id = format!("codux-baseline-scrollback-{}", Uuid::new_v4());
     let root = std::env::temp_dir().join(&terminal_id);
@@ -20,7 +15,9 @@ fn baseline_reports_the_scrollable_window_not_the_viewport_height() {
     // clamped by the default row count instead of the viewport under test, and
     // the assertion below passes whether or not the bug is present.
     const SCREEN_ROWS: u16 = 30;
-    const PHONE_ROWS: usize = 24;
+    // Stay above the removed 500-line idle tier. Smaller values prove baseline
+    // sizing, but still pass when history produced before subscription is lost.
+    const SCROLLBACK_LINES: usize = 700;
     const PRINTED_LINES: usize = 900;
 
     let (session, output) = manager
@@ -29,13 +26,13 @@ fn baseline_reports_the_scrollable_window_not_the_viewport_height() {
                 terminal_id: Some(terminal_id.clone()),
                 cwd: Some(root.display().to_string()),
                 shell: Some("/bin/sh".to_string()),
-                command: Some(
-                    "i=0; while [ $i -lt 900 ]; do echo line-$i; i=$((i+1)); done; \
+                command: Some(format!(
+                    "i=0; while [ $i -lt {PRINTED_LINES} ]; do echo line-$i; i=$((i+1)); done; \
                      echo READY; sleep 30"
-                        .to_string(),
-                ),
+                )),
                 cols: Some(100),
                 rows: Some(SCREEN_ROWS),
+                scrollback_lines: Some(SCROLLBACK_LINES),
                 ..Default::default()
             },
             None,
@@ -50,12 +47,12 @@ fn baseline_reports_the_scrollable_window_not_the_viewport_height() {
 
     // A phone subscribes only now, long after the output was produced: the
     // history it can reach must not depend on when it showed up.
-    let baseline = session.baseline_snapshot(200_000, Some(PHONE_ROWS));
+    let baseline = session.baseline_snapshot(200_000, true);
 
     assert!(
-        baseline.screen.total_lines >= PRINTED_LINES,
-        "a session that printed {PRINTED_LINES} lines reports only {} scrollable \
-         lines, so a phone cannot reach the history the host still holds",
+        baseline.screen.total_lines > SCROLLBACK_LINES,
+        "full screen capacity must include {SCROLLBACK_LINES} history rows plus \
+         {SCREEN_ROWS} visible rows; baseline reported only {}",
         baseline.screen.total_lines
     );
 

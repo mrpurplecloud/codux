@@ -108,15 +108,6 @@ impl ConfigStore {
         self.update(|snapshot| Ok(remove_path_value(snapshot, path)))
     }
 
-    pub fn save_snapshot(&self, snapshot: &Map<String, Value>) -> Result<(), String> {
-        {
-            let _write_guard = self.write_lock.lock();
-            *self.snapshot.write() = snapshot.clone();
-            self.revision.fetch_add(1, Ordering::Release);
-        }
-        self.schedule_write()
-    }
-
     pub fn update_sync<R>(
         &self,
         update: impl FnOnce(&mut Map<String, Value>) -> Result<R, String>,
@@ -348,12 +339,6 @@ pub fn update_raw_state_snapshot<R>(
     })
 }
 
-pub fn save_raw_state_snapshot(path: &Path, snapshot: &Map<String, Value>) -> Result<(), String> {
-    let mut snapshot = snapshot.clone();
-    sanitize_state_snapshot(&mut snapshot);
-    ConfigStore::for_file(path.to_path_buf()).save_snapshot(&snapshot)
-}
-
 fn sanitize_state_snapshot(snapshot: &mut Map<String, Value>) {
     snapshot.remove("terminalLayouts");
     snapshot.remove("fileEditorLayouts");
@@ -497,7 +482,11 @@ mod tests {
             ]),
         );
 
-        save_raw_state_snapshot(&path, &snapshot).expect("save state");
+        update_raw_state_snapshot(&path, |raw| {
+            *raw = snapshot;
+            Ok(())
+        })
+        .expect("save state");
         std::thread::sleep(Duration::from_millis(140));
         let saved = raw_state_snapshot(&path);
 
@@ -521,7 +510,11 @@ mod tests {
             json!([{ "id": "p1", "name": "Project", "path": "/tmp/project" }]),
         );
 
-        save_raw_state_snapshot(&path, &snapshot).expect("save state");
+        update_raw_state_snapshot(&path, |raw| {
+            *raw = snapshot;
+            Ok(())
+        })
+        .expect("save state");
         flush_all_config_writes();
         let content = fs::read_to_string(&path).expect("flushed state file");
 

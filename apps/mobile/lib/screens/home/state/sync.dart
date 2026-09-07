@@ -291,8 +291,23 @@ extension _HomePageSync on HomeController {
     _projects = _remoteRuntime.projects;
     _terminals = _remoteRuntime.terminals;
     _selectedProjectId = _remoteRuntime.selectedProjectId;
-    _sessionId = _remoteRuntime.activeSessionId;
+    final nextSessionId = _remoteRuntime.activeSessionId;
+    if (nextSessionId != _terminalActivation?.sessionId) {
+      _terminalActivation = nextSessionId == null
+          ? null
+          : TerminalActivation(nextSessionId);
+      _terminalInputBatcher.reset();
+      _terminalInputSender.clear();
+      _voiceInputActivation = null;
+      _showVoiceOverlay = false;
+      _pendingAISessionRestore = null;
+    }
+    _sessionId = nextSessionId;
     _creatingTerminalProjectId = _remoteRuntime.creatingTerminalProjectId;
+    final upload = _terminalUploadOperation;
+    if (upload != null && upload.sessionId != _sessionId) {
+      _finishTerminalUpload(upload, reason: 'session-switch');
+    }
   }
 
   void _setTerminalBufferLoading(

@@ -3,25 +3,26 @@ import 'dart:async';
 import '../models/remote_models.dart';
 import 'log_service.dart';
 import 'remote_protocol.dart';
+import 'terminal_activation.dart';
 
 typedef TerminalInputReliableSend = bool Function(RelayEnvelope message);
-typedef TerminalInputActiveSession = String? Function();
+typedef TerminalInputActiveActivation = TerminalActivation? Function();
 typedef TerminalInputReliableTimerFactory =
     Timer Function(Duration delay, void Function() callback);
 
 class TerminalInputReliableSender {
   TerminalInputReliableSender({
     required TerminalInputReliableSend send,
-    TerminalInputActiveSession? activeSessionId,
+    required TerminalInputActiveActivation activeActivation,
     this.maxAttempts = 4,
     this.retryBaseDelay = const Duration(milliseconds: 700),
     TerminalInputReliableTimerFactory? timerFactory,
   }) : _send = send,
-       _activeSessionId = activeSessionId,
+       _activeActivation = activeActivation,
        _timerFactory = timerFactory ?? Timer.new;
 
   final TerminalInputReliableSend _send;
-  final TerminalInputActiveSession? _activeSessionId;
+  final TerminalInputActiveActivation _activeActivation;
   final TerminalInputReliableTimerFactory _timerFactory;
   final int maxAttempts;
   final Duration retryBaseDelay;
@@ -32,19 +33,21 @@ class TerminalInputReliableSender {
   int get pendingCount => _pending.length;
 
   bool send({
-    required String sessionId,
+    required TerminalActivation activation,
     required String data,
     required String source,
     bool retry = true,
   }) {
-    if (sessionId.isEmpty || data.isEmpty) return false;
+    if (!identical(_activeActivation(), activation) || data.isEmpty) {
+      return false;
+    }
     final inputId = '${DateTime.now().microsecondsSinceEpoch}-${++_seq}';
     CoduxLog.info(
-      '[codux-flutter-input] source=$source id=$inputId bytes=${data.codeUnits.length} session=$sessionId',
+      '[codux-flutter-input] source=$source id=$inputId bytes=${data.codeUnits.length} session=${activation.sessionId}',
     );
     _pending[inputId] = _PendingTerminalInput(
       inputId: inputId,
-      sessionId: sessionId,
+      activation: activation,
       data: data,
       source: source,
       retry: retry,
@@ -67,10 +70,22 @@ class TerminalInputReliableSender {
     }
   }
 
-  void clear({String? sessionId}) {
+  void clear({TerminalActivation? activation}) {
     final entries = _pending.entries.toList();
     for (final entry in entries) {
-      if (sessionId != null && entry.value.sessionId != sessionId) continue;
+      if (activation != null &&
+          !identical(entry.value.activation, activation)) {
+        continue;
+      }
+      entry.value.retryTimer?.cancel();
+      _pending.remove(entry.key);
+    }
+  }
+
+  void clearSession(String sessionId) {
+    final entries = _pending.entries.toList();
+    for (final entry in entries) {
+      if (entry.value.activation.sessionId != sessionId) continue;
       entry.value.retryTimer?.cancel();
       _pending.remove(entry.key);
     }
@@ -83,15 +98,20 @@ class TerminalInputReliableSender {
   void _sendPending(String inputId) {
     final pending = _pending[inputId];
     if (pending == null) return;
-    final activeSessionId = _activeSessionId?.call();
-    if (activeSessionId != null && pending.sessionId != activeSessionId) {
+    final activeActivation = _activeActivation();
+    if (!identical(pending.activation, activeActivation)) {
+      pending.retryTimer?.cancel();
+      _pending.remove(inputId);
+      CoduxLog.info(
+        '[codux-flutter-input] drop stale id=$inputId pending=${pending.activation.sessionId} active=${activeActivation?.sessionId ?? ''}',
+      );
       return;
     }
     pending.retryTimer?.cancel();
     final sent = _send(
       RelayEnvelope(
         type: RemoteMessageType.terminalInput,
-        sessionId: pending.sessionId,
+        sessionId: pending.activation.sessionId,
         payload: {
           'data': pending.data,
           'inputId': pending.inputId,
@@ -122,14 +142,14 @@ class TerminalInputReliableSender {
 class _PendingTerminalInput {
   _PendingTerminalInput({
     required this.inputId,
-    required this.sessionId,
+    required this.activation,
     required this.data,
     required this.source,
     required this.retry,
   });
 
   final String inputId;
-  final String sessionId;
+  final TerminalActivation activation;
   final String data;
   final String source;
   final bool retry;

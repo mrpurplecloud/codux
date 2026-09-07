@@ -198,7 +198,10 @@ mod tests {
         assert!(cache.is_authorized("device-1", "token-1"));
 
         ConfigStore::for_file(path.clone())
-            .save_snapshot(&Map::new())
+            .update(|settings| {
+                settings.clear();
+                Ok(())
+            })
             .unwrap();
 
         assert!(!cache.is_authorized("device-1", "token-1"));

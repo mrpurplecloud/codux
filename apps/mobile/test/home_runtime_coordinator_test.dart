@@ -8,6 +8,7 @@ import 'package:codux_flutter/services/remote_runtime_store.dart';
 import 'package:codux_flutter/services/remote_terminal_binding_coordinator.dart';
 import 'package:codux_flutter/services/remote_terminal_output_controller.dart';
 import 'package:codux_flutter/services/terminal_buffer_retry.dart';
+import 'package:codux_flutter/services/terminal_activation.dart';
 import 'package:codux_flutter/services/terminal_input_batcher.dart';
 import 'package:codux_flutter/services/terminal_input_reliable_sender.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -22,6 +23,7 @@ void main() {
     var sessionId = 'term-a';
     String? pendingSessionId;
     var projectId = 'project-1';
+    final activation = TerminalActivation('term-a');
     final output = RemoteTerminalOutputController();
     final retry = TerminalBufferRetryCoordinator(
       timerFactory: (delay, callback) {
@@ -38,14 +40,21 @@ void main() {
       },
       nextRequestId: (scope) => 'req-$scope',
     );
-    final inputSender = TerminalInputReliableSender(send: (_) => true);
+    final inputSender = TerminalInputReliableSender(
+      send: (_) => true,
+      activeActivation: () => activation,
+    );
     final coordinator = HomeRuntimeCoordinator(
       remoteProtocolReady: true,
       selectedProjectId: projectId,
       terminalBufferCapability: TerminalBufferCapability.fallback,
       outputController: output,
       terminalInputSender: inputSender,
-      terminalInputBatcher: TerminalInputBatcher(send: (_) {}),
+      terminalInputBatcher: TerminalInputBatcher(
+        send: (_, _) {},
+        activeActivation: () => activation,
+      ),
+      flushTerminalInput: () {},
       terminalBufferRetry: retry,
       terminalBindingCoordinator: binding,
       captureSnapshot: () => HomeRuntimeSnapshot(
@@ -145,6 +154,7 @@ void main() {
     final sent = <RelayEnvelope>[];
     final output = RemoteTerminalOutputController();
     var sessionId = 'term-1';
+    final activation = TerminalActivation('term-1');
     final binding = RemoteTerminalBindingCoordinator(
       outputController: output,
       send: (envelope) {
@@ -158,8 +168,15 @@ void main() {
       selectedProjectId: 'project-1',
       terminalBufferCapability: TerminalBufferCapability.fallback,
       outputController: output,
-      terminalInputSender: TerminalInputReliableSender(send: (_) => true),
-      terminalInputBatcher: TerminalInputBatcher(send: (_) {}),
+      terminalInputSender: TerminalInputReliableSender(
+        send: (_) => true,
+        activeActivation: () => activation,
+      ),
+      terminalInputBatcher: TerminalInputBatcher(
+        send: (_, _) {},
+        activeActivation: () => activation,
+      ),
+      flushTerminalInput: () {},
       terminalBufferRetry: TerminalBufferRetryCoordinator(),
       terminalBindingCoordinator: binding,
       captureSnapshot: () => HomeRuntimeSnapshot(

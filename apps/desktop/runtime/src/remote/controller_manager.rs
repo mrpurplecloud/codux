@@ -13,7 +13,7 @@ use super::controller::{
 };
 use super::controller_store::{RemoteControllerStore, SavedRemoteHost, SavedRemoteTransport};
 use codux_protocol::REMOTE_TRANSPORT_IROH;
-use codux_remote_transport::RemoteTransportStateHandler;
+use codux_remote_transport::{RemoteTransportCandidate, RemoteTransportStateHandler};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -100,18 +100,31 @@ fn direct_addr_from_transport_state(state: &str) -> Option<&str> {
 struct ManagerShared {
     support_dir: PathBuf,
     store: RemoteControllerStore,
-    connections: Mutex<HashMap<String, LiveConnection>>,
-    connection_attempts: Mutex<HashMap<String, ConnectionAttempt>>,
+    controllers: Mutex<ControllerLifecycle>,
     links: Mutex<HashMap<String, ControllerLinkState>>,
     // Selected path type (direct/relay) per connected device, for the UI badge.
     // Set when the transport reports a selected path; cleared when the link drops.
     paths: Mutex<HashMap<String, ControllerLinkPath>>,
-    reconnecting: Mutex<HashSet<String>>,
     // Last failure from the background reconnect loop per device, so
     // `controller_for` can surface *why* a host stays "not ready" (offline host,
     // relay unreachable, dial timeout) instead of a generic message.
     last_errors: Mutex<HashMap<String, String>>,
     disconnected_devices: Mutex<HashSet<String>>,
+    #[cfg(test)]
+    disconnect_pause: Mutex<Option<DisconnectPause>>,
+}
+
+#[derive(Default)]
+struct ControllerLifecycle {
+    next_owner: u64,
+    slots: HashMap<String, ControllerSlot>,
+}
+
+#[derive(Default)]
+struct ControllerSlot {
+    attempt: Option<ConnectionAttempt>,
+    live: Option<LiveConnection>,
+    reconnect_worker: Option<ReconnectWorker>,
 }
 
 struct LiveConnection {
@@ -126,7 +139,21 @@ struct LiveConnection {
 /// during the dial.
 struct ConnectionAttempt {
     epoch: u64,
+    worker: Option<u64>,
     terminated: bool,
+    pending_path: Option<ControllerLinkPath>,
+    pending_direct_addr: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct ReconnectWorker {
+    owner: u64,
+}
+
+#[cfg(test)]
+struct DisconnectPause {
+    accepted: std::sync::mpsc::SyncSender<()>,
+    resume: Mutex<std::sync::mpsc::Receiver<()>>,
 }
 
 impl ManagerShared {
@@ -212,13 +239,18 @@ impl ManagerShared {
                     transport
                 })
                 .filter(|transport| {
-                    codux_remote_transport::is_dialable_iroh_transport(
-                        &transport.kind,
-                        &transport.ticket,
-                        &transport.node_id,
-                        &transport.relay_url,
-                        !transport.direct_addrs.is_empty(),
+                    codux_remote_transport::build_iroh_dial_target(
+                        &RemoteTransportCandidate {
+                            kind: transport.kind.clone(),
+                            url: String::new(),
+                            node_id: transport.node_id.clone(),
+                            relay_url: transport.relay_url.clone(),
+                            ticket: transport.ticket.clone(),
+                            relay_authentication: transport.relay_authentication.clone(),
+                        },
+                        &transport.direct_addrs,
                     )
+                    .is_ok()
                 })
                 .collect();
             if next.is_empty() || next == host.transports {
@@ -235,10 +267,9 @@ impl ManagerShared {
     /// Report the outcome of an address write, which is an optimisation rather
     /// than part of any connection.
     ///
-    /// A failure here must not break the live link — the addresses in memory are
-    /// still correct and the connection using them is unaffected — but it must
-    /// not vanish either: the next cold start would silently fall back to stale
-    /// addresses with no record of why.
+    /// A failure here must not break the live link. The store retains the latest
+    /// in-memory snapshot and owns retry; this helper only makes the first failed
+    /// projection observable with the device and semantic reason attached.
     fn report_address_write(
         &self,
         device_id: &str,
@@ -249,7 +280,7 @@ impl ManagerShared {
             crate::runtime_trace::runtime_trace(
                 "remote",
                 &format!(
-                    "controller_addresses_not_persisted device={device_id} reason={reason} error={error}"
+                    "controller_addresses_persist_pending device={device_id} reason={reason} error={error}"
                 ),
             );
         }
@@ -262,67 +293,192 @@ impl ManagerShared {
             .and_then(|errors| errors.get(device_id).cloned())
     }
 
+    fn allocate_owner(lifecycle: &mut ControllerLifecycle) -> u64 {
+        lifecycle.next_owner = lifecycle
+            .next_owner
+            .checked_add(1)
+            .expect("remote controller owner space exhausted");
+        lifecycle.next_owner
+    }
+
+    /// Remove an explicit attempt that never became publishable. Exact epoch
+    /// matching keeps late error cleanup from touching a replacement owner.
+    fn abort_unpublished_attempt(&self, device_id: &str, epoch: u64) -> bool {
+        let Ok(mut lifecycle) = self.controllers.lock() else {
+            return false;
+        };
+        let Some(slot) = lifecycle.slots.get_mut(device_id) else {
+            return false;
+        };
+        let owns_unpublished_attempt = slot
+            .attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.epoch == epoch && attempt.worker.is_none())
+            && !slot.live.as_ref().is_some_and(|live| live.epoch == epoch);
+        if !owns_unpublished_attempt {
+            return false;
+        }
+        slot.attempt = None;
+        if slot.live.is_some() {
+            return true;
+        }
+        slot.reconnect_worker = None;
+        lifecycle.slots.remove(device_id);
+        if let Ok(mut links) = self.links.lock() {
+            links.remove(device_id);
+        }
+        self.clear_path(device_id);
+        if let Ok(mut errors) = self.last_errors.lock() {
+            errors.remove(device_id);
+        }
+        if let Ok(mut devices) = self.disconnected_devices.lock() {
+            devices.remove(device_id);
+        }
+        true
+    }
+
+    #[cfg(test)]
+    fn pause_next_disconnect_for_test(
+        &self,
+    ) -> (
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::SyncSender<()>,
+    ) {
+        let (accepted, accepted_rx) = std::sync::mpsc::sync_channel(0);
+        let (resume, resume_rx) = std::sync::mpsc::sync_channel(0);
+        *self.disconnect_pause.lock().unwrap() = Some(DisconnectPause {
+            accepted,
+            resume: Mutex::new(resume_rx),
+        });
+        (accepted_rx, resume)
+    }
+
+    #[cfg(test)]
+    fn pause_accepted_disconnect_for_test(&self) {
+        let pause = self
+            .disconnect_pause
+            .lock()
+            .ok()
+            .and_then(|mut pause| pause.take());
+        if let Some(pause) = pause {
+            let _ = pause.accepted.send(());
+            let _ = pause.resume.lock().map(|resume| resume.recv());
+        }
+    }
+
     fn next_connection_epoch(&self, device_id: &str) -> u64 {
-        let mut attempts = self.connection_attempts.lock().unwrap();
-        let attempt = attempts
-            .entry(device_id.to_string())
-            .or_insert(ConnectionAttempt {
-                epoch: 0,
-                terminated: false,
-            });
-        attempt.epoch = attempt.epoch.saturating_add(1);
-        attempt.terminated = false;
-        attempt.epoch
+        let mut lifecycle = self.controllers.lock().unwrap();
+        let epoch = Self::allocate_owner(&mut lifecycle);
+        let slot = lifecycle.slots.entry(device_id.to_string()).or_default();
+        // An explicit pairing/test attempt supersedes any background worker.
+        // That worker retains its token locally, but every later transition
+        // will reject it against this slot.
+        slot.reconnect_worker = None;
+        slot.attempt = Some(ConnectionAttempt {
+            epoch,
+            worker: None,
+            terminated: false,
+            pending_path: None,
+            pending_direct_addr: None,
+        });
+        epoch
+    }
+
+    fn begin_reconnect_attempt(&self, device_id: &str, worker: u64) -> Option<u64> {
+        let mut lifecycle = self.controllers.lock().ok()?;
+        let slot = lifecycle.slots.get_mut(device_id)?;
+        if slot.reconnect_worker.map(|owner| owner.owner) != Some(worker) {
+            return None;
+        }
+        if slot.live.is_some() {
+            slot.reconnect_worker = None;
+            return None;
+        }
+        let epoch = Self::allocate_owner(&mut lifecycle);
+        lifecycle.slots.get_mut(device_id)?.attempt = Some(ConnectionAttempt {
+            epoch,
+            worker: Some(worker),
+            terminated: false,
+            pending_path: None,
+            pending_direct_addr: None,
+        });
+        Some(epoch)
     }
 
     /// Run `update` only while `epoch` is still this device's current attempt,
     /// with the attempt held so `forget` cannot invalidate it midway. Returns
     /// `None` when the attempt is already stale.
     ///
-    /// `connection_attempts` is the outermost lock: `update` may take `links`,
-    /// `paths`, `connections` or `disconnected_devices`, never the other way
-    /// round.
+    /// The controller-lifecycle lock stays held through `update`, so ownership
+    /// cannot change between the precondition and the side effect it protects.
     fn with_current_connection_epoch<T>(
         &self,
         device_id: &str,
         epoch: u64,
         update: impl FnOnce() -> T,
     ) -> Option<T> {
-        let attempts = self.connection_attempts.lock().ok()?;
-        if attempts.get(device_id).map(|attempt| attempt.epoch) != Some(epoch) {
+        let lifecycle = self.controllers.lock().ok()?;
+        if lifecycle
+            .slots
+            .get(device_id)
+            .and_then(|slot| slot.attempt.as_ref())
+            .map(|attempt| attempt.epoch)
+            != Some(epoch)
+        {
             return None;
         }
         Some(update())
     }
 
-    /// Like [`with_current_connection_epoch`](Self::with_current_connection_epoch),
-    /// but also refuses an attempt whose link the transport already closed.
-    /// Publishing is the only operation that needs this: link-state bookkeeping
-    /// still belongs to the current attempt after it dies, but its controller
-    /// must never be handed out.
-    fn with_live_connection_attempt<T>(
+    /// Reconcile a non-terminal transport state with its attempt. Transport
+    /// readiness arrives before `connect` returns, so path metadata stays on the
+    /// attempt until the controller becomes the live owner. Later path changes
+    /// from that live owner apply immediately under the same lifecycle hold.
+    fn handle_transport_state(
         &self,
         device_id: &str,
         epoch: u64,
-        update: impl FnOnce() -> T,
-    ) -> Option<T> {
-        let attempts = self.connection_attempts.lock().ok()?;
-        let attempt = attempts.get(device_id)?;
+        mapped: ControllerLinkState,
+        state: &str,
+    ) {
+        let path = ControllerLinkPath::from_transport_state(state);
+        let direct_addr = direct_addr_from_transport_state(state).map(str::to_string);
+        let Ok(mut lifecycle) = self.controllers.lock() else {
+            return;
+        };
+        let Some(slot) = lifecycle.slots.get_mut(device_id) else {
+            return;
+        };
+        let Some(attempt) = slot.attempt.as_mut() else {
+            return;
+        };
         if attempt.epoch != epoch || attempt.terminated {
-            return None;
+            return;
         }
-        Some(update())
-    }
 
-    /// Record that this attempt's link is dead. The dial may still be in
-    /// flight — the controller it eventually returns is already useless, and
-    /// the reconnect loop starts a fresh attempt instead of publishing it.
-    fn terminate_connection_attempt(&self, device_id: &str, epoch: u64) {
-        if let Ok(mut attempts) = self.connection_attempts.lock()
-            && let Some(attempt) = attempts.get_mut(device_id)
-            && attempt.epoch == epoch
-        {
-            attempt.terminated = true;
+        let owns_live = slot.live.as_ref().is_some_and(|live| live.epoch == epoch);
+        if mapped == ControllerLinkState::Connecting {
+            if slot.live.is_none() {
+                self.set_connecting_link(device_id);
+            }
+            return;
+        }
+        if !owns_live {
+            if let Some(path) = path {
+                attempt.pending_path = Some(path);
+            }
+            if let Some(addr) = direct_addr {
+                attempt.pending_direct_addr = Some(addr);
+            }
+            return;
+        }
+
+        self.set_link(device_id, ControllerLinkState::Connected);
+        if let Some(path) = path {
+            self.set_path(device_id, path);
+        }
+        if let Some(addr) = direct_addr.as_deref() {
+            self.remember_direct_addr(device_id, addr);
         }
     }
 
@@ -350,25 +506,58 @@ impl ManagerShared {
             crate::project_store::ProjectStore::new(self.support_dir.clone())
                 .remote_project_id_pairs(device_id),
         );
-        // Publishing the connection and its link state under one hold of the
-        // attempt is what keeps a `forget` from landing between them and
-        // leaving a forgotten device looking connected. A host that is already
-        // gone — or an attempt whose link already closed — gets no connection.
-        let published = self.with_live_connection_attempt(device_id, epoch, || {
-            self.store.find(device_id)?;
-            let mut connections = self.connections.lock().ok()?;
-            let replaced = connections.insert(
-                device_id.to_string(),
-                LiveConnection {
-                    epoch,
-                    controller: Arc::clone(&controller),
-                },
-            );
-            drop(connections);
+        match self.store.find(device_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                Self::shutdown_controller(controller);
+                return false;
+            }
+            Err(error) => {
+                let _ = self.with_current_connection_epoch(device_id, epoch, || {
+                    if let Ok(mut errors) = self.last_errors.lock() {
+                        errors.insert(device_id.to_string(), error.clone());
+                    }
+                });
+                crate::runtime_trace::runtime_trace(
+                    "remote",
+                    &format!(
+                        "controller_store_read_failed device={device_id} phase=publish error={error}"
+                    ),
+                );
+                Self::shutdown_controller(controller);
+                return false;
+            }
+        }
+
+        // Saved intent was checked before this hold. A concurrent `forget`
+        // invalidates the attempt in this same lifecycle map, so a stale dial
+        // still cannot publish after removal.
+        let published = self.controllers.lock().ok().and_then(|mut lifecycle| {
+            let slot = lifecycle.slots.get_mut(device_id)?;
+            let attempt = slot.attempt.as_mut()?;
+            if attempt.epoch != epoch || attempt.terminated {
+                return None;
+            }
+            let pending_path = attempt.pending_path.take();
+            let pending_direct_addr = attempt.pending_direct_addr.take();
+            let replaced = slot.live.replace(LiveConnection {
+                epoch,
+                controller: Arc::clone(&controller),
+            });
+            if let Ok(mut errors) = self.last_errors.lock() {
+                errors.remove(device_id);
+            }
             self.set_link(device_id, ControllerLinkState::Connected);
+            self.clear_path(device_id);
+            if let Some(path) = pending_path {
+                self.set_path(device_id, path);
+            }
+            if let Some(addr) = pending_direct_addr.as_deref() {
+                self.remember_direct_addr(device_id, addr);
+            }
             Some(replaced)
         });
-        match published.flatten() {
+        match published {
             Some(replaced) => {
                 if let Some(replaced) = replaced {
                     Self::shutdown_controller(replaced.controller);
@@ -406,39 +595,12 @@ impl ManagerShared {
                 return;
             };
             if mapped == ControllerLinkState::Disconnected {
-                // Kill the attempt before anything else: the dial that owns
-                // this callback may still be in flight, and the controller it
-                // returns is already dead.
-                shared.terminate_connection_attempt(&device_id, epoch);
-                let recorded = shared.with_current_connection_epoch(&device_id, epoch, || {
-                    shared.set_link(&device_id, mapped);
-                    shared.clear_path(&device_id);
-                    if let Ok(mut devices) = shared.disconnected_devices.lock() {
-                        devices.insert(device_id.clone());
-                    }
-                });
-                if recorded.is_some() {
-                    shared.handle_disconnect(&device_id);
-                }
+                shared.handle_disconnect(&device_id, epoch);
                 return;
             }
-            // Death is final for an attempt: the transport can still publish a
-            // path or a connected marker for a link it already closed (the
-            // stream task outlives the dial), and honouring that would show a
-            // connected badge for a device the reconnect loop is still dialing.
-            let _ = shared.with_live_connection_attempt(&device_id, epoch, || {
-                if mapped == ControllerLinkState::Connecting {
-                    shared.set_connecting_link(&device_id);
-                } else {
-                    shared.set_link(&device_id, mapped);
-                }
-                if let Some(path) = ControllerLinkPath::from_transport_state(&state) {
-                    shared.set_path(&device_id, path);
-                }
-                if let Some(addr) = direct_addr_from_transport_state(&state) {
-                    shared.remember_direct_addr(&device_id, addr);
-                }
-            });
+            // `connected:path=…` is transport readiness, not publication. The
+            // attempt retains it until its controller owns the live slot.
+            shared.handle_transport_state(&device_id, epoch, mapped, &state);
         })
     }
 
@@ -447,33 +609,62 @@ impl ManagerShared {
     /// fast-fails instead of re-dialling on the calling thread) and spawns the
     /// loop only if one isn't already running. Returns `false` if the host has
     /// been forgotten — nothing to connect to.
-    fn mark_reconnect_needed(self: &Arc<Self>, device_id: &str) -> Option<bool> {
-        let mut reconnecting = self.reconnecting.lock().ok()?;
-        // The saved host is the source of truth for "should we reconnect":
-        // a forgotten device must not be resurrected.
-        self.store.find(device_id)?;
-        if reconnecting.contains(device_id) {
-            return Some(false);
-        }
-        reconnecting.insert(device_id.to_string());
-        Some(true)
-    }
-
-    fn spawn_reconnect_loop(self: &Arc<Self>, device_id: &str) {
+    fn spawn_reconnect_loop(self: &Arc<Self>, device_id: &str, worker: u64) {
         let shared = Arc::clone(self);
         let device_id = device_id.to_string();
         crate::async_runtime::spawn(async move {
-            shared.reconnect_loop(device_id).await;
+            shared.reconnect_loop(device_id, worker).await;
         });
     }
 
     fn ensure_reconnect_loop(self: &Arc<Self>, device_id: &str) -> bool {
-        let Some(spawn_needed) = self.mark_reconnect_needed(device_id) else {
+        let lookup = self.store.find(device_id);
+        let lookup_error = lookup.as_ref().err().cloned();
+        let confirmed_absent = matches!(lookup, Ok(None));
+        let Ok(mut lifecycle) = self.controllers.lock() else {
             return false;
         };
-        if spawn_needed {
-            self.spawn_reconnect_loop(device_id);
+        if lifecycle
+            .slots
+            .get(device_id)
+            .and_then(|slot| slot.live.as_ref())
+            .is_some()
+        {
+            return true;
         }
+        if let Some(error) = lookup_error.as_ref() {
+            if let Ok(mut errors) = self.last_errors.lock() {
+                errors.insert(device_id.to_string(), error.clone());
+            }
+            self.set_link(device_id, ControllerLinkState::Disconnected);
+        }
+        if lifecycle
+            .slots
+            .get(device_id)
+            .and_then(|slot| slot.reconnect_worker)
+            .is_some()
+        {
+            return true;
+        }
+        if confirmed_absent {
+            return false;
+        }
+        let worker = Self::allocate_owner(&mut lifecycle);
+        lifecycle
+            .slots
+            .entry(device_id.to_string())
+            .or_default()
+            .reconnect_worker = Some(ReconnectWorker { owner: worker });
+        drop(lifecycle);
+        if let Some(error) = lookup_error {
+            crate::runtime_trace::runtime_trace(
+                "remote",
+                &format!(
+                    "controller_store_read_failed device={device_id} phase=ensure error={error}"
+                ),
+            );
+        }
+        self.spawn_reconnect_loop(device_id, worker);
         true
     }
 
@@ -489,81 +680,184 @@ impl ManagerShared {
     /// terminated *before* it evicts the connection, so a handover that landed
     /// in between still sees a dead attempt.
     ///
-    /// Locks are taken `reconnecting` → `connection_attempts` → `connections`;
-    /// nothing takes `reconnecting` while holding either of the other two.
-    fn release_reconnect_ownership(&self, device_id: &str, epoch: u64) -> bool {
-        let Ok(mut reconnecting) = self.reconnecting.lock() else {
+    fn release_reconnect_ownership(&self, device_id: &str, worker: u64, epoch: u64) -> bool {
+        let Ok(mut lifecycle) = self.controllers.lock() else {
             return true;
         };
-        let live = self
-            .connection_attempts
-            .lock()
-            .map(|attempts| {
-                attempts
-                    .get(device_id)
-                    .is_some_and(|attempt| attempt.epoch == epoch && !attempt.terminated)
-            })
-            .unwrap_or(false)
-            && self
-                .connections
-                .lock()
-                .map(|connections| connections.contains_key(device_id))
-                .unwrap_or(false);
-        // A forgotten host has nothing to retry, so the ownership goes back
-        // even without a live link.
-        if !live && self.store.find(device_id).is_some() {
+        let Some(slot) = lifecycle.slots.get_mut(device_id) else {
+            return true;
+        };
+        if slot.reconnect_worker.map(|owner| owner.owner) != Some(worker) {
+            return true;
+        }
+        let live = slot.attempt.as_ref().is_some_and(|attempt| {
+            attempt.epoch == epoch && attempt.worker == Some(worker) && !attempt.terminated
+        }) && slot.live.as_ref().is_some_and(|live| live.epoch == epoch);
+        if !live {
             return false;
         }
-        reconnecting.remove(device_id);
+        slot.reconnect_worker = None;
         true
     }
 
     /// React to a dropped link: drop the dead controller from the pool and
     /// ensure a reconnect loop is retrying.
-    fn handle_disconnect(self: &Arc<Self>, device_id: &str) {
-        // Mark reconnecting BEFORE evicting, so `controller_for` never observes
-        // an evicted-but-not-yet-reconnecting host — which it would try to
-        // re-dial synchronously, blocking the (possibly UI-thread) caller
-        // against the offline host.
-        let Some(spawn_needed) = self.mark_reconnect_needed(device_id) else {
+    fn handle_disconnect(self: &Arc<Self>, device_id: &str, epoch: u64) {
+        let Ok(mut lifecycle) = self.controllers.lock() else {
             return;
         };
-        let old = self
-            .connections
-            .lock()
-            .ok()
-            .and_then(|mut connections| connections.remove(device_id));
+        let Some(slot) = lifecycle.slots.get(device_id) else {
+            return;
+        };
+        let owns_attempt = slot
+            .attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.epoch == epoch);
+        let owns_live = slot.live.as_ref().is_some_and(|live| live.epoch == epoch);
+        if !owns_attempt && !owns_live {
+            return;
+        }
+        #[cfg(test)]
+        self.pause_accepted_disconnect_for_test();
+        let newer_attempt_exists = slot
+            .attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.epoch != epoch);
+        let needs_worker = !newer_attempt_exists
+            && (owns_live || slot.live.is_none())
+            && slot.reconnect_worker.is_none();
+        let worker = needs_worker.then(|| Self::allocate_owner(&mut lifecycle));
+        let slot = lifecycle.slots.get_mut(device_id).unwrap();
+        if owns_attempt {
+            let attempt = slot.attempt.as_mut().unwrap();
+            attempt.terminated = true;
+            attempt.pending_path = None;
+            attempt.pending_direct_addr = None;
+        }
+        let old = owns_live.then(|| slot.live.take()).flatten();
+        if let Some(worker) = worker {
+            slot.reconnect_worker = Some(ReconnectWorker { owner: worker });
+        }
+        if slot.live.is_none() {
+            self.set_link(device_id, ControllerLinkState::Disconnected);
+            self.clear_path(device_id);
+        }
+        if let Ok(mut devices) = self.disconnected_devices.lock() {
+            devices.insert(device_id.to_string());
+        }
+        drop(lifecycle);
         if let Some(old) = old {
             Self::shutdown_controller(old.controller);
         }
-        if spawn_needed {
-            self.spawn_reconnect_loop(device_id);
+        if let Some(worker) = worker {
+            self.spawn_reconnect_loop(device_id, worker);
+        }
+    }
+
+    fn worker_is_current(&self, device_id: &str, worker: u64) -> bool {
+        self.controllers
+            .lock()
+            .ok()
+            .and_then(|lifecycle| {
+                lifecycle
+                    .slots
+                    .get(device_id)
+                    .and_then(|slot| slot.reconnect_worker)
+            })
+            .is_some_and(|owner| owner.owner == worker)
+    }
+
+    fn record_worker_error(
+        &self,
+        device_id: &str,
+        worker: u64,
+        epoch: Option<u64>,
+        error: String,
+    ) -> bool {
+        let Ok(lifecycle) = self.controllers.lock() else {
+            return false;
+        };
+        let Some(slot) = lifecycle.slots.get(device_id) else {
+            return false;
+        };
+        if slot.reconnect_worker.map(|owner| owner.owner) != Some(worker)
+            || epoch.is_some_and(|epoch| {
+                !slot
+                    .attempt
+                    .as_ref()
+                    .is_some_and(|attempt| attempt.epoch == epoch && attempt.worker == Some(worker))
+            })
+        {
+            return false;
+        }
+        if let Ok(mut errors) = self.last_errors.lock() {
+            errors.insert(device_id.to_string(), error);
+        }
+        self.set_link(device_id, ControllerLinkState::Disconnected);
+        true
+    }
+
+    fn stop_reconnect_for_absent_host(&self, device_id: &str, worker: u64) {
+        let Ok(mut lifecycle) = self.controllers.lock() else {
+            return;
+        };
+        let Some(slot) = lifecycle.slots.get_mut(device_id) else {
+            return;
+        };
+        if slot.reconnect_worker.map(|owner| owner.owner) != Some(worker) {
+            return;
+        }
+        slot.reconnect_worker = None;
+        if slot
+            .attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.worker == Some(worker))
+        {
+            slot.attempt = None;
+        }
+        if slot.live.is_none() && slot.attempt.is_none() {
+            lifecycle.slots.remove(device_id);
+            if let Ok(mut links) = self.links.lock() {
+                links.remove(device_id);
+            }
+            self.clear_path(device_id);
+            if let Ok(mut errors) = self.last_errors.lock() {
+                errors.remove(device_id);
+            }
         }
     }
 
     /// Retry `connect_saved` with capped exponential backoff until the link is
     /// re-established or the host is forgotten. The fresh controller is wired to
     /// the same state handler, so a later drop is caught again.
-    async fn reconnect_loop(self: Arc<Self>, device_id: String) {
+    async fn reconnect_loop(self: Arc<Self>, device_id: String, worker: u64) {
         let mut delay = Duration::from_secs(1);
         let mut attempt: u32 = 0;
         loop {
-            // Claim the attempt before reading the saved host. If `forget`
-            // follows, it invalidates this attempt; if it came first, the host
-            // lookup fails and no callback can recreate forgotten link state.
-            let epoch = self.next_connection_epoch(&device_id);
-            let Some(host) = self.store.find(&device_id) else {
-                if let Ok(mut attempts) = self.connection_attempts.lock()
-                    && attempts.get(&device_id).map(|attempt| attempt.epoch) == Some(epoch)
-                {
-                    attempts.remove(&device_id);
+            let host = match self.store.find(&device_id) {
+                Ok(Some(host)) => host,
+                Ok(None) => {
+                    self.stop_reconnect_for_absent_host(&device_id, worker);
+                    return;
                 }
-                // Forgotten while retrying: stop and forget the link state too.
-                if let Ok(mut links) = self.links.lock() {
-                    links.remove(&device_id);
+                Err(error) => {
+                    crate::runtime_trace::runtime_trace(
+                        "remote",
+                        &format!(
+                            "controller_store_read_failed device={device_id} phase=reconnect retry_in_ms={} error={error}",
+                            delay.as_millis()
+                        ),
+                    );
+                    if !self.record_worker_error(&device_id, worker, None, error) {
+                        return;
+                    }
+                    tokio::time::sleep(delay).await;
+                    delay = next_reconnect_delay(delay);
+                    continue;
                 }
-                self.clear_path(&device_id);
-                break;
+            };
+            let Some(epoch) = self.begin_reconnect_attempt(&device_id, worker) else {
+                return;
             };
             attempt += 1;
             let current = self.with_current_connection_epoch(&device_id, epoch, || {
@@ -587,14 +881,11 @@ impl ManagerShared {
             match RemoteController::connect_saved(&host, on_state).await {
                 Ok(controller) => {
                     if self.publish_connection(&device_id, epoch, Arc::new(controller)) {
-                        if let Ok(mut errors) = self.last_errors.lock() {
-                            errors.remove(&device_id);
-                        }
                         crate::runtime_trace::runtime_trace(
                             "remote",
                             &format!("controller_connect ok device={device_id} n={attempt}"),
                         );
-                        if self.release_reconnect_ownership(&device_id, epoch) {
+                        if self.release_reconnect_ownership(&device_id, worker, epoch) {
                             return;
                         }
                         // The link dropped again between publishing and the
@@ -621,8 +912,8 @@ impl ManagerShared {
                             delay.as_millis()
                         ),
                     );
-                    if self.store.find(&device_id).is_none() {
-                        break;
+                    if !self.worker_is_current(&device_id, worker) {
+                        return;
                     }
                     tokio::time::sleep(delay).await;
                     delay = next_reconnect_delay(delay);
@@ -638,22 +929,13 @@ impl ManagerShared {
                     // Record why the reconnect failed so `controller_for` can
                     // surface it (offline host, relay unreachable, dial timeout);
                     // otherwise the UI only ever sees the generic "not ready".
-                    let current = self.with_current_connection_epoch(&device_id, epoch, || {
-                        if let Ok(mut errors) = self.last_errors.lock() {
-                            errors.insert(device_id.clone(), error);
-                        }
-                        self.set_link(&device_id, ControllerLinkState::Disconnected);
-                    });
-                    if current.is_none() {
-                        break;
+                    if !self.record_worker_error(&device_id, worker, Some(epoch), error) {
+                        return;
                     }
                     tokio::time::sleep(delay).await;
                     delay = next_reconnect_delay(delay);
                 }
             }
-        }
-        if let Ok(mut reconnecting) = self.reconnecting.lock() {
-            reconnecting.remove(&device_id);
         }
     }
 }
@@ -672,13 +954,13 @@ impl RemoteControllerManager {
             shared: Arc::new(ManagerShared {
                 support_dir: support_dir.clone(),
                 store: RemoteControllerStore::new(support_dir),
-                connections: Mutex::new(HashMap::new()),
-                connection_attempts: Mutex::new(HashMap::new()),
+                controllers: Mutex::new(ControllerLifecycle::default()),
                 links: Mutex::new(HashMap::new()),
                 paths: Mutex::new(HashMap::new()),
-                reconnecting: Mutex::new(HashSet::new()),
                 last_errors: Mutex::new(HashMap::new()),
                 disconnected_devices: Mutex::new(HashSet::new()),
+                #[cfg(test)]
+                disconnect_pause: Mutex::new(None),
             }),
         }
     }
@@ -695,14 +977,37 @@ impl RemoteControllerManager {
     /// joins an in-flight reconnect loop instead of starting a duplicate — so it
     /// is safe to call on a timer. Returns how many saved hosts were engaged.
     pub fn ensure_saved_hosts_connected(&self) -> usize {
+        let snapshot = match self.shared.store.lifecycle_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                crate::runtime_trace::runtime_trace(
+                    "remote",
+                    &format!("controller_store_read_failed phase=ensure error={error}"),
+                );
+                return 0;
+            }
+        };
+        if let Some(error) = snapshot.refresh_error.as_ref() {
+            crate::runtime_trace::runtime_trace(
+                "remote",
+                &format!("controller_store_read_failed phase=ensure error={error}"),
+            );
+        }
         let connected: HashSet<String> = self
             .shared
-            .connections
+            .controllers
             .lock()
-            .map(|connections| connections.keys().cloned().collect())
+            .map(|lifecycle| {
+                lifecycle
+                    .slots
+                    .iter()
+                    .filter(|(_, slot)| slot.live.is_some())
+                    .map(|(device_id, _)| device_id.clone())
+                    .collect()
+            })
             .unwrap_or_default();
         let mut engaged = 0;
-        for host in self.shared.store.list() {
+        for host in snapshot.hosts {
             if connected.contains(&host.device_id) {
                 continue;
             }
@@ -741,13 +1046,37 @@ impl RemoteControllerManager {
         let device_id = new_device_id();
         let epoch = self.shared.next_connection_epoch(&device_id);
         let on_state = self.shared.state_handler(&device_id, epoch);
-        let (controller, saved) = crate::async_runtime::block_on(RemoteController::pair(
+        let paired = crate::async_runtime::block_on(RemoteController::pair(
             &ticket,
             device_name,
-            device_id,
+            device_id.clone(),
             on_state,
-        ))?;
-        self.shared.store.upsert(saved.clone())?;
+        ));
+        let (controller, saved) = match paired {
+            Ok(paired) => paired,
+            Err(error) => {
+                self.shared.abort_unpublished_attempt(&device_id, epoch);
+                return Err(error);
+            }
+        };
+        self.finish_pairing(epoch, controller, saved)
+    }
+
+    /// Commit confirmed pairing intent before publishing its controller. A
+    /// failed required write aborts exact attempt and closes unowned transport;
+    /// success may then hand a dead-on-arrival link to normal reconciliation.
+    fn finish_pairing(
+        &self,
+        epoch: u64,
+        controller: RemoteController,
+        saved: SavedRemoteHost,
+    ) -> Result<SavedRemoteHost, String> {
+        if let Err(error) = self.shared.store.upsert(saved.clone()) {
+            self.shared
+                .abort_unpublished_attempt(&saved.device_id, epoch);
+            crate::async_runtime::block_on(controller.shutdown());
+            return Err(error);
+        }
         // A link that died during pairing leaves the host saved but unreachable;
         // hand it to the reconnect loop so it comes up on its own.
         if !self
@@ -773,13 +1102,16 @@ impl RemoteControllerManager {
     pub fn drain_pushed_terminal_status(&self) -> Vec<(String, serde_json::Value)> {
         let controllers: Vec<(String, Arc<RemoteController>)> = self
             .shared
-            .connections
+            .controllers
             .lock()
-            .map(|connections| {
-                connections
+            .map(|lifecycle| {
+                lifecycle
+                    .slots
                     .iter()
-                    .map(|(device_id, connection)| {
-                        (device_id.clone(), Arc::clone(&connection.controller))
+                    .filter_map(|(device_id, slot)| {
+                        slot.live.as_ref().map(|connection| {
+                            (device_id.clone(), Arc::clone(&connection.controller))
+                        })
                     })
                     .collect()
             })
@@ -798,13 +1130,16 @@ impl RemoteControllerManager {
     pub fn drain_hosted_workspace_updates(&self) -> Vec<(String, String, serde_json::Value)> {
         let controllers: Vec<(String, Arc<RemoteController>)> = self
             .shared
-            .connections
+            .controllers
             .lock()
-            .map(|connections| {
-                connections
+            .map(|lifecycle| {
+                lifecycle
+                    .slots
                     .iter()
-                    .map(|(device_id, connection)| {
-                        (device_id.clone(), Arc::clone(&connection.controller))
+                    .filter_map(|(device_id, slot)| {
+                        slot.live.as_ref().map(|connection| {
+                            (device_id.clone(), Arc::clone(&connection.controller))
+                        })
                     })
                     .collect()
             })
@@ -824,17 +1159,20 @@ impl RemoteControllerManager {
     /// A reconnect bumps the epoch, which is how per-connection work (the
     /// project-catalog subscription) knows to run again.
     pub fn connected_controllers(&self) -> Vec<(String, u64, Arc<RemoteController>)> {
-        let Ok(connections) = self.shared.connections.lock() else {
+        let Ok(lifecycle) = self.shared.controllers.lock() else {
             return Vec::new();
         };
-        connections
+        lifecycle
+            .slots
             .iter()
-            .map(|(device_id, connection)| {
-                (
-                    device_id.clone(),
-                    connection.epoch,
-                    Arc::clone(&connection.controller),
-                )
+            .filter_map(|(device_id, slot)| {
+                slot.live.as_ref().map(|connection| {
+                    (
+                        device_id.clone(),
+                        connection.epoch,
+                        Arc::clone(&connection.controller),
+                    )
+                })
             })
             .collect()
     }
@@ -847,14 +1185,44 @@ impl RemoteControllerManager {
         device_id: &str,
         controller: &RemoteController,
     ) -> Option<u64> {
-        let Ok(connections) = self.shared.connections.lock() else {
+        let Ok(lifecycle) = self.shared.controllers.lock() else {
             return None;
         };
-        let current = connections.get(device_id)?;
+        let current = lifecycle.slots.get(device_id)?.live.as_ref()?;
         if !std::ptr::eq(current.controller.as_ref(), controller) {
             return None;
         }
         Some(current.epoch)
+    }
+
+    /// Run `update` only while this exact `(device, epoch, controller)` still
+    /// owns the published live-link slot. Ownership cannot change between the
+    /// check and the local side effect because both share one lifecycle hold.
+    /// This lifecycle hold is outermost: `update` must not re-enter this manager
+    /// or wait on remote I/O.
+    pub(crate) fn with_live_connection_owner<T>(
+        &self,
+        device_id: &str,
+        epoch: u64,
+        controller: &RemoteController,
+        update: impl FnOnce() -> T,
+    ) -> Result<Option<T>, String> {
+        let lifecycle = self
+            .shared
+            .controllers
+            .lock()
+            .map_err(|_| "Remote controller lifecycle lock is poisoned.".to_string())?;
+        let Some(current) = lifecycle
+            .slots
+            .get(device_id)
+            .and_then(|slot| slot.live.as_ref())
+        else {
+            return Ok(None);
+        };
+        if current.epoch != epoch || !std::ptr::eq(current.controller.as_ref(), controller) {
+            return Ok(None);
+        }
+        Ok(Some(update()))
     }
 
     pub fn drain_disconnected_devices(&self) -> Vec<String> {
@@ -875,41 +1243,57 @@ impl RemoteControllerManager {
     pub fn host_info(&self, device_id: &str) -> Result<serde_json::Value, String> {
         let controller = self.controller_for(device_id)?;
         let info = controller.host_info()?;
-        self.adopt_if_current(device_id, &controller, &info);
+        self.adopt_if_owner(device_id, &controller, &info);
         Ok(info)
     }
 
     /// [`Self::host_info`] for a caller that already holds the controller it
-    /// wants to ask — an epoch-guarded path, where re-resolving the device could
-    /// hand back a different connection than the one being validated.
+    /// wants to ask. Re-resolving the device could hand back a different
+    /// connection, so adoption checks ownership of this exact controller.
     pub fn host_info_via(
         &self,
         device_id: &str,
         controller: &RemoteController,
     ) -> Result<serde_json::Value, String> {
         let info = controller.host_info()?;
-        self.adopt_if_current(device_id, controller, &info);
+        self.adopt_if_owner(device_id, controller, &info);
         Ok(info)
     }
 
-    /// Adopt reported addresses only when the connection that reported them is
-    /// still this device's live link.
+    /// Adopt reported addresses only while the connection that reported them
+    /// still owns this device's live-link slot.
     ///
     /// A reply describes the connection that produced it. A request can outlive
     /// its connection — the link drops and a reconnect replaces it while the
     /// reply is still in flight — and the answer then describes a link nobody
     /// uses. Persisting it would overwrite the newer connection's addresses with
-    /// older ones. Callers checked this, but only after the write had happened.
-    fn adopt_if_current(
+    /// older ones. The ownership check and store mutation share one
+    /// lifecycle critical section, so replacement cannot land between the
+    /// precondition and the write it protects.
+    ///
+    /// The store is innermost while this lifecycle hold is active and never
+    /// acquires a manager lock itself.
+    fn adopt_if_owner(
         &self,
         device_id: &str,
         controller: &RemoteController,
         info: &serde_json::Value,
     ) {
-        if self.live_connection_epoch(device_id, controller).is_none() {
+        let Ok(lifecycle) = self.shared.controllers.lock() else {
+            return;
+        };
+        let Some(current) = lifecycle
+            .slots
+            .get(device_id)
+            .and_then(|slot| slot.live.as_ref())
+        else {
+            return;
+        };
+        if !std::ptr::eq(current.controller.as_ref(), controller) {
             return;
         }
         self.shared.adopt_reported_transports(device_id, info);
+        drop(lifecycle);
     }
 
     /// [`Self::host_info`] for callers that must block on the connect.
@@ -920,14 +1304,16 @@ impl RemoteControllerManager {
     ) -> Result<serde_json::Value, String> {
         let controller = self.controller_for_blocking(device_id, timeout)?;
         let info = controller.host_info()?;
-        self.adopt_if_current(device_id, &controller, &info);
+        self.adopt_if_owner(device_id, &controller, &info);
         Ok(info)
     }
 
     pub fn controller_for(&self, device_id: &str) -> Result<Arc<RemoteController>, String> {
-        if let Ok(connections) = self.shared.connections.lock()
-            && let Some(controller) = connections
+        if let Ok(lifecycle) = self.shared.controllers.lock()
+            && let Some(controller) = lifecycle
+                .slots
                 .get(device_id)
+                .and_then(|slot| slot.live.as_ref())
                 .map(|connection| Arc::clone(&connection.controller))
         {
             return Ok(controller);
@@ -962,9 +1348,11 @@ impl RemoteControllerManager {
         timeout: Duration,
     ) -> Result<Arc<RemoteController>, String> {
         // Already connected (re-browsing the same host): no wait.
-        if let Ok(connections) = self.shared.connections.lock()
-            && let Some(controller) = connections
+        if let Ok(lifecycle) = self.shared.controllers.lock()
+            && let Some(controller) = lifecycle
+                .slots
                 .get(device_id)
+                .and_then(|slot| slot.live.as_ref())
                 .map(|connection| Arc::clone(&connection.controller))
         {
             return Ok(controller);
@@ -976,9 +1364,11 @@ impl RemoteControllerManager {
         }
         let deadline = Instant::now() + timeout;
         loop {
-            if let Ok(connections) = self.shared.connections.lock()
-                && let Some(controller) = connections
+            if let Ok(lifecycle) = self.shared.controllers.lock()
+                && let Some(controller) = lifecycle
+                    .slots
                     .get(device_id)
+                    .and_then(|slot| slot.live.as_ref())
                     .map(|connection| Arc::clone(&connection.controller))
             {
                 return Ok(controller);
@@ -1028,27 +1418,25 @@ impl RemoteControllerManager {
         // Remove saved intent first, so no fresh reconnect can start while the
         // in-flight epoch is being invalidated.
         let hosts = self.shared.store.remove(device_id)?;
-        if let Ok(mut devices) = self.shared.disconnected_devices.lock() {
-            devices.insert(device_id.to_string());
-        }
-        let old = {
-            let mut attempts = self.shared.connection_attempts.lock().ok();
-            if let Some(attempts) = attempts.as_mut() {
-                attempts.remove(device_id);
+        let old = if let Ok(mut lifecycle) = self.shared.controllers.lock() {
+            let old = lifecycle.slots.remove(device_id).and_then(|slot| slot.live);
+            if let Ok(mut devices) = self.shared.disconnected_devices.lock() {
+                devices.insert(device_id.to_string());
             }
-            self.shared
-                .connections
-                .lock()
-                .ok()
-                .and_then(|mut connections| connections.remove(device_id))
+            if let Ok(mut links) = self.shared.links.lock() {
+                links.remove(device_id);
+            }
+            self.shared.clear_path(device_id);
+            if let Ok(mut errors) = self.shared.last_errors.lock() {
+                errors.remove(device_id);
+            }
+            old
+        } else {
+            None
         };
         if let Some(old) = old {
             ManagerShared::shutdown_controller(old.controller);
         }
-        if let Ok(mut links) = self.shared.links.lock() {
-            links.remove(device_id);
-        }
-        self.shared.clear_path(device_id);
         Ok(hosts)
     }
 }
@@ -1056,6 +1444,11 @@ impl RemoteControllerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const TEST_ENDPOINT_ID: &str =
+        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
 
     fn saved_host_with(transport: SavedRemoteTransport) -> SavedRemoteHost {
         SavedRemoteHost {
@@ -1071,7 +1464,7 @@ mod tests {
     fn iroh_transport() -> SavedRemoteTransport {
         SavedRemoteTransport {
             kind: REMOTE_TRANSPORT_IROH.to_string(),
-            node_id: "node-x".to_string(),
+            node_id: TEST_ENDPOINT_ID.to_string(),
             relay_url: "https://relay.example".to_string(),
             relay_authentication: String::new(),
             ticket: "ticket-v1".to_string(),
@@ -1123,7 +1516,12 @@ mod tests {
             .shared
             .remember_direct_addr("dev-1", "192.168.1.5:41234");
 
-        let saved = manager.shared.store.find("dev-1").expect("host");
+        let saved = manager
+            .shared
+            .store
+            .find("dev-1")
+            .expect("read host")
+            .expect("host");
         assert_eq!(
             saved.transports[0].direct_addrs,
             vec![
@@ -1135,30 +1533,45 @@ mod tests {
     }
 
     #[test]
-    fn a_reported_candidate_set_is_adopted_and_keeps_remembered_addresses() {
+    fn host_info_candidate_is_adopted_persisted_and_keeps_remembered_addresses() {
         let mut transport = iroh_transport();
         transport.direct_addrs = vec!["10.8.0.3:41234".to_string()];
         let manager = manager_with(saved_host_with(transport));
-
-        manager.shared.adopt_reported_transports(
-            "dev-1",
-            &serde_json::json!({
-                "transports": [{
-                    "kind": "iroh",
-                    "nodeId": "node-x",
-                    "relayUrl": "",
-                    "ticket": "ticket-v2",
-                }],
-            }),
+        let support_dir = manager.shared.support_dir.clone();
+        let info = codux_runtime_core::host::host_info_payload(
+            codux_runtime_core::host::HostInfoPayload {
+                host_id: "host-1".to_string(),
+                runtime_instance_id: "runtime-2".to_string(),
+                name: "Host".to_string(),
+                platform: "macos".to_string(),
+                app: "Codux".to_string(),
+                resource_subscriptions: Vec::new(),
+                transports: vec![
+                    codux_protocol::iroh_transport_candidate_with_ticket_and_authentication(
+                        "",
+                        TEST_ENDPOINT_ID,
+                        "",
+                        "ticket-v2",
+                        "",
+                    ),
+                ],
+            },
         );
 
-        let saved = manager.shared.store.find("dev-1").expect("host");
+        manager.shared.adopt_reported_transports("dev-1", &info);
+
+        let saved = RemoteControllerStore::new(support_dir.clone())
+            .find("dev-1")
+            .expect("read persisted host")
+            .expect("persisted host");
         assert_eq!(saved.transports[0].ticket, "ticket-v2", "adopted");
         assert_eq!(
             saved.transports[0].direct_addrs,
             vec!["10.8.0.3:41234".to_string()],
             "the two address sources are independent; neither may erase the other"
         );
+
+        let _ = std::fs::remove_dir_all(support_dir);
     }
 
     #[test]
@@ -1177,10 +1590,17 @@ mod tests {
         // this would strand the device until it is re-paired.
         manager.shared.adopt_reported_transports(
             "dev-1",
-            &serde_json::json!({ "transports": [{ "kind": "iroh", "nodeId": "node-x" }] }),
+            &serde_json::json!({
+                "transports": [{ "kind": "iroh", "nodeId": TEST_ENDPOINT_ID }]
+            }),
         );
 
-        let saved = manager.shared.store.find("dev-1").expect("host");
+        let saved = manager
+            .shared
+            .store
+            .find("dev-1")
+            .expect("read host")
+            .expect("host");
         assert_eq!(saved.transports[0].ticket, "ticket-v1");
         assert_eq!(saved.transports[0].relay_url, "https://relay.example");
     }
@@ -1219,6 +1639,52 @@ mod tests {
                 transports: Vec::new(),
             })
             .unwrap();
+    }
+
+    fn install_reconnect_worker(manager: &RemoteControllerManager, device_id: &str) -> u64 {
+        let mut lifecycle = manager.shared.controllers.lock().unwrap();
+        let worker = ManagerShared::allocate_owner(&mut lifecycle);
+        lifecycle
+            .slots
+            .entry(device_id.to_string())
+            .or_default()
+            .reconnect_worker = Some(ReconnectWorker { owner: worker });
+        worker
+    }
+
+    fn reconnect_worker_owner(manager: &RemoteControllerManager, device_id: &str) -> Option<u64> {
+        manager
+            .shared
+            .controllers
+            .lock()
+            .unwrap()
+            .slots
+            .get(device_id)
+            .and_then(|slot| slot.reconnect_worker)
+            .map(|worker| worker.owner)
+    }
+
+    fn reconnect_worker_is_claimed(manager: &RemoteControllerManager, device_id: &str) -> bool {
+        reconnect_worker_owner(manager, device_id).is_some()
+    }
+
+    struct ShutdownRecordingTransport {
+        stopped: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl codux_remote_transport::RemoteTransport for ShutdownRecordingTransport {
+        fn kind(&self) -> codux_protocol::RemoteTransportKind {
+            codux_protocol::RemoteTransportKind::Iroh
+        }
+
+        fn send(&self, _data: Vec<u8>, _device_id: Option<&str>) -> bool {
+            false
+        }
+
+        async fn shutdown(&self) {
+            self.stopped.store(true, Ordering::SeqCst);
+        }
     }
 
     #[test]
@@ -1263,6 +1729,146 @@ mod tests {
     }
 
     #[test]
+    fn connected_transport_state_waits_for_live_publication() {
+        let manager = manager_with(saved_host_with(iroh_transport()));
+        let epoch = manager.shared.next_connection_epoch("dev-1");
+        let on_state = manager.shared.state_handler("dev-1", epoch);
+        on_state("node-1".to_string(), "connecting".to_string());
+        on_state(
+            "node-1".to_string(),
+            "connected:path=direct;addr=10.8.0.3:41234".to_string(),
+        );
+
+        assert_eq!(
+            manager.link_states().get("dev-1"),
+            Some(&ControllerLinkState::Connecting),
+            "transport readiness is pending metadata until its controller is published"
+        );
+        assert!(!manager.link_paths().contains_key("dev-1"));
+        assert!(
+            manager
+                .shared
+                .store
+                .find("dev-1")
+                .unwrap()
+                .unwrap()
+                .transports[0]
+                .direct_addrs
+                .is_empty(),
+            "an unpublished attempt must not write its path outside the lifecycle slot"
+        );
+
+        assert!(
+            manager
+                .shared
+                .publish_connection("dev-1", epoch, test_controller("dev-1"))
+        );
+        assert_eq!(
+            manager.link_states().get("dev-1"),
+            Some(&ControllerLinkState::Connected)
+        );
+        assert_eq!(
+            manager.link_paths().get("dev-1"),
+            Some(&ControllerLinkPath::Direct)
+        );
+        assert_eq!(
+            manager
+                .shared
+                .store
+                .find("dev-1")
+                .unwrap()
+                .unwrap()
+                .transports[0]
+                .direct_addrs,
+            ["10.8.0.3:41234"]
+        );
+    }
+
+    #[test]
+    fn failed_pair_attempt_leaves_no_lifecycle_state() {
+        let manager = manager("codux-controller-failed-pair-cleanup");
+        let payload = serde_json::json!({
+            "code": "1234",
+            "secret": "secret",
+            "pairingId": "pair-1",
+            "transports": [{
+                "kind": REMOTE_TRANSPORT_IROH,
+                "nodeId": "not-a-node-id",
+                "relayUrl": "https://relay.example",
+            }],
+        });
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).unwrap());
+
+        manager
+            .pair(&encoded, "desktop")
+            .expect_err("the malformed dial target must fail before network I/O");
+
+        assert!(manager.shared.controllers.lock().unwrap().slots.is_empty());
+        assert!(manager.link_states().is_empty());
+        assert!(manager.link_paths().is_empty());
+    }
+
+    #[test]
+    fn failed_required_pair_save_aborts_and_shuts_down_unpublished_controller() {
+        let manager = manager("codux-controller-failed-pair-save");
+        std::fs::create_dir_all(&manager.shared.support_dir).unwrap();
+        let temporary = manager
+            .shared
+            .support_dir
+            .join("remote-controllers.json.tmp");
+        std::fs::create_dir(&temporary).unwrap();
+        let epoch = manager.shared.next_connection_epoch("dev-1");
+        let on_state = manager.shared.state_handler("dev-1", epoch);
+        on_state("node-1".to_string(), "connecting".to_string());
+        on_state(
+            "node-1".to_string(),
+            "connected:path=relay;relayUrl=https://relay.example".to_string(),
+        );
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stopped_for_transport = Arc::clone(&stopped);
+        let controller = RemoteController::with_test_transport("dev-1", move |_| {
+            Arc::new(ShutdownRecordingTransport {
+                stopped: stopped_for_transport,
+            })
+        });
+
+        manager
+            .finish_pairing(epoch, controller, saved_host_with(iroh_transport()))
+            .expect_err("blocked temporary path must fail required save");
+
+        assert!(stopped.load(Ordering::SeqCst));
+        assert!(manager.shared.controllers.lock().unwrap().slots.is_empty());
+        assert!(manager.link_states().is_empty());
+        assert!(manager.link_paths().is_empty());
+        assert!(manager.shared.store.find("dev-1").unwrap().is_none());
+        std::fs::remove_dir(&temporary).unwrap();
+    }
+
+    #[test]
+    fn stale_pair_abort_cannot_remove_replacement() {
+        let manager = manager("codux-controller-stale-pair-abort");
+        save_test_host(&manager, "device-1");
+        let stale_epoch = manager.shared.next_connection_epoch("device-1");
+        let replacement_epoch = manager.shared.next_connection_epoch("device-1");
+        let replacement = test_controller("device-1");
+        assert!(manager.shared.publish_connection(
+            "device-1",
+            replacement_epoch,
+            Arc::clone(&replacement)
+        ));
+
+        manager
+            .shared
+            .abort_unpublished_attempt("device-1", stale_epoch);
+
+        assert_eq!(
+            manager.live_connection_epoch("device-1", &replacement),
+            Some(replacement_epoch)
+        );
+    }
+
+    #[test]
     fn a_superseded_connection_cannot_write_its_reply_into_the_store() {
         // A `host.info` request can outlive the connection that sent it: the
         // link drops, a reconnect replaces it, and the reply arrives describing
@@ -1271,24 +1877,134 @@ mod tests {
         let manager = manager("codux-controller-superseded-adopt");
         save_test_host(&manager, "device-1");
         let superseded = test_controller("device-1");
+        let superseded_epoch = manager.shared.next_connection_epoch("device-1");
+        assert!(manager.shared.publish_connection(
+            "device-1",
+            superseded_epoch,
+            Arc::clone(&superseded)
+        ));
+        let replacement = test_controller("device-1");
+        let replacement_epoch = manager.shared.next_connection_epoch("device-1");
+        assert!(
+            manager
+                .shared
+                .publish_connection("device-1", replacement_epoch, replacement)
+        );
 
-        manager.adopt_if_current(
+        manager.adopt_if_owner(
             "device-1",
             &superseded,
             &serde_json::json!({
                 "transports": [{
                     "kind": "iroh",
-                    "nodeId": "node-x",
+                    "nodeId": TEST_ENDPOINT_ID,
                     "relayUrl": "https://relay.example",
                     "ticket": "ticket-from-a-dead-link",
                 }],
             }),
         );
 
-        let saved = manager.shared.store.find("device-1").expect("host");
+        let saved = manager
+            .shared
+            .store
+            .find("device-1")
+            .expect("read host")
+            .expect("host");
         assert!(
             saved.transports.is_empty(),
             "a reply from a connection that is no longer live must not be stored"
+        );
+    }
+
+    #[test]
+    fn ownership_cannot_change_between_validation_and_store_mutation() {
+        let manager = Arc::new(manager_with(saved_host_with(iroh_transport())));
+        let owner = test_controller("dev-1");
+        let owner_epoch = manager.shared.next_connection_epoch("dev-1");
+        assert!(
+            manager
+                .shared
+                .publish_connection("dev-1", owner_epoch, Arc::clone(&owner))
+        );
+
+        // Hold the store immediately after the adoption's ownership check. A
+        // correct adoption keeps lifecycle locked while it waits here, so
+        // a replacement cannot take the slot before the protected mutation.
+        let write_gate = manager.shared.store.hold_writes_for_test();
+        let adopting_manager = Arc::clone(&manager);
+        let (adopt_started_tx, adopt_started_rx) = std::sync::mpsc::sync_channel(0);
+        let adoption = std::thread::spawn(move || {
+            adopt_started_tx.send(()).unwrap();
+            adopting_manager.adopt_if_owner(
+                "dev-1",
+                &owner,
+                &serde_json::json!({
+                    "transports": [{
+                        "kind": "iroh",
+                        "nodeId": TEST_ENDPOINT_ID,
+                        "relayUrl": "https://relay.example",
+                        "ticket": "ticket-from-owner",
+                    }],
+                }),
+            );
+        });
+        adopt_started_rx.recv().unwrap();
+        let lock_deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match manager.shared.controllers.try_lock() {
+                Err(std::sync::TryLockError::WouldBlock) => break,
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    panic!("controller lifecycle lock poisoned")
+                }
+                Ok(guard) => drop(guard),
+            }
+            assert!(
+                Instant::now() < lock_deadline,
+                "adoption released ownership before reaching the store mutation"
+            );
+            std::thread::yield_now();
+        }
+
+        let replacing_manager = Arc::clone(&manager);
+        let replacement = test_controller("dev-1");
+        let (replace_started_tx, replace_started_rx) = std::sync::mpsc::sync_channel(0);
+        let (replaced_tx, replaced_rx) = std::sync::mpsc::sync_channel(0);
+        let replacement_thread = std::thread::spawn(move || {
+            replace_started_tx.send(()).unwrap();
+            replacing_manager
+                .shared
+                .controllers
+                .lock()
+                .unwrap()
+                .slots
+                .entry("dev-1".to_string())
+                .or_default()
+                .live = Some(LiveConnection {
+                epoch: owner_epoch + 1,
+                controller: replacement,
+            });
+            replaced_tx.send(()).unwrap();
+        });
+        replace_started_rx.recv().unwrap();
+        assert!(
+            replaced_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "replacement took ownership between validation and mutation"
+        );
+
+        drop(write_gate);
+        adoption.join().unwrap();
+        replaced_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        replacement_thread.join().unwrap();
+        assert_eq!(
+            manager
+                .shared
+                .store
+                .find("dev-1")
+                .unwrap()
+                .unwrap()
+                .transports[0]
+                .ticket,
+            "ticket-from-owner"
         );
     }
 
@@ -1299,10 +2015,13 @@ mod tests {
         let epoch = manager.shared.next_connection_epoch("device-1");
         manager
             .shared
-            .connection_attempts
+            .controllers
             .lock()
             .unwrap()
-            .remove("device-1");
+            .slots
+            .get_mut("device-1")
+            .unwrap()
+            .attempt = None;
 
         assert!(
             !manager
@@ -1320,7 +2039,7 @@ mod tests {
         save_test_host(&manager, "device-1");
 
         // A reconnect loop can hold this stale host after `forget` removes it.
-        assert!(manager.shared.store.find("device-1").is_some());
+        assert!(manager.shared.store.find("device-1").unwrap().is_some());
         manager.forget("device-1").unwrap();
         let stale_epoch = manager.shared.next_connection_epoch("device-1");
         assert!(!manager.shared.publish_connection(
@@ -1354,17 +2073,19 @@ mod tests {
     #[test]
     fn reconnect_without_saved_host_releases_its_epoch() {
         let manager = manager("codux-controller-missing-host-epoch");
+        let worker = install_reconnect_worker(&manager, "device-1");
 
         crate::async_runtime::block_on(
-            Arc::clone(&manager.shared).reconnect_loop("device-1".to_string()),
+            Arc::clone(&manager.shared).reconnect_loop("device-1".to_string(), worker),
         );
 
         assert!(
             !manager
                 .shared
-                .connection_attempts
+                .controllers
                 .lock()
                 .unwrap()
+                .slots
                 .contains_key("device-1")
         );
         assert!(!manager.link_states().contains_key("device-1"));
@@ -1376,13 +2097,11 @@ mod tests {
         save_test_host(&manager, "device-1");
         // A reconnect loop already owns this device, exactly as it does when
         // the drop happens mid-dial.
-        manager
+        let worker = install_reconnect_worker(&manager, "device-1");
+        let epoch = manager
             .shared
-            .reconnecting
-            .lock()
-            .unwrap()
-            .insert("device-1".to_string());
-        let epoch = manager.shared.next_connection_epoch("device-1");
+            .begin_reconnect_attempt("device-1", worker)
+            .unwrap();
         let on_state = manager.shared.state_handler("device-1", epoch);
 
         // The transport reports the link closed while `connect_saved` is still
@@ -1422,13 +2141,11 @@ mod tests {
         save_test_host(&manager, "device-1");
         // This worker owns the device's reconnect, as the loop does while it
         // dials.
-        manager
+        let worker = install_reconnect_worker(&manager, "device-1");
+        let epoch = manager
             .shared
-            .reconnecting
-            .lock()
-            .unwrap()
-            .insert("device-1".to_string());
-        let epoch = manager.shared.next_connection_epoch("device-1");
+            .begin_reconnect_attempt("device-1", worker)
+            .unwrap();
         let on_state = manager.shared.state_handler("device-1", epoch);
         assert!(
             manager
@@ -1436,49 +2153,25 @@ mod tests {
                 .publish_connection("device-1", epoch, test_controller("device-1"))
         );
 
-        // The exact interleave the callback opens: it marks the attempt dead
-        // before it evicts the connection, and the worker's handover lands in
-        // between — the connection is still published, but the link is gone and
-        // the callback (seeing the ownership taken) starts no replacement.
-        manager
-            .shared
-            .terminate_connection_attempt("device-1", epoch);
-        assert_eq!(manager.connected_controllers().len(), 1);
-        assert!(
-            !manager
-                .shared
-                .release_reconnect_ownership("device-1", epoch)
-        );
-        assert!(
-            manager
-                .shared
-                .reconnecting
-                .lock()
-                .unwrap()
-                .contains("device-1"),
-            "a dead attempt must not hand the reconnect ownership back"
-        );
-
-        // The rest of the callback runs: eviction, still no replacement worker.
+        // Drop before the worker's success handover. The callback evicts its
+        // exact live owner but leaves this same worker responsible for retry.
         on_state("node-1".to_string(), "closed".to_string());
         assert!(manager.connected_controllers().is_empty());
         assert!(
             !manager
                 .shared
-                .release_reconnect_ownership("device-1", epoch)
+                .release_reconnect_ownership("device-1", worker, epoch)
         );
         assert!(
-            manager
-                .shared
-                .reconnecting
-                .lock()
-                .unwrap()
-                .contains("device-1"),
+            reconnect_worker_is_claimed(&manager, "device-1"),
             "the worker keeps retrying instead of leaving the host unconnected"
         );
 
         // Once the link is really up, the ownership goes back.
-        let epoch = manager.shared.next_connection_epoch("device-1");
+        let epoch = manager
+            .shared
+            .begin_reconnect_attempt("device-1", worker)
+            .unwrap();
         assert!(
             manager
                 .shared
@@ -1487,16 +2180,196 @@ mod tests {
         assert!(
             manager
                 .shared
-                .release_reconnect_ownership("device-1", epoch)
+                .release_reconnect_ownership("device-1", worker, epoch)
         );
+        assert!(!reconnect_worker_is_claimed(&manager, "device-1"));
+    }
+
+    #[test]
+    fn stale_disconnect_cannot_evict_a_replacement() {
+        let manager = Arc::new(manager("codux-controller-stale-disconnect"));
+        save_test_host(&manager, "device-1");
+        let first = test_controller("device-1");
+        let first_epoch = manager.shared.next_connection_epoch("device-1");
+        let on_first_state = manager.shared.state_handler("device-1", first_epoch);
         assert!(
-            !manager
+            manager
                 .shared
-                .reconnecting
-                .lock()
-                .unwrap()
-                .contains("device-1")
+                .publish_connection("device-1", first_epoch, Arc::clone(&first))
         );
+
+        // Stop A after its callback accepted ownership but before eviction.
+        // B must be unable to publish in that interval: ownership validation
+        // and the protected transition are one lifecycle critical section.
+        let (disconnect_accepted, resume_disconnect) =
+            manager.shared.pause_next_disconnect_for_test();
+        let disconnect = std::thread::spawn(move || {
+            on_first_state("node-1".to_string(), "closed".to_string());
+        });
+        disconnect_accepted
+            .recv_timeout(Duration::from_secs(1))
+            .expect("disconnect callback did not accept A ownership");
+
+        let replacement = test_controller("device-1");
+        let replacement_for_thread = Arc::clone(&replacement);
+        let manager_for_thread = Arc::clone(&manager);
+        let (replacement_done_tx, replacement_done_rx) = std::sync::mpsc::sync_channel(0);
+        let replace = std::thread::spawn(move || {
+            let replacement_epoch = manager_for_thread.shared.next_connection_epoch("device-1");
+            let published = manager_for_thread.shared.publish_connection(
+                "device-1",
+                replacement_epoch,
+                replacement_for_thread,
+            );
+            replacement_done_tx
+                .send((replacement_epoch, published))
+                .unwrap();
+        });
+        assert!(
+            replacement_done_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "replacement published between disconnect ownership check and eviction"
+        );
+
+        resume_disconnect.send(()).unwrap();
+        disconnect.join().unwrap();
+        let (replacement_epoch, published) = replacement_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        replace.join().unwrap();
+        assert!(published);
+
+        assert_eq!(
+            manager.live_connection_epoch("device-1", &replacement),
+            Some(replacement_epoch),
+            "a stale disconnect may evict only the controller that emitted it"
+        );
+    }
+
+    #[test]
+    fn ensure_does_not_claim_a_worker_for_an_already_published_connection() {
+        let manager = manager("codux-controller-ensure-publication-gap");
+        save_test_host(&manager, "device-1");
+        let controller = test_controller("device-1");
+        let epoch = manager.shared.next_connection_epoch("device-1");
+        assert!(
+            manager
+                .shared
+                .publish_connection("device-1", epoch, Arc::clone(&controller))
+        );
+
+        assert!(manager.shared.ensure_reconnect_loop("device-1"));
+        assert!(
+            !reconnect_worker_is_claimed(&manager, "device-1"),
+            "ensure must observe publication and leave the live owner alone"
+        );
+        assert_eq!(
+            manager.live_connection_epoch("device-1", &controller),
+            Some(epoch)
+        );
+    }
+
+    #[test]
+    fn ensure_uses_last_good_hosts_while_store_refresh_is_unreadable() {
+        let manager = manager("codux-controller-ensure-last-good");
+        save_test_host(&manager, "device-1");
+        let path = manager.shared.support_dir.join("remote-controllers.json");
+        let valid_store = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, "{ unreadable").unwrap();
+
+        assert_eq!(manager.ensure_saved_hosts_connected(), 1);
+        assert!(reconnect_worker_is_claimed(&manager, "device-1"));
+        assert!(
+            manager
+                .shared
+                .last_error("device-1")
+                .is_some_and(|error| error.contains("could not be read")),
+            "refresh error must stay observable while last-good intent reconnects"
+        );
+
+        std::fs::write(&path, valid_store).unwrap();
+        manager.forget("device-1").unwrap();
+    }
+
+    #[test]
+    fn stale_worker_cleanup_cannot_release_a_replacement_worker() {
+        let manager = manager("codux-controller-stale-worker-cleanup");
+        save_test_host(&manager, "device-1");
+        let stale_worker = install_reconnect_worker(&manager, "device-1");
+
+        manager.forget("device-1").unwrap();
+        save_test_host(&manager, "device-1");
+        let replacement_worker = install_reconnect_worker(&manager, "device-1");
+        assert!(
+            replacement_worker > stale_worker,
+            "A-B-A ownership must not reuse a stale callback's token"
+        );
+
+        manager
+            .shared
+            .stop_reconnect_for_absent_host("device-1", stale_worker);
+        assert_eq!(
+            reconnect_worker_owner(&manager, "device-1"),
+            Some(replacement_worker),
+            "worker cleanup may release only its own ownership"
+        );
+    }
+
+    #[test]
+    fn store_read_error_does_not_leave_the_dead_controller_published() {
+        let manager = manager("codux-controller-store-read-error");
+        save_test_host(&manager, "device-1");
+        let path = manager.shared.support_dir.join("remote-controllers.json");
+        let valid_store = std::fs::read_to_string(&path).unwrap();
+        let controller = test_controller("device-1");
+        let epoch = manager.shared.next_connection_epoch("device-1");
+        let on_state = manager.shared.state_handler("device-1", epoch);
+        assert!(
+            manager
+                .shared
+                .publish_connection("device-1", epoch, Arc::clone(&controller))
+        );
+
+        std::fs::write(&path, "{ unreadable").unwrap();
+        on_state("node-1".to_string(), "closed".to_string());
+
+        assert!(
+            manager.connected_controllers().is_empty(),
+            "dead-owner eviction must not depend on reading reconnect intent"
+        );
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if manager
+                .shared
+                .last_error("device-1")
+                .is_some_and(|error| error.contains("could not be read"))
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "store read failure was not made observable"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // Repairing the projection must let the same worker leave the store
+        // error behind and resume normal dial attempts.
+        std::fs::write(&path, valid_store).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while manager
+            .shared
+            .last_error("device-1")
+            .is_some_and(|error| error.contains("could not be read"))
+        {
+            assert!(
+                Instant::now() < deadline,
+                "reconnect loop did not resume after the store recovered"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        manager.forget("device-1").unwrap();
     }
 
     #[test]

@@ -9,24 +9,6 @@ impl RuntimeService {
         AppSettingsStore::from_support_dir(self.support_dir.clone()).snapshot()
     }
 
-    pub fn replace_app_settings(&self, settings: AppSettings) -> Result<AppSettings, String> {
-        let previous = AppSettingsStore::from_support_dir(self.support_dir.clone()).snapshot();
-        let settings =
-            AppSettingsStore::from_support_dir(self.support_dir.clone()).replace(settings)?;
-        self.sync_app_settings_side_effects(&previous, &settings)?;
-        Ok(settings)
-    }
-
-    pub fn update_app_settings(
-        &self,
-        apply: impl FnOnce(&mut AppSettings),
-    ) -> Result<AppSettings, String> {
-        let previous = AppSettingsStore::from_support_dir(self.support_dir.clone()).snapshot();
-        let settings = AppSettingsStore::from_support_dir(self.support_dir.clone()).update(apply)?;
-        self.sync_app_settings_side_effects(&previous, &settings)?;
-        Ok(settings)
-    }
-
     fn sync_app_settings_side_effects(
         &self,
         previous: &AppSettings,
@@ -41,9 +23,6 @@ impl RuntimeService {
         if previous.sleep_mode != settings.sleep_mode {
             self.power_manager
                 .set_sleep_prevention(settings.sleep_mode.clone())?;
-        }
-        if previous.remote != settings.remote {
-            let _ = RemoteService::new(self.support_dir.clone()).sync_settings_background();
         }
         Ok(())
     }
@@ -134,7 +113,6 @@ impl RuntimeService {
     pub fn set_window_opacity(&self, percent: i64) -> Result<SettingsSummary, String> {
         self.update_settings_with_side_effects(|settings| settings.set_window_opacity(percent))
     }
-
 
     pub fn toggle_dock_badge(&self) -> Result<SettingsSummary, String> {
         self.update_settings_with_side_effects(|settings| settings.toggle_dock_badge())
@@ -231,7 +209,9 @@ impl RuntimeService {
     }
 
     pub fn toggle_pet_late_night_reminders(&self) -> Result<SettingsSummary, String> {
-        self.update_settings_with_side_effects(|settings| settings.toggle_pet_late_night_reminders())
+        self.update_settings_with_side_effects(|settings| {
+            settings.toggle_pet_late_night_reminders()
+        })
     }
 
     pub fn set_pet_hydration_reminder_minutes(
@@ -444,6 +424,8 @@ impl RuntimeService {
     }
 
     pub fn set_git_commit_language(&self, language: &str) -> Result<SettingsSummary, String> {
-        self.update_settings_with_side_effects(|settings| settings.set_git_commit_language(language))
+        self.update_settings_with_side_effects(|settings| {
+            settings.set_git_commit_language(language)
+        })
     }
 }

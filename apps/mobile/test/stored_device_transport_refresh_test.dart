@@ -1,5 +1,5 @@
 import 'package:codux_flutter/models/remote_models.dart';
-import 'package:codux_flutter/services/remote_device_controller.dart';
+import 'package:codux_flutter/services/device_snapshot_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 RemoteTransportCandidate candidate({
@@ -38,37 +38,29 @@ void main() {
     });
   });
 
-  group('RemoteDeviceController.replaceTransports', () {
-    const controller = RemoteDeviceController();
-
+  group('DeviceTransportsReplaced', () {
     test('adopts the addresses the host just reported', () {
       final devices = [device()];
       final fresh = [candidate(ticket: 'ticket-v2')];
 
-      final result = controller.replaceTransports(
-        devices: devices,
-        activeDevice: devices.first,
-        deviceId: 'device-1',
-        transports: fresh,
-      );
+      final result = DeviceTransportsReplaced(
+        'device-1',
+        fresh,
+      ).applyTo(devices);
 
-      expect(result.updatedDevice?.transports, fresh);
-      expect(result.state.activeDevice?.transports, fresh);
+      expect(result.single.transports, fresh);
     });
 
     test('reports no update when the host repeats what we already stored', () {
       final devices = [device()];
 
-      final result = controller.replaceTransports(
-        devices: devices,
-        activeDevice: devices.first,
-        deviceId: 'device-1',
-        transports: [candidate()],
-      );
+      final result = DeviceTransportsReplaced('device-1', [
+        candidate(),
+      ]).applyTo(devices);
 
       expect(
-        result.updatedDevice,
-        isNull,
+        result,
+        same(devices),
         reason:
             'host.info arrives on every connection; an unchanged address '
             'set must not cost a disk write each time',
@@ -78,21 +70,19 @@ void main() {
     test('an empty report leaves the stored addresses alone', () {
       final devices = [device()];
 
-      final result = controller.replaceTransports(
-        devices: devices,
-        activeDevice: devices.first,
-        deviceId: 'device-1',
-        transports: const [],
-      );
+      final result = const DeviceTransportsReplaced(
+        'device-1',
+        [],
+      ).applyTo(devices);
 
       expect(
-        result.updatedDevice,
-        isNull,
+        result,
+        same(devices),
         reason:
             'a host that reports nothing has not told us to forget what '
             'we have — that would strand the device',
       );
-      expect(result.state.devices.first.transports, isNotEmpty);
+      expect(result.first.transports, isNotEmpty);
     });
 
     test('adopting new addresses keeps the remembered direct addresses', () {
@@ -100,15 +90,12 @@ void main() {
         device(directAddrs: ['10.8.0.3:41234']),
       ];
 
-      final result = controller.replaceTransports(
-        devices: devices,
-        activeDevice: devices.first,
-        deviceId: 'device-1',
-        transports: [candidate(ticket: 'ticket-v2')],
-      );
+      final result = DeviceTransportsReplaced('device-1', [
+        candidate(ticket: 'ticket-v2'),
+      ]).applyTo(devices);
 
       expect(
-        result.updatedDevice?.directAddrs,
+        result.single.directAddrs,
         ['10.8.0.3:41234'],
         reason:
             'the two address sources are independent fallbacks; one must '
@@ -119,14 +106,11 @@ void main() {
     test('reports no update for an unknown device', () {
       final devices = [device()];
 
-      final result = controller.replaceTransports(
-        devices: devices,
-        activeDevice: devices.first,
-        deviceId: 'someone-else',
-        transports: [candidate(ticket: 'ticket-v2')],
-      );
+      final result = DeviceTransportsReplaced('someone-else', [
+        candidate(ticket: 'ticket-v2'),
+      ]).applyTo(devices);
 
-      expect(result.updatedDevice, isNull);
+      expect(result, same(devices));
     });
 
     test('a relay-less reported candidate is adopted', () {
@@ -136,22 +120,20 @@ void main() {
       final devices = [device()];
       final relayLess = [candidate(relayUrl: '', ticket: 'ticket-v2')];
 
-      final result = controller.replaceTransports(
-        devices: devices,
-        activeDevice: devices.first,
-        deviceId: 'device-1',
-        transports: relayLess,
-      );
+      final result = DeviceTransportsReplaced(
+        'device-1',
+        relayLess,
+      ).applyTo(devices);
 
-      expect(result.updatedDevice?.transports, relayLess);
+      expect(result.single.transports, relayLess);
       expect(
-        result.updatedDevice?.transportByKind(RemoteTransportKind.iroh)?.ticket,
+        result.single.transportByKind(RemoteTransportKind.iroh)?.ticket,
         'ticket-v2',
       );
     });
 
     test('adoption carries the relay authentication through', () {
-      // The controller REPLACES its stored set, so anything a host omits is
+      // Replacement owns the stored set, so anything a host omits is
       // lost on this side. A dropped bearer token would leave the device unable
       // to use a custom relay it had been using fine.
       final devices = [device()];
@@ -163,16 +145,13 @@ void main() {
         relayAuthentication: 'bearer-token',
       );
 
-      final result = controller.replaceTransports(
-        devices: devices,
-        activeDevice: devices.first,
-        deviceId: 'device-1',
-        transports: const [authenticated],
-      );
+      final result = const DeviceTransportsReplaced('device-1', [
+        authenticated,
+      ]).applyTo(devices);
 
       expect(
-        result.updatedDevice
-            ?.transportByKind(RemoteTransportKind.iroh)
+        result.single
+            .transportByKind(RemoteTransportKind.iroh)
             ?.relayAuthentication,
         'bearer-token',
       );

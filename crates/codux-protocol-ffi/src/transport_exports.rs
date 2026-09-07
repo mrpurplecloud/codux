@@ -5,8 +5,9 @@ use crate::common::{
 };
 use codux_remote_transport::{
     RemoteControllerTransportConfig, RemoteTransport, RemoteTransportFactory,
-    RemoteTransportUpload, preferred_controller_transport_kind, preferred_pairing_transport_kind,
-    remote_relay_presets_json, remote_relay_url, remote_relay_url_for_preset,
+    RemoteTransportUpload, build_iroh_dial_target, preferred_controller_transport_kind,
+    preferred_pairing_transport_kind, remote_relay_presets_json, remote_relay_url,
+    remote_relay_url_for_preset,
 };
 use serde_json::json;
 use std::collections::VecDeque;
@@ -121,9 +122,13 @@ pub extern "C" fn codux_controller_transport_config_summary_json(
     let Ok(config) = controller_transport_config_from_json(&config_json) else {
         return ptr::null_mut();
     };
+    let usable = config
+        .transports
+        .iter()
+        .filter(|candidate| build_iroh_dial_target(candidate, &config.direct_addrs).is_ok())
+        .collect::<Vec<_>>();
     let preferred = preferred_controller_transport_kind(
-        config
-            .transports
+        usable
             .iter()
             .map(|candidate| (candidate.kind.as_str(), candidate.url.as_str())),
     );
@@ -133,7 +138,7 @@ pub extern "C" fn codux_controller_transport_config_summary_json(
             "hostId": config.host_id,
             "deviceId": config.device_id,
             "transportKind": preferred,
-            "transportCount": config.transports.len(),
+            "transportCount": usable.len(),
         })
         .to_string(),
     )
@@ -314,6 +319,7 @@ pub extern "C" fn codux_controller_transport_send_terminal_upload(
     transport: *mut FfiControllerTransport,
     device_id: *const c_char,
     session_id: *const c_char,
+    request_id: *const c_char,
     name: *const c_char,
     mime: *const c_char,
     kind: *const c_char,
@@ -330,10 +336,16 @@ pub extern "C" fn codux_controller_transport_send_terminal_upload(
         let Some(session_id) = c_to_string(session_id) else {
             return false;
         };
+        let Some(request_id) =
+            c_to_string(request_id).filter(|request_id| !request_id.trim().is_empty())
+        else {
+            return false;
+        };
         let data = unsafe { std::slice::from_raw_parts(bytes, byte_len) }.to_vec();
         let upload = RemoteTransportUpload {
             device_id: c_to_string(device_id).unwrap_or_default(),
             session_id,
+            request_id: Some(request_id),
             name: c_to_string(name).unwrap_or_else(|| "upload".to_string()),
             mime: c_to_string(mime).unwrap_or_default(),
             kind: c_to_string(kind).unwrap_or_else(|| "file".to_string()),

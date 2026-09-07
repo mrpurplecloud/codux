@@ -28,6 +28,7 @@ import '../../services/local_voice_recognition_service.dart';
 import '../../services/mobile_settings_controller.dart';
 import '../../services/connection_status_presenter.dart';
 import '../../services/device_selection_service.dart';
+import '../../services/device_snapshot_store.dart';
 import '../../services/remote_device_controller.dart';
 import '../../services/remote_envelope_send_queue.dart';
 import '../../services/remote_capabilities.dart';
@@ -50,9 +51,11 @@ import '../../services/remote_terminal_scope.dart';
 import '../../services/remote_transport.dart';
 import '../../services/storage_service.dart';
 import '../../services/terminal_buffer_retry.dart';
+import '../../services/terminal_activation.dart';
 import '../../services/terminal_input_batcher.dart';
 import '../../services/terminal_input_reliable_sender.dart';
 import '../../services/terminal_upload_metadata.dart';
+import '../../services/terminal_upload_operation.dart';
 import '../../services/update_check_service.dart';
 import '../../services/terminal_viewport_controller.dart';
 import '../../services/remote_state_versions.dart';
@@ -238,11 +241,19 @@ class _CoduxHomePageState extends State<CoduxHomePage>
               onOpenFilePickerRoot: () => c._openRemoteFilePicker('/'),
               onOpenFilePickerVolumes: () =>
                   c._openRemoteFilePicker('/Volumes'),
-              onCloseVoice: () =>
-                  c._applyState(() => c._showVoiceOverlay = false),
+              onCloseVoice: () => c._applyState(() {
+                c._voiceInputActivation = null;
+                c._showVoiceOverlay = false;
+              }),
               onSendVoiceText: (text) {
-                c._insertTerminalText(text);
-                c._applyState(() => c._showVoiceOverlay = false);
+                final activation = c._voiceInputActivation;
+                if (activation != null) {
+                  c._insertTerminalText(text, activation: activation);
+                }
+                c._applyState(() {
+                  c._voiceInputActivation = null;
+                  c._showVoiceOverlay = false;
+                });
               },
               onCloseFileEditor: () =>
                   c._applyState(() => c._editingFilePath = null),
@@ -392,7 +403,7 @@ class _CoduxHomePageState extends State<CoduxHomePage>
     // a session they switched to since — the switch changes the controller's
     // current session immediately, but the pane still shows the old one until
     // it rebuilds.
-    final paneSessionId = c._sessionId;
+    final paneActivation = c._terminalActivation;
     final terminalBody = RemoteTerminalPane(
       connected: c._isConnected,
       showTerminal: c._hasShownTerminal,
@@ -417,14 +428,33 @@ class _CoduxHomePageState extends State<CoduxHomePage>
       outputController: c._terminalOutputController,
       terminalFontSize: c._settings.terminalFontSize,
       onConnect: () => c._connect(),
-      onInput: c._queueTerminalTyping,
+      onInput: (data) {
+        if (paneActivation == null) return;
+        c._queueTerminalTyping(data, activation: paneActivation);
+      },
       onResize: (cols, rows) {
+        // Grid measurement belongs to the view, even before a session exists.
+        // Readiness, mounting and host resize belong to the exact activation
+        // this pane was built for.
+        c._terminalViewportController.recordMeasured(cols, rows);
+        bool ownsPaneActivation() => isCurrentTerminalPaneActivation(
+          activeActivation: c._terminalActivation,
+          paneActivation: paneActivation,
+        );
+        if (!ownsPaneActivation()) {
+          CoduxLog.debug(
+            '[codux-flutter-terminal] drop stale pane resize pane=${paneActivation?.sessionId ?? ''} current=${c._terminalActivation?.sessionId ?? ''}',
+          );
+          return;
+        }
         final firstResize = !c._terminalReady;
         c._terminalReady = true;
-        c._sendTerminalResize(cols, rows);
+        if (paneActivation != null) {
+          c._sendOwnedTerminalResize(cols, rows, activation: paneActivation);
+        }
         if (firstResize) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (!mounted) return;
+            if (!mounted || !ownsPaneActivation()) return;
             CoduxLog.debug(
               '[codux-flutter-terminal] first resize ready selected=${c._selectedProjectId ?? ''} session=${c._sessionId ?? ''} terminalListLoaded=$c._terminalListLoaded',
             );
@@ -437,18 +467,35 @@ class _CoduxHomePageState extends State<CoduxHomePage>
         if (c._terminalSelectedText == text) return;
         c._applyState(() => c._terminalSelectedText = text);
       },
-      onSendKey: (data) => c._sendTerminalKey(data, fromSession: paneSessionId),
-      canForwardScroll: c._ownsTerminalViewport,
-      onSendScroll: (data) =>
-          c._sendTerminalScroll(data, fromSession: paneSessionId),
+      onSendKey: (data) {
+        if (paneActivation == null) return;
+        c._sendTerminalKey(data, activation: paneActivation);
+      },
+      canForwardScroll: () => c._ownsTerminalViewport(paneActivation),
+      onSendScroll: (data) {
+        if (paneActivation == null) return;
+        c._sendTerminalScroll(data, activation: paneActivation);
+      },
       onToggleKeyboard: c._toggleTerminalKeyboard,
       onRequestKeyboard: c._requestTerminalKeyboard,
-      onPaste: c._pasteToTerminal,
+      onPaste: () {
+        if (paneActivation == null) return;
+        c._pasteToTerminal(activation: paneActivation);
+      },
       onCopy: c._copyTerminalSelection,
-      onUpload: c._chooseUploadForTerminal,
-      onVoiceInput: c._startVoiceInput,
+      onUpload: () {
+        if (paneActivation == null) return;
+        c._chooseUploadForTerminal(activation: paneActivation);
+      },
+      onVoiceInput: () {
+        if (paneActivation == null) return;
+        c._startVoiceInput(activation: paneActivation);
+      },
       handedAway: c._remoteHandedAway,
-      onTakeOver: () => c._takeOverTerminalViewport(),
+      onTakeOver: () {
+        if (paneActivation == null) return;
+        c._takeOverTerminalViewport(activation: paneActivation);
+      },
     );
 
     return _buildWorkspaceShell(topInset, terminalBody);

@@ -151,9 +151,7 @@ fn git_status_snapshot_replies_only_to_requesting_device() {
     let (project_a, _) = write_two_project_state(&support_dir);
     let runtime = Arc::new(RemoteHostRuntime::new(support_dir.clone()));
     let transport = Arc::new(CapturingTransport::default());
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(transport.clone());
-    }
+    runtime.set_transport_for_test(transport.clone());
 
     runtime.handle_resource_subscribe(&RemoteEnvelope {
         kind: REMOTE_RESOURCE_SUBSCRIBE.to_string(),
@@ -202,9 +200,7 @@ fn resource_change_without_subscribers_does_not_broadcast() {
     let support_dir = temp_support_dir("codux-remote-resource-no-subscribers");
     let runtime = RemoteHostRuntime::new(support_dir.clone());
     let transport = Arc::new(CapturingTransport::default());
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(transport.clone());
-    }
+    runtime.set_transport_for_test(transport.clone());
 
     runtime.broadcast_resource_payload(
         REMOTE_GIT_STATUS,
@@ -225,9 +221,7 @@ fn unsupported_resource_subscription_is_not_retained() {
     let support_dir = temp_support_dir("codux-remote-resource-unsupported");
     let runtime = Arc::new(RemoteHostRuntime::new(support_dir.clone()));
     let transport = Arc::new(CapturingTransport::default());
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(transport.clone());
-    }
+    runtime.set_transport_for_test(transport.clone());
 
     runtime.handle_resource_subscribe(&RemoteEnvelope {
         kind: REMOTE_RESOURCE_SUBSCRIBE.to_string(),
@@ -260,9 +254,7 @@ fn invalid_resource_scopes_are_rejected_before_subscription() {
     write_two_project_state(&support_dir);
     let runtime = Arc::new(RemoteHostRuntime::new(support_dir.clone()));
     let transport = Arc::new(CapturingTransport::default());
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(transport.clone());
-    }
+    runtime.set_transport_for_test(transport.clone());
 
     for (request_id, payload) in [
         (
@@ -335,9 +327,7 @@ fn resource_worktree_subscription_uses_registered_project_path() {
     fs::create_dir_all(&unrelated).expect("create unrelated dir");
     let runtime = Arc::new(RemoteHostRuntime::new(support_dir.clone()));
     let transport = Arc::new(CapturingTransport::default());
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(transport.clone());
-    }
+    runtime.set_transport_for_test(transport.clone());
 
     runtime.handle_resource_subscribe(&RemoteEnvelope {
         kind: REMOTE_RESOURCE_SUBSCRIBE.to_string(),
@@ -392,9 +382,7 @@ fn terminal_project_resource_subscription_sends_list_without_baseline() {
         Arc::clone(&terminals),
     ));
     let transport = Arc::new(CapturingTransport::default());
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(transport.clone());
-    }
+    runtime.set_transport_for_test(transport.clone());
     let session_id = terminals
         .create(
             TerminalPtyConfig {

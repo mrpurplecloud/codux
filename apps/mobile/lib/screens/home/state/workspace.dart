@@ -197,7 +197,8 @@ extension _HomePageWorkspace on HomeController {
     _send(_projectController.aiSessionListEnvelope(project));
   }
 
-  void _handleAISessionResult(Object? payload) {
+  void _handleAISessionResult(RelayEnvelope message) {
+    final payload = message.payload;
     if (payload is! Map) return;
     final op = '${payload['op'] ?? ''}';
     final result = payload['result'];
@@ -219,25 +220,53 @@ extension _HomePageWorkspace on HomeController {
         // The host applied the change; pull a fresh list so the row updates.
         _requestAISessions(force: true);
       case 'restore':
-        _applyRestoredSession(result);
+        final intent = _pendingAISessionRestore;
+        if (intent == null ||
+            !intent.accepts(message, activeActivation: _terminalActivation)) {
+          CoduxLog.info(
+            '[codux-flutter-ai] drop stale restore request=${message.requestId ?? ''}',
+          );
+          return;
+        }
+        _pendingAISessionRestore = null;
+        _applyRestoredSession(result, activation: intent.activation);
     }
   }
 
   /// Write the host-built resume command (e.g. `claude --resume <id>`) into the
   /// active terminal and surface it, mirroring the desktop "open" action.
-  void _applyRestoredSession(Object? result) {
-    if (result is! Map) return;
+  void _applyRestoredSession(
+    Object? result, {
+    required TerminalActivation activation,
+  }) {
+    if (result is! Map || !_ownsTerminalActivation(activation)) return;
     final command = '${result['command'] ?? ''}'.trim();
     if (command.isEmpty) return;
     _showTerminalMode();
-    _insertTerminalText(command);
-    _sendTerminalKey('\r');
+    _insertTerminalText(command, activation: activation);
+    _sendTerminalKey('\r', activation: activation);
   }
 
   Future<void> _openAISession(AISessionRecord session) async {
     final project = _selectedProject;
-    if (project == null) return;
-    _send(_projectController.aiSessionRestoreEnvelope(project, session.id));
+    final activation = _terminalActivation;
+    if (project == null || activation == null) return;
+    final requestId = const Uuid().v4();
+    final intent = TerminalRestoreIntent(
+      requestId: requestId,
+      activation: activation,
+    );
+    _pendingAISessionRestore = intent;
+    final sent = _send(
+      _projectController.aiSessionRestoreEnvelope(
+        project,
+        session.id,
+        requestId: requestId,
+      ),
+    );
+    if (!sent && identical(_pendingAISessionRestore, intent)) {
+      _pendingAISessionRestore = null;
+    }
   }
 
   Future<void> _renameAISession(AISessionRecord session) async {
@@ -546,13 +575,14 @@ extension _HomePageWorkspace on HomeController {
   }
 
   void _focusTerminalViewSoon() {
+    final activation = _terminalActivation;
     Future<void>.delayed(const Duration(milliseconds: 80), () {
-      if (!mounted) return;
+      if (!mounted || !_ownsTerminalActivation(activation)) return;
       if (_workspaceMode != WorkspaceMode.terminal || !_hasShownTerminal) {
         return;
       }
-      _claimTerminalViewport();
-      _flushPendingTerminalResize(force: true);
+      _claimTerminalViewport(activation: activation);
+      _flushPendingTerminalResize(force: true, activation: activation);
     });
   }
 }

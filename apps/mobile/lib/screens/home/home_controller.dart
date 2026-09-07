@@ -48,7 +48,9 @@ class HomeController extends ChangeNotifier with WidgetsBindingObserver {
   late final RemoteNetworkRouteRefreshController _networkRouteRefreshController;
   late final LocalVoiceRecognitionService _voiceService;
   RemoteTransport? _activeTransport;
-  Completer<void>? _terminalUploadCompletion;
+  TerminalUploadOperation<RemoteTransport>? _terminalUploadOperation;
+  final TerminalUploadReplyGuard _terminalUploadReplyGuard =
+      TerminalUploadReplyGuard();
   final TerminalViewportController _terminalViewportController =
       TerminalViewportController();
   // Unified versioned state-sync: per-(resource,project,session) latest-wins
@@ -70,18 +72,24 @@ class HomeController extends ChangeNotifier with WidgetsBindingObserver {
   bool _keyboardVisible = false;
 
   List<StoredDevice> _devices = [];
+  int _deviceSnapshotRevision = 0;
   List<ProjectInfo> _projects = [];
   List<TerminalInfo> _terminals = [];
   StoredDevice? _activeDevice;
   Timer? _viewportLeaseKeepalive;
   TerminalBufferCapability _terminalBufferCapability =
       TerminalBufferCapability.fallback;
+  TerminalUploadCapability _terminalUploadCapability =
+      TerminalUploadCapability.fallback;
   String? _hostRuntimeInstanceId;
   MobileSettings _settings = const MobileSettings(localName: '');
   String _detectedDeviceName = 'Codux Mobile';
   String _status = '';
   String? _selectedProjectId;
   String? _sessionId;
+  TerminalActivation? _terminalActivation;
+  TerminalActivation? _voiceInputActivation;
+  TerminalRestoreIntent? _pendingAISessionRestore;
   String? _creatingTerminalProjectId;
   String? _terminalSelectedText;
   bool _showSettings = false;
@@ -395,11 +403,13 @@ class HomeController extends ChangeNotifier with WidgetsBindingObserver {
       },
     );
     _terminalInputBatcher = TerminalInputBatcher(
-      send: (data) => _sendInputNow(data, source: 'typed-batch'),
+      activeActivation: () => _terminalActivation,
+      send: (activation, data) =>
+          _sendInputNow(data, activation: activation, source: 'typed-batch'),
     );
     _terminalInputSender = TerminalInputReliableSender(
       send: _sendTerminalEnvelope,
-      activeSessionId: () => _sessionId,
+      activeActivation: () => _terminalActivation,
     );
     _terminalBindingCoordinator = RemoteTerminalBindingCoordinator(
       outputController: _terminalOutputController,
@@ -468,10 +478,7 @@ class HomeController extends ChangeNotifier with WidgetsBindingObserver {
     _terminalBufferRetry.dispose();
     _terminalInputBatcher.dispose();
     _terminalInputSender.dispose();
-    _terminalUploadCompletion?.completeError(
-      StateError('Terminal upload cancelled'),
-    );
-    _terminalUploadCompletion = null;
+    _cancelTerminalUpload(reason: 'dispose', notify: false);
     _voiceService.dispose();
     _terminalRepaint.dispose();
     _terminalOutputController.dispose();
@@ -597,7 +604,7 @@ class HomeController extends ChangeNotifier with WidgetsBindingObserver {
       isAccessibleTerminal: (terminal) =>
           terminal != null && _isAccessibleTerminal(terminal),
       runtime: _remoteRuntime,
-      inputBatcher: _terminalInputBatcher,
+      flushTerminalInput: _flushTerminalInput,
       applyRuntimePlan: (plan, {required reason}) =>
           _applyRuntimePlan(plan, reason: reason),
       sendTerminalClose: (terminal) {
@@ -621,6 +628,7 @@ class HomeController extends ChangeNotifier with WidgetsBindingObserver {
       outputController: _terminalOutputController,
       terminalInputSender: _terminalInputSender,
       terminalInputBatcher: _terminalInputBatcher,
+      flushTerminalInput: _flushTerminalInput,
       terminalBufferRetry: _terminalBufferRetry,
       terminalBindingCoordinator: _terminalBindingCoordinator,
       captureSnapshot: () => HomeRuntimeSnapshot(
@@ -707,7 +715,7 @@ class HomeController extends ChangeNotifier with WidgetsBindingObserver {
       worktreeBaseBranches: _worktreeBaseBranches,
       worktreesForProject: _worktreesForProject,
       showToast: _showToast,
-      flushTerminalInput: _terminalInputBatcher.flush,
+      flushTerminalInput: _flushTerminalInput,
       closeTerminalSwitcher: _closeTerminalSwitcher,
       markPendingSwitch: (projectId, worktreeId) {
         _pendingWorktreeSwitch = PendingWorktreeSwitch(

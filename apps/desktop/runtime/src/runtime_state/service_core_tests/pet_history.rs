@@ -20,9 +20,12 @@ fn write_pet_test_projects(
     );
     // state.json is served by a process-global in-memory ConfigStore; writes
     // must go through it or a running service never sees the change.
-    crate::config::save_raw_state_snapshot(
+    crate::config::update_raw_state_snapshot(
         &crate::config::state_file_path(support_dir.to_path_buf()),
-        &snapshot,
+        |raw| {
+            *raw = snapshot;
+            Ok(())
+        },
     )
     .expect("write project state");
 }

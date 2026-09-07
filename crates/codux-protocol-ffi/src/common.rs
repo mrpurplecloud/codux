@@ -142,11 +142,7 @@ pub(crate) fn controller_transport_config_from_json(
 ) -> Result<RemoteControllerTransportConfig, String> {
     let value = serde_json::from_str::<serde_json::Value>(config_json)
         .map_err(|error| error.to_string())?;
-    // Read before filtering: a candidate with no relay and no ticket is still
-    // dialable when we have an address we reached this host on, so the filter
-    // below cannot judge one without knowing whether any exist.
     let direct_addrs = json_string_array_field(&value, "directAddrs");
-    let has_remembered_addrs = !direct_addrs.is_empty();
     let transports = value
         .get("transports")
         .and_then(serde_json::Value::as_array)
@@ -185,18 +181,6 @@ pub(crate) fn controller_transport_config_from_json(
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or_default()
                         .to_string(),
-                })
-                // Same rule the dial path applies, from the same definition, so
-                // a candidate cannot survive this filter only to be rejected
-                // later — or be dropped here while the dialer would have used it.
-                .filter(|candidate| {
-                    codux_remote_transport::is_dialable_iroh_transport(
-                        &candidate.kind,
-                        &candidate.ticket,
-                        &candidate.node_id,
-                        &candidate.relay_url,
-                        has_remembered_addrs,
-                    )
                 })
                 .collect::<Vec<_>>()
         })

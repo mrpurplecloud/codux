@@ -31,7 +31,7 @@ Three defects compound into a total, self-perpetuating outage.
 
 ### Relay becomes a signal, not a gate
 
-Endpoint acquisition still waits for relay registration, but the wait's result becomes a value rather than a control-flow branch. On timeout the endpoint is retained, a `relay_online: false` marker is recorded alongside it in the pool, and the caller proceeds to dial. The endpoint keeps its own relay reconnection running, so a relay that recovers later brings the pooled endpoint online without a rebuild.
+Endpoint acquisition still waits for relay registration, but the wait's result becomes a value rather than a control-flow branch. On timeout the endpoint is retained and the caller proceeds to dial. The endpoint keeps its own relay reconnection running, so dial policy reads its current relay home at dial time; no pooled startup marker can drift from live state.
 
 The same change applies to the host transport, with one addition: the host currently requires a resolvable relay URL to publish a transport candidate at all. A host without a relay home SHALL still publish a candidate, carrying its ticket and an empty relay URL. The ticket alone is sufficient for a controller on a shared network to dial it.
 

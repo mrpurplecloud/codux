@@ -3,6 +3,13 @@ use codux_memory::{
     MemoryConfig, MemoryManagementRequest, MemoryProjectInfo, MemoryProjectRecord, MemoryService,
 };
 
+struct RemoteMemoryExtraction {
+    service: MemoryService,
+    config: MemoryConfig,
+    projects: Vec<MemoryProjectRecord>,
+    output_locale: String,
+}
+
 impl RemoteHostRuntime {
     pub(super) fn handle_memory_read(&self, envelope: &RemoteEnvelope) {
         match memory_read_payload(&self.support_dir, &envelope.payload) {
@@ -12,13 +19,26 @@ impl RemoteHostRuntime {
     }
 
     pub(super) fn handle_memory_extract(self: &Arc<Self>, envelope: &RemoteEnvelope) {
+        let Some(owner) = self.current_callback_owner() else {
+            return;
+        };
+        let extraction = match prepare_memory_extraction(&self.support_dir, &envelope.payload) {
+            Ok(extraction) => extraction,
+            Err(error) => {
+                self.send_error(envelope, &error);
+                return;
+            }
+        };
         let runtime = Arc::clone(self);
         let envelope = envelope.clone();
         crate::async_runtime::spawn(async move {
-            match memory_extract_payload(&runtime.support_dir, &envelope.payload).await {
+            // Enqueue above is the durable ownership handoff. Queue processing
+            // may outlive this transport; only its reply still belongs to it.
+            let result = process_memory_extraction(extraction).await;
+            let _ = owner.run(|| match result {
                 Ok(payload) => runtime.reply(&envelope, REMOTE_MEMORY_RESULT, payload),
                 Err(error) => runtime.send_error(&envelope, &error),
-            }
+            });
         });
     }
 }
@@ -107,7 +127,10 @@ fn memory_read_payload(support_dir: &Path, payload: &Value) -> Result<Value, Str
     Ok(json!({ "op": op, "result": result }))
 }
 
-async fn memory_extract_payload(support_dir: &Path, payload: &Value) -> Result<Value, String> {
+fn prepare_memory_extraction(
+    support_dir: &Path,
+    payload: &Value,
+) -> Result<RemoteMemoryExtraction, String> {
     let config = payload
         .get("config")
         .cloned()
@@ -128,14 +151,25 @@ async fn memory_extract_payload(support_dir: &Path, payload: &Value) -> Result<V
         &[],
         &history_sessions,
     )?;
-    let result = service
+    Ok(RemoteMemoryExtraction {
+        service,
+        config,
+        projects,
+        output_locale: payload
+            .get("outputLocale")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+async fn process_memory_extraction(extraction: RemoteMemoryExtraction) -> Result<Value, String> {
+    let result = extraction
+        .service
         .process_memory_extraction_queue(
-            &config,
-            &projects,
-            payload
-                .get("outputLocale")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
+            &extraction.config,
+            &extraction.projects,
+            &extraction.output_locale,
         )
         .await
         .and_then(|status| serde_json::to_value(status).map_err(|error| error.to_string()))?;

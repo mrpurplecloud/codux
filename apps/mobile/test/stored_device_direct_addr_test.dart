@@ -1,5 +1,5 @@
 import 'package:codux_flutter/models/remote_models.dart';
-import 'package:codux_flutter/services/remote_device_controller.dart';
+import 'package:codux_flutter/services/device_snapshot_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 StoredDevice device({List<String> directAddrs = const []}) => StoredDevice(
@@ -97,24 +97,30 @@ void main() {
 
       expect(restored.directAddrs, isEmpty);
     });
+
+    test('stored addresses are validated and normalized at the boundary', () {
+      final restored = StoredDevice.fromJson({
+        'hostId': 'host-1',
+        'deviceId': 'device-1',
+        'token': 't',
+        'name': 'Phone',
+        'directAddrs': [' a:1 ', 42, '', 'b:2', 'a:1', 'c:3', 'd:4'],
+      });
+
+      expect(restored.directAddrs, ['a:1', 'b:2', 'c:3']);
+    });
   });
 
-  group('RemoteDeviceController.rememberDirectAddr', () {
-    const controller = RemoteDeviceController();
-
-    test('updates the matching device and the active reference', () {
+  group('DeviceDirectAddrRemembered', () {
+    test('updates the matching device', () {
       final devices = [device()];
 
-      final result = controller.rememberDirectAddr(
-        devices: devices,
-        activeDevice: devices.first,
-        deviceId: 'device-1',
-        addr: '10.8.0.3:41234',
-      );
+      final result = const DeviceDirectAddrRemembered(
+        'device-1',
+        '10.8.0.3:41234',
+      ).applyTo(devices);
 
-      expect(result.updatedDevice?.directAddrs, ['10.8.0.3:41234']);
-      expect(result.state.activeDevice?.directAddrs, ['10.8.0.3:41234']);
-      expect(result.state.devices.first.directAddrs, ['10.8.0.3:41234']);
+      expect(result.single.directAddrs, ['10.8.0.3:41234']);
     });
 
     test('reports no update when the address is already the most recent', () {
@@ -122,16 +128,14 @@ void main() {
         device(directAddrs: ['10.8.0.3:41234']),
       ];
 
-      final result = controller.rememberDirectAddr(
-        devices: devices,
-        activeDevice: devices.first,
-        deviceId: 'device-1',
-        addr: '10.8.0.3:41234',
-      );
+      final result = const DeviceDirectAddrRemembered(
+        'device-1',
+        '10.8.0.3:41234',
+      ).applyTo(devices);
 
       expect(
-        result.updatedDevice,
-        isNull,
+        result,
+        same(devices),
         reason: 'an unchanged device must not trigger a disk write',
       );
     });
@@ -139,15 +143,13 @@ void main() {
     test('reports no update for an unknown device', () {
       final devices = [device()];
 
-      final result = controller.rememberDirectAddr(
-        devices: devices,
-        activeDevice: devices.first,
-        deviceId: 'someone-else',
-        addr: '10.8.0.3:41234',
-      );
+      final result = const DeviceDirectAddrRemembered(
+        'someone-else',
+        '10.8.0.3:41234',
+      ).applyTo(devices);
 
-      expect(result.updatedDevice, isNull);
-      expect(result.state.devices.first.directAddrs, isEmpty);
+      expect(result, same(devices));
+      expect(result.single.directAddrs, isEmpty);
     });
   });
 }

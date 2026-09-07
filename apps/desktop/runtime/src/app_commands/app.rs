@@ -77,17 +77,6 @@ pub fn localized_save_dialog(
 ) -> Result<Option<String>, String> {
     crate::dialog::localized_save_dialog(request)
 }
-pub fn app_settings_get(store: &AppSettingsStore) -> AppSettings {
-    store.snapshot()
-}
-pub fn app_settings_set(
-    store: &AppSettingsStore,
-    settings: AppSettings,
-) -> Result<AppSettings, String> {
-    let next = store.replace(settings)?;
-    sync_process_locale_preference(&next);
-    Ok(next)
-}
 pub fn i18n_bundle_get() -> crate::i18n::I18nBundle {
     crate::i18n::i18n_bundle()
 }
@@ -165,18 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_i18n_and_performance_commands_match_tauri_facade_shape() {
-        let support_dir =
-            std::env::temp_dir().join(format!("codux-app-command-settings-{}", Uuid::new_v4()));
-        let store = AppSettingsStore::from_support_dir(support_dir.clone());
-        let mut settings = app_settings_get(&store);
-        settings.language = "en".to_string();
-        settings.theme = "dark".to_string();
-
-        let saved = app_settings_set(&store, settings).expect("save settings");
-        assert_eq!(saved.language, "en");
-        assert_eq!(store.reload_snapshot().theme, "dark");
-
+    fn i18n_and_performance_commands_match_tauri_facade_shape() {
         let bundle = i18n_bundle_get();
         assert_eq!(bundle.source_language, "en");
         assert!(bundle.locales.iter().any(|locale| locale == "zh-Hans"));
@@ -185,8 +163,6 @@ mod tests {
         let snapshot = performance_snapshot(&PerformanceMonitor::default());
         assert!(snapshot.cpu_percent >= 0.0);
         assert!(snapshot.memory_bytes >= snapshot.memory.main_bytes);
-
-        let _ = std::fs::remove_dir_all(support_dir);
     }
 
     #[test]

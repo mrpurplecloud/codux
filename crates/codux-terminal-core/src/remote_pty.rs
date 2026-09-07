@@ -209,6 +209,26 @@ impl<T> RemotePtySession<T> {
         replay
     }
 
+    /// Reconcile only the live grid from a host keyframe. Raw cache, complete
+    /// screen history, scroll position, and absolute buffer watermark keep
+    /// their existing ownership; a keyframe describes none of them.
+    pub fn reconcile_visible_keyframe(
+        &mut self,
+        screen_data: &str,
+        screen_wrapped_rows: Option<&[bool]>,
+        sequence: Option<TerminalSequence>,
+    ) {
+        self.history_screen
+            .replace_visible_with_keyframe(screen_data.as_bytes());
+        if let Some(wrapped_rows) = screen_wrapped_rows {
+            self.history_screen
+                .restore_visible_wrapped_rows(wrapped_rows);
+        }
+        if let Some(sequence) = sequence {
+            self.sequence = sequence;
+        }
+    }
+
     pub fn complete_empty_baseline(&mut self, sequence: Option<TerminalSequence>) -> Vec<T> {
         let base_sequence = sequence.unwrap_or(self.sequence);
         self.sequence = base_sequence;

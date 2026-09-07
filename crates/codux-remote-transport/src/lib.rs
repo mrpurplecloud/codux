@@ -17,8 +17,8 @@ mod url_rules;
 mod web_tunnel;
 
 pub use iroh_link::{
-    CODUX_REMOTE_ALPN, RemoteIrohControllerTransport, RemoteIrohHostTransport,
-    is_dialable_iroh_transport,
+    CODUX_REMOTE_ALPN, IrohDialTarget, RemoteIrohControllerTransport, RemoteIrohHostTransport,
+    build_iroh_dial_target,
 };
 pub use local_memory::{LocalMemoryTransport, LocalMemoryTransportHub};
 pub use web_tunnel::{
@@ -34,8 +34,12 @@ pub use url_rules::{
 };
 
 pub type RemoteTransportMessageHandler = Arc<dyn Fn(String, Vec<u8>) + Send + Sync + 'static>;
-pub type RemoteTransportUploadHandler =
-    Arc<dyn Fn(RemoteTransportUpload) -> Result<(), String> + Send + Sync + 'static>;
+pub type RemoteTransportUploadHandler = Arc<
+    dyn Fn(RemoteTransportUpload) -> Result<RemoteTransportUploadOutcome, String>
+        + Send
+        + Sync
+        + 'static,
+>;
 pub type RemoteTransportStateHandler = Arc<dyn Fn(String, String) + Send + Sync + 'static>;
 pub type RemoteTransportPairingHandler =
     Arc<dyn Fn(RemoteTransportPairingRequest) -> Option<serde_json::Value> + Send + Sync + 'static>;
@@ -96,10 +100,14 @@ pub trait RemoteTransport: Send + Sync {
     fn set_device_credentials(&self, _device_id: &str, _device_token: &str) -> bool {
         false
     }
-    fn iroh_candidate(&self) -> Option<(String, String)> {
-        None
-    }
-    fn iroh_endpoint_ticket(&self) -> Option<String> {
+    /// One coherent candidate from the transport's current state.
+    ///
+    /// `node_id` and `ticket` describe one known `EndpointAddr` snapshot.
+    /// Top-level `url` and `relay_url` describe a connected home relay; a known
+    /// but still-connecting relay may remain in the ticket without being
+    /// advertised as live. Callers consume this whole value rather than cache
+    /// or recompose its fields.
+    fn current_dial_candidate(&self) -> Option<RemoteTransportCandidate> {
         None
     }
     /// Add bytes to the local blob store and return a shareable ticket; the peer
@@ -124,15 +132,23 @@ pub trait RemoteTransport: Send + Sync {
     async fn shutdown(&self);
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteTransportUpload {
     pub device_id: String,
     pub session_id: String,
+    pub request_id: Option<String>,
     pub name: String,
     pub mime: String,
     pub kind: String,
     pub bytes: Vec<u8>,
     pub ticket: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteTransportUploadOutcome {
+    pub path: String,
+    pub name: String,
+    pub kind: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

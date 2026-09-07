@@ -6,6 +6,9 @@ import 'package:codux_flutter/services/remote_protocol.dart';
 import 'package:codux_flutter/services/remote_transport.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+const _endpointId =
+    'd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a';
+
 void main() {
   test('factory creates unified Rust controller transport', () {
     final transport = createRemoteTransport(
@@ -19,7 +22,7 @@ void main() {
           RemoteTransportCandidate(
             kind: RemoteTransportKind.iroh,
             url: 'https://relay.example',
-            nodeId: 'node-1',
+            nodeId: _endpointId,
             relayUrl: 'https://relay.example',
           ),
         ],
@@ -52,7 +55,7 @@ void main() {
           RemoteTransportCandidate(
             kind: RemoteTransportKind.iroh,
             url: 'https://relay.example',
-            nodeId: 'node-1',
+            nodeId: _endpointId,
             relayUrl: 'https://relay.example',
             relayAuthentication: 'relay-token',
           ),
@@ -65,13 +68,43 @@ void main() {
       {
         'kind': RemoteTransportKind.iroh,
         'url': 'https://relay.example',
-        'nodeId': 'node-1',
+        'nodeId': _endpointId,
         'relayUrl': 'https://relay.example',
         'relayAuthentication': 'relay-token',
       },
     ]);
     expect(seenConfigs.single.containsKey('stunUrls'), isFalse);
     await transport.close();
+  });
+
+  test('controller config keeps remembered addresses outside transports', () {
+    final config = controllerTransportConfig(
+      _storedDevice().copyWith(directAddrs: const ['10.8.0.3:41234']),
+    );
+
+    expect(config['directAddrs'], ['10.8.0.3:41234']);
+    expect(
+      (config['transports'] as List).single,
+      isNot(contains('directAddrs')),
+    );
+  });
+
+  test('remembered address makes a relay-less reported candidate dialable', () {
+    final device = _storedDevice().copyWith(
+      transports: const [
+        RemoteTransportCandidate(
+          kind: RemoteTransportKind.iroh,
+          nodeId: _endpointId,
+        ),
+      ],
+      directAddrs: const ['10.8.0.3:41234'],
+    );
+
+    expect(hasDialableControllerTransport(device), isTrue);
+    expect(
+      hasDialableControllerTransport(device.copyWith(directAddrs: const [])),
+      isFalse,
+    );
   });
 
   test('connect waits for native connected state before returning', () async {
@@ -140,7 +173,7 @@ void main() {
           RemoteTransportCandidate(
             kind: RemoteTransportKind.iroh,
             url: 'https://relay.example',
-            nodeId: 'node-1',
+            nodeId: _endpointId,
             relayUrl: 'https://relay.example',
           ),
         ],
@@ -263,9 +296,10 @@ void main() {
     );
 
     await transport.connect(_storedDevice());
-    final sent = await transport.sendTerminalUpload(
+    final sent = transport.sendTerminalUpload(
       deviceId: 'device-1',
       sessionId: 'session-1',
+      requestId: 'upload-request-1',
       name: 'photo.png',
       mime: 'image/png',
       kind: 'image',
@@ -275,6 +309,7 @@ void main() {
     expect(sent, isTrue);
     expect(handle.uploads, hasLength(1));
     expect(handle.uploads.single['sessionId'], 'session-1');
+    expect(handle.uploads.single['requestId'], 'upload-request-1');
     expect(handle.uploads.single['name'], 'photo.png');
     expect(handle.uploads.single['bytes'], [1, 2, 3]);
     await transport.close();
@@ -291,7 +326,7 @@ StoredDevice _storedDevice() => const StoredDevice(
     RemoteTransportCandidate(
       kind: RemoteTransportKind.iroh,
       url: 'https://relay.example',
-      nodeId: 'node-1',
+      nodeId: _endpointId,
       relayUrl: 'https://relay.example',
     ),
   ],
@@ -337,6 +372,7 @@ final class _FakeControllerHandle implements ControllerTransportEventHandle {
   bool sendTerminalUpload({
     required String deviceId,
     required String sessionId,
+    required String requestId,
     required String name,
     required String mime,
     required String kind,
@@ -345,6 +381,7 @@ final class _FakeControllerHandle implements ControllerTransportEventHandle {
     uploads.add({
       'deviceId': deviceId,
       'sessionId': sessionId,
+      'requestId': requestId,
       'name': name,
       'mime': mime,
       'kind': kind,

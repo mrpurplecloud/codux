@@ -5,9 +5,7 @@ fn memory_read_error_reply_preserves_request_id() {
     let support_dir = temp_support_dir("codux-remote-memory-error");
     let runtime = RemoteHostRuntime::new(support_dir.clone());
     let transport = Arc::new(CapturingTransport::default());
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(transport.clone());
-    }
+    runtime.set_transport_for_test(transport.clone());
 
     runtime.handle_memory_read(&RemoteEnvelope {
         kind: REMOTE_MEMORY_READ.to_string(),

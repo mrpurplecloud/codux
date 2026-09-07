@@ -172,9 +172,14 @@ class RemoteProjectController {
   /// Ask the host for the resume command that re-opens a session in its CLI tool
   /// (e.g. `claude --resume <id>`). Host replies with op `restore`; we write the
   /// returned command into the active terminal.
-  RelayEnvelope aiSessionRestoreEnvelope(ProjectInfo project, String sessionId) {
+  RelayEnvelope aiSessionRestoreEnvelope(
+    ProjectInfo project,
+    String sessionId, {
+    required String requestId,
+  }) {
     return RelayEnvelope(
       type: RemoteMessageType.aiSession,
+      requestId: requestId,
       payload: {
         'op': 'restore',
         'projectId': project.id,

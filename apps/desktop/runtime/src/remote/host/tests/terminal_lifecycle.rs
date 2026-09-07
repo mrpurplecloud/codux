@@ -666,10 +666,8 @@ fn device_transport_disconnect_keeps_viewport_until_lease_expires() {
         Default::default(),
         Arc::clone(&terminals),
     ));
-    runtime.connection_generation.store(7, Ordering::SeqCst);
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(Arc::new(CapturingTransport::default()));
-    }
+    let start =
+        runtime.set_transport_lifecycle_for_test(7, Arc::new(CapturingTransport::default()));
     let session_id = terminals
         .create(
             TerminalPtyConfig {
@@ -687,7 +685,7 @@ fn device_transport_disconnect_keeps_viewport_until_lease_expires() {
         .claim_viewport(&session_id, "remote:device-1")
         .expect("remote claim");
 
-    runtime.handle_transport_state(7, "device-1".to_string(), "disconnected".to_string());
+    runtime.handle_transport_state(start, "device-1".to_string(), "disconnected".to_string());
 
     let state = terminals
         .viewport_state(&session_id)
@@ -713,10 +711,8 @@ fn host_transport_disconnect_releases_remote_terminal_viewports() {
         Default::default(),
         Arc::clone(&terminals),
     ));
-    runtime.connection_generation.store(7, Ordering::SeqCst);
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(Arc::new(CapturingTransport::default()));
-    }
+    let start =
+        runtime.set_transport_lifecycle_for_test(7, Arc::new(CapturingTransport::default()));
     let session_id = terminals
         .create(
             TerminalPtyConfig {
@@ -734,7 +730,7 @@ fn host_transport_disconnect_releases_remote_terminal_viewports() {
         .claim_viewport(&session_id, "remote:device-1")
         .expect("remote claim");
 
-    runtime.handle_transport_state(7, String::new(), "closed".to_string());
+    runtime.handle_transport_state(start, String::new(), "closed".to_string());
 
     let state = terminals
         .viewport_state(&session_id)

@@ -3,7 +3,8 @@ use crate::{
     RemoteTransport, RemoteTransportAuthorizationHandler, RemoteTransportCandidate,
     RemoteTransportLogHandler, RemoteTransportMessageHandler, RemoteTransportPairingHandler,
     RemoteTransportStateHandler, RemoteTransportUpload, RemoteTransportUploadHandler,
-    WebTunnelIoStream, WebTunnelResponse, WebTunnelTcpConnectHandler, WebTunnelTcpConnectRequest,
+    RemoteTransportUploadOutcome, WebTunnelIoStream, WebTunnelResponse, WebTunnelTcpConnectHandler,
+    WebTunnelTcpConnectRequest,
     web_tunnel::{
         CODUX_WEB_TUNNEL_ALPN, WEB_TUNNEL_KIND_TCP_CONNECT, WebTunnelHeader,
         WebTunnelRequestEnvelope, WebTunnelResponseEnvelope,
@@ -15,7 +16,7 @@ use codux_protocol::{
 };
 use futures_util::StreamExt;
 use iroh::{
-    Endpoint, EndpointAddr, RelayMap, RelayMode, RelayUrl, SecretKey, TransportAddr,
+    Endpoint, EndpointAddr, RelayMap, RelayMode, RelayUrl, SecretKey, TransportAddr, Watcher,
     endpoint::{Connection, PathEvent, RecvStream, SendStream, presets},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
@@ -115,11 +116,15 @@ struct DialSchedule {
 /// tried. Without the distinction a relay-less failure reads as a plain timeout,
 /// hiding the one fact that explains it: there was no relay, so only the direct
 /// addresses could have worked, and none did.
-fn dial_exhausted_error(relay_online: bool) -> String {
-    if relay_online {
-        "iroh controller connect timeout".to_string()
+fn dial_exhausted_error(relay_online: bool, last_cause: Option<&str>) -> String {
+    let class = if relay_online {
+        "iroh controller connect timeout"
     } else {
-        "iroh controller connect timeout: no relay home, direct addresses unreachable".to_string()
+        "iroh controller connect timeout: no relay home, direct addresses unreachable"
+    };
+    match last_cause.map(str::trim).filter(|cause| !cause.is_empty()) {
+        Some(cause) => format!("{class}: {cause}"),
+        None => class.to_string(),
     }
 }
 
@@ -170,6 +175,23 @@ struct PeerSenders {
     closed: Arc<AtomicBool>,
 }
 
+#[derive(Clone)]
+struct TerminalUploadReply {
+    device_id: String,
+    session_id: String,
+    request_id: Option<String>,
+}
+
+impl From<&RemoteTransportUpload> for TerminalUploadReply {
+    fn from(upload: &RemoteTransportUpload) -> Self {
+        Self {
+            device_id: upload.device_id.clone(),
+            session_id: upload.session_id.clone(),
+            request_id: upload.request_id.clone(),
+        }
+    }
+}
+
 /// Holds one connection's streams until both outbound queues have real writers.
 /// Publishing a peer before this pair is complete lets `send_terminal` report
 /// success while its receiver still sits unread in the accept loop.
@@ -213,8 +235,9 @@ impl<T> PendingPeerStreams<T> {
 pub struct RemoteIrohHostTransport {
     endpoint: Endpoint,
     blob_store: MemStore,
-    node_id: String,
-    relay_url: String,
+    /// Serializes peer replacement with pairing's durable side effect and
+    /// response publication. A generation check cannot protect that interval.
+    peer_ownership: Mutex<()>,
     peers: Mutex<HashMap<String, PeerSenders>>,
     on_message: RemoteTransportMessageHandler,
     on_upload: RemoteTransportUploadHandler,
@@ -299,29 +322,22 @@ impl RemoteIrohHostTransport {
         // addresses, and a controller on the same LAN or SD-WAN network dials
         // those with no relay involved. Failing startup here would take the host
         // down for every controller, including the ones already one hop away.
-        let relay_online = tokio::time::timeout(IROH_ONLINE_TIMEOUT, endpoint.online())
-            .await
-            .is_ok();
-        // Empty when we have no relay at all. The published candidate then
-        // carries only the ticket, which `is_dialable_iroh_candidate` accepts.
-        let relay_url = endpoint
-            .addr()
-            .relay_urls()
-            .next()
-            .cloned()
-            .or(configured_relay_url)
-            .map(|url| url.to_string())
-            .unwrap_or_default();
+        let _ = tokio::time::timeout(IROH_ONLINE_TIMEOUT, endpoint.online()).await;
+        // Only the endpoint can say whether the configured relay became a live
+        // route. Configuration is intent, not reachability: advertising it as
+        // live would let the QR serializer discard the direct-address ticket.
+        let live_relay = connected_relay_url(&endpoint);
+        let relay_online = live_relay.is_some();
+        let live_relay_url = live_relay.map(|url| url.to_string()).unwrap_or_default();
         log_transport(
             &on_log,
-            format!("iroh_host online={relay_online} relay={relay_url}"),
+            format!("iroh_host online={relay_online} relay={live_relay_url}"),
         );
         let blob_store = new_blob_store();
         let transport = Arc::new(Self {
-            node_id: endpoint.id().to_string(),
             endpoint,
             blob_store: blob_store.clone(),
-            relay_url,
+            peer_ownership: Mutex::new(()),
             peers: Mutex::new(HashMap::new()),
             on_message,
             on_upload,
@@ -356,14 +372,6 @@ impl RemoteIrohHostTransport {
         let _ = transport.router.set(router);
         Ok(transport)
     }
-
-    // No `relay_url()` getter on purpose. `self.relay_url` is the bind-time
-    // value and goes stale the moment iroh acquires a relay home, so handing it
-    // out invites exactly the defect `iroh_candidate` was fixed for — a caller
-    // publishing an address that disagrees with the endpoint. Ask
-    // `iroh_candidate()` instead; it reads the endpoint live. (A `node_id()`
-    // getter went the same way: unused, and `iroh_candidate()` already returns
-    // it alongside the relay it belongs with.)
 
     async fn handle_connection(self: Arc<Self>, connection: Connection) {
         let peer_key = connection.remote_id().to_string();
@@ -711,18 +719,54 @@ impl RemoteIrohHostTransport {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or(fallback_device_id);
         if raw.kind == codux_protocol::REMOTE_PAIRING_REQUEST {
+            let response_permit = match senders.control.try_reserve() {
+                Ok(permit) => permit,
+                Err(error) => {
+                    self.log(format!(
+                        "iroh_host_recv drop peer={peer_key} reason=pairing_response_unavailable error={error}"
+                    ));
+                    senders
+                        .connection
+                        .close(0u32.into(), b"pairing response unavailable");
+                    return;
+                }
+            };
+            let Ok(_ownership) = self.peer_ownership.lock() else {
+                self.log(format!(
+                    "iroh_host_recv drop peer={peer_key} reason=peer_ownership_unavailable"
+                ));
+                return;
+            };
+            if senders.closed.load(Ordering::SeqCst) || !self.peer_is_current(peer_key, senders.id)
+            {
+                self.log(format!(
+                    "iroh_host_recv drop peer={peer_key} reason=stale_pairing_connection"
+                ));
+                return;
+            }
             let handshake = crate::control_messages::pairing_handshake_from_envelope(&raw);
             let pairing_device_id = handshake
                 .as_ref()
                 .map(|handshake| handshake.device_id.clone());
+            let candidate_device_id = pairing_device_id.as_deref().unwrap_or(&device_id);
+            if !candidate_device_id.trim().is_empty()
+                && !self.peer_can_bind_alias_under_ownership(peer_key, candidate_device_id, senders)
+            {
+                self.log(format!(
+                    "iroh_host_recv drop peer={peer_key} reason=stale_pairing_connection"
+                ));
+                return;
+            }
             let response_payload = handshake.and_then(|handshake| (self.on_pairing)(handshake));
             let Some(response_payload) = response_payload else {
-                self.send_transport_rejection(senders, &raw, true);
+                if let Some(response) = transport_rejection_data(&raw, true) {
+                    response_permit.send(response);
+                }
                 return;
             };
             let pairing_device_id = pairing_device_id.unwrap_or(device_id);
             if !pairing_device_id.trim().is_empty() {
-                if !self.bind_peer_alias(peer_key, &pairing_device_id, senders) {
+                if !self.bind_peer_alias_under_ownership(peer_key, &pairing_device_id, senders) {
                     self.log(format!(
                         "iroh_host_recv drop peer={peer_key} reason=stale_pairing_connection"
                     ));
@@ -739,7 +783,7 @@ impl RemoteIrohHostTransport {
                 response["requestId"] = serde_json::Value::String(request_id.to_string());
             }
             if let Ok(response) = serde_json::to_vec(&response) {
-                let _ = senders.control.try_send(response);
+                response_permit.send(response);
             }
             return;
         }
@@ -763,26 +807,38 @@ impl RemoteIrohHostTransport {
             return;
         }
         if raw.kind == REMOTE_TERMINAL_UPLOAD_BLOB {
-            let upload = upload_metadata_from_blob_envelope(&raw, &device_id);
+            let reply = TerminalUploadReply {
+                device_id: device_id.clone(),
+                session_id: raw.session_id.clone().unwrap_or_default(),
+                request_id: raw
+                    .request_id
+                    .clone()
+                    .filter(|request_id| !request_id.trim().is_empty()),
+            };
+            let reply_sender = senders.control.clone();
+            let upload = match upload_metadata_from_blob_envelope(&raw, &device_id) {
+                Ok(upload) => upload,
+                Err(error) => {
+                    self.log(format!("iroh_host_blob_upload rejected error={error}"));
+                    let on_log = self.on_log.clone();
+                    tokio::spawn(async move {
+                        publish_terminal_upload_reply(reply_sender, reply, Err(error), on_log)
+                            .await;
+                    });
+                    return;
+                }
+            };
             let endpoint = self.endpoint.clone();
             let blob_store = self.blob_store.clone();
             let on_upload = Arc::clone(&self.on_upload);
             let on_log = self.on_log.clone();
             tokio::spawn(async move {
-                match download_terminal_upload_blob(&blob_store, &endpoint, upload).await {
-                    Ok(upload) => {
-                        if let Err(error) = on_upload(upload)
-                            && let Some(on_log) = on_log.as_ref()
-                        {
-                            on_log(format!("iroh_host_blob_upload failed error={error}"));
-                        }
-                    }
-                    Err(error) => {
-                        if let Some(on_log) = on_log.as_ref() {
-                            on_log(format!("iroh_host_blob_download failed error={error}"));
-                        }
-                    }
-                }
+                let result =
+                    match download_terminal_upload_blob(&blob_store, &endpoint, upload).await {
+                        Ok(upload) => on_upload(upload),
+                        Err(error) => Err(error),
+                    };
+                publish_terminal_upload_reply(reply_sender, reply, result, on_log).await;
             });
             return;
         }
@@ -795,36 +851,15 @@ impl RemoteIrohHostTransport {
         request: &RemoteEnvelope,
         pairing: bool,
     ) {
-        let (kind, payload) = if pairing {
-            (
-                codux_protocol::REMOTE_PAIRING_REJECTED,
-                serde_json::json!({ "reason": "pairing_invalid" }),
-            )
-        } else {
-            (
-                codux_protocol::REMOTE_ERROR,
-                serde_json::json!({
-                    "code": "device_unauthorized",
-                    "message": "This device is no longer authorized. Please pair it again."
-                }),
-            )
-        };
-        let mut envelope = serde_json::json!({
-            "type": kind,
-            "payload": payload,
-        });
-        if let Some(device_id) = request.device_id.as_deref() {
-            envelope["deviceId"] = serde_json::json!(device_id);
-        }
-        if let Some(request_id) = request.request_id.as_deref() {
-            envelope["requestId"] = serde_json::json!(request_id);
-        }
-        if let Ok(data) = serde_json::to_vec(&envelope) {
+        if let Some(data) = transport_rejection_data(request, pairing) {
             let _ = senders.control.try_send(data);
         }
     }
 
     fn insert_peer(&self, peer_key: String, senders: PeerSenders) -> bool {
+        let Ok(_ownership) = self.peer_ownership.lock() else {
+            return false;
+        };
         let replaced = {
             let Ok(mut peers) = self.peers.lock() else {
                 return false;
@@ -855,6 +890,36 @@ impl RemoteIrohHostTransport {
     }
 
     fn bind_peer_alias(&self, peer_key: &str, device_id: &str, senders: &PeerSenders) -> bool {
+        let Ok(_ownership) = self.peer_ownership.lock() else {
+            return false;
+        };
+        self.bind_peer_alias_under_ownership(peer_key, device_id, senders)
+    }
+
+    fn peer_can_bind_alias_under_ownership(
+        &self,
+        peer_key: &str,
+        device_id: &str,
+        senders: &PeerSenders,
+    ) -> bool {
+        let Ok(peers) = self.peers.lock() else {
+            return false;
+        };
+        !senders.closed.load(Ordering::SeqCst)
+            && peers.get(peer_key).map(|peer| peer.id) == Some(senders.id)
+            && !peers
+                .get(device_id)
+                .is_some_and(|current| current.id > senders.id)
+    }
+
+    /// Caller holds `peer_ownership`, so the current-owner check, alias commit,
+    /// and any surrounding side effect form one transaction.
+    fn bind_peer_alias_under_ownership(
+        &self,
+        peer_key: &str,
+        device_id: &str,
+        senders: &PeerSenders,
+    ) -> bool {
         let replaced = {
             let Ok(mut peers) = self.peers.lock() else {
                 return false;
@@ -937,6 +1002,10 @@ impl RemoteIrohHostTransport {
         closed: &Arc<AtomicBool>,
         connection: &Connection,
     ) {
+        let Ok(_ownership) = self.peer_ownership.lock() else {
+            connection.close(0u32.into(), b"peer ownership unavailable");
+            return;
+        };
         if closed.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -986,6 +1055,97 @@ impl RemoteIrohHostTransport {
     }
 }
 
+fn transport_rejection_data(request: &RemoteEnvelope, pairing: bool) -> Option<Vec<u8>> {
+    let (kind, payload) = if pairing {
+        (
+            codux_protocol::REMOTE_PAIRING_REJECTED,
+            serde_json::json!({ "reason": "pairing_invalid" }),
+        )
+    } else {
+        (
+            codux_protocol::REMOTE_ERROR,
+            serde_json::json!({
+                "code": "device_unauthorized",
+                "message": "This device is no longer authorized. Please pair it again."
+            }),
+        )
+    };
+    let mut envelope = serde_json::json!({
+        "type": kind,
+        "payload": payload,
+    });
+    if let Some(device_id) = request.device_id.as_deref() {
+        envelope["deviceId"] = serde_json::json!(device_id);
+    }
+    if let Some(request_id) = request.request_id.as_deref() {
+        envelope["requestId"] = serde_json::json!(request_id);
+    }
+    serde_json::to_vec(&envelope).ok()
+}
+
+fn terminal_upload_reply_data(
+    reply: &TerminalUploadReply,
+    result: &Result<RemoteTransportUploadOutcome, String>,
+) -> Option<Vec<u8>> {
+    let (kind, payload) = match result {
+        Ok(outcome) => (
+            codux_protocol::REMOTE_TERMINAL_UPLOADED,
+            serde_json::json!({
+                "path": outcome.path,
+                "name": outcome.name,
+                "kind": outcome.kind,
+                "mode": "path",
+                "tool": serde_json::Value::Null,
+                "inserted": true,
+            }),
+        ),
+        Err(error) => (
+            codux_protocol::REMOTE_ERROR,
+            serde_json::json!({
+                "code": "terminal_upload_failed",
+                "message": error,
+            }),
+        ),
+    };
+    let mut envelope = serde_json::json!({
+        "type": kind,
+        "deviceId": reply.device_id,
+        "sessionId": reply.session_id,
+        "payload": payload,
+    });
+    if let Some(request_id) = reply.request_id.as_deref() {
+        envelope["requestId"] = serde_json::json!(request_id);
+    }
+    serde_json::to_vec(&envelope).ok()
+}
+
+async fn publish_terminal_upload_reply(
+    sender: IrohSender,
+    reply: TerminalUploadReply,
+    result: Result<RemoteTransportUploadOutcome, String>,
+    on_log: Option<RemoteTransportLogHandler>,
+) {
+    if let Err(error) = result.as_ref()
+        && let Some(on_log) = on_log.as_ref()
+    {
+        on_log(format!("iroh_host_blob_upload failed error={error}"));
+    }
+    let Some(data) = terminal_upload_reply_data(&reply, &result) else {
+        if let Some(on_log) = on_log.as_ref() {
+            on_log("iroh_host_blob_upload reply_encode_failed".to_string());
+        }
+        return;
+    };
+    if let Err(error) = sender.send(data).await
+        && let Some(on_log) = on_log.as_ref()
+    {
+        on_log(format!(
+            "iroh_host_blob_upload reply_failed device={} session={} error={error}",
+            reply.device_id, reply.session_id
+        ));
+    }
+}
+
 pub(crate) fn unique_senders<'a>(
     senders: impl IntoIterator<Item = &'a IrohSender>,
 ) -> Vec<IrohSender> {
@@ -1026,26 +1186,22 @@ impl RemoteTransport for RemoteIrohHostTransport {
         self.send_to_peers(data, device_id, |peer| &peer.terminal)
     }
 
-    fn iroh_candidate(&self) -> Option<(String, String)> {
-        // Read the relay live, like the ticket published beside it. `relay_url`
-        // records only what was true at bind time, and iroh keeps retrying in
-        // the background — a host that started with no reachable relay and
-        // acquired a home since would otherwise keep advertising the empty
-        // startup value, disagreeing with the ticket it ships with. Falls back
-        // to the bind-time value, which is the configured relay we could not
-        // register with, and is still worth telling a controller about.
-        let relay_url = self
-            .endpoint
-            .addr()
-            .relay_urls()
-            .next()
+    fn current_dial_candidate(&self) -> Option<RemoteTransportCandidate> {
+        // `EndpointAddr` includes a known home relay while it is still
+        // connecting. Keep that address in the full ticket, but publish a
+        // top-level relay only when the relay-status owner says it is live.
+        let addr = self.endpoint.addr();
+        let relay_url = connected_relay_url(&self.endpoint)
             .map(|url| url.to_string())
-            .unwrap_or_else(|| self.relay_url.clone());
-        Some((self.node_id.clone(), relay_url))
-    }
-
-    fn iroh_endpoint_ticket(&self) -> Option<String> {
-        Some(EndpointTicket::from(self.endpoint.addr()).to_string())
+            .unwrap_or_default();
+        Some(RemoteTransportCandidate {
+            kind: codux_protocol::REMOTE_TRANSPORT_IROH.to_string(),
+            url: relay_url.clone(),
+            node_id: addr.id.to_string(),
+            relay_url,
+            ticket: EndpointTicket::from(addr).to_string(),
+            relay_authentication: String::new(),
+        })
     }
 
     async fn publish_blob(&self, bytes: Vec<u8>) -> Result<String, String> {
@@ -1057,7 +1213,12 @@ impl RemoteTransport for RemoteIrohHostTransport {
     }
 
     async fn shutdown(&self) {
-        if let Ok(mut peers) = self.peers.lock() {
+        if let Ok(_ownership) = self.peer_ownership.lock()
+            && let Ok(mut peers) = self.peers.lock()
+        {
+            for peer in peers.values() {
+                peer.closed.store(true, Ordering::SeqCst);
+            }
             peers.clear();
         }
         if let Some(router) = self.router.get() {
@@ -1107,8 +1268,8 @@ struct SharedControllerEndpoint {
 /// this build — can't be read out of position.
 ///
 /// Deliberately carries NO relay flag. Relay state is read live off the endpoint
-/// at dial time (see [`has_relay_home`]); caching it here would let one bad start
-/// pin the schedule forever.
+/// at dial time (see [`connected_relay_url`]); caching it here would let one bad
+/// start pin the schedule forever.
 struct ControllerEndpoint {
     endpoint: Endpoint,
     blob_store: MemStore,
@@ -1140,57 +1301,7 @@ fn with_remembered_addrs(addr: EndpointAddr, remembered: &[String]) -> EndpointA
     addr.with_addrs(parsed)
 }
 
-/// Whether `candidate` carries enough for a controller to dial the host.
-///
-/// A ticket alone is enough. It serialises the host's whole `EndpointAddr`,
-/// direct addresses included, so it can be dialled with no relay anywhere in the
-/// picture — which is exactly the case for a host that came up on a LAN or an
-/// SD-WAN virtual network with no reachable relay.
-///
-/// Without a ticket there are no direct addresses to try, so both a node id and
-/// a relay to route through are required.
-///
-/// This is a contract shared by the two sides — the host must not publish a
-/// candidate the controller will discard, and the controller must not discard
-/// one the host considers usable — so it lives in one named, tested function
-/// rather than as a condition inlined at the point of use.
-fn is_dialable_iroh_candidate(
-    candidate: &RemoteTransportCandidate,
-    has_remembered_addrs: bool,
-) -> bool {
-    is_dialable_iroh_transport(
-        &candidate.kind,
-        &candidate.ticket,
-        &candidate.node_id,
-        &candidate.relay_url,
-        has_remembered_addrs,
-    )
-}
-
-/// Field-level form of [`is_dialable_iroh_candidate`], for callers holding the
-/// parts in some other struct — the desktop controller's ticket parser, for one.
-/// One definition so the two cannot drift apart on, say, whether a whitespace
-/// ticket counts.
-pub fn is_dialable_iroh_transport(
-    kind: &str,
-    ticket: &str,
-    node_id: &str,
-    relay_url: &str,
-    has_remembered_addrs: bool,
-) -> bool {
-    if kind != codux_protocol::REMOTE_TRANSPORT_IROH {
-        return false;
-    }
-    // A ticket carries identity and routes together.
-    if !ticket.trim().is_empty() {
-        return true;
-    }
-    // Otherwise we need an identity, plus at least one way to reach it — a
-    // relay, or an address this controller has already connected on.
-    !node_id.trim().is_empty() && (!relay_url.trim().is_empty() || has_remembered_addrs)
-}
-
-/// Whether `endpoint` currently has a relay home.
+/// Return one relay route that `endpoint` is currently connected to.
 ///
 /// Read live on every dial rather than captured when the endpoint was built.
 /// iroh keeps retrying the relay in the background, so an endpoint that came up
@@ -1198,8 +1309,22 @@ pub fn is_dialable_iroh_transport(
 /// for every subsequent connection. A flag captured at build time would keep
 /// dialling the relay-less schedule long after the relay came back, and would
 /// disagree with the endpoint it claims to describe.
-fn has_relay_home(endpoint: &Endpoint) -> bool {
-    endpoint.addr().relay_urls().next().is_some()
+fn connected_relay_url(endpoint: &Endpoint) -> Option<RelayUrl> {
+    select_connected_relay_url(
+        endpoint
+            .home_relay_status()
+            .get()
+            .into_iter()
+            .map(|status| (status.url().clone(), status.is_connected())),
+    )
+}
+
+fn select_connected_relay_url(
+    statuses: impl IntoIterator<Item = (RelayUrl, bool)>,
+) -> Option<RelayUrl> {
+    statuses
+        .into_iter()
+        .find_map(|(url, is_connected)| is_connected.then_some(url))
 }
 
 static SHARED_CONTROLLER_ENDPOINT: OnceLock<AsyncMutex<Option<SharedControllerEndpoint>>> =
@@ -1275,7 +1400,7 @@ async fn acquire_controller_endpoint(
         ),
     );
     // `relay_online` above records only how this build STARTED, for the log. The
-    // dial schedule reads the endpoint live instead — see `has_relay_home`.
+    // dial schedule reads the endpoint live instead — see `connected_relay_url`.
     // One blob store + Router for every transport that shares this endpoint, so
     // iroh-blobs is served by a single accept loop instead of per-transport
     // loops racing on the shared endpoint.
@@ -1316,9 +1441,8 @@ async fn acquire_controller_endpoint(
 ///   closing tears down the magicsock for EVERY clone — including the newer
 ///   connect that reused this same instance, which then fails its in-flight dial
 ///   with "Internal consistency error". Dropping the pool's reference is enough;
-///   the OS resources are reclaimed once the last clone drops. The per-connection
-///   blob-accept loops watch their own close notifier, so this doesn't strand
-///   them either.
+///   the OS resources are reclaimed once the last clone drops. Live transports
+///   retain the pooled Router, so blob serving outlives pool-entry retirement.
 async fn evict_controller_endpoint(generation: u64) {
     if let Some(cell) = SHARED_CONTROLLER_ENDPOINT.get() {
         let mut guard = cell.lock().await;
@@ -1355,6 +1479,20 @@ struct ControllerCredentials {
     device_token: String,
 }
 
+fn select_controller_dial_target(
+    config: &RemoteControllerTransportConfig,
+) -> Result<(&RemoteTransportCandidate, IrohDialTarget), String> {
+    let mut first_error = None;
+    for candidate in &config.transports {
+        match build_iroh_dial_target(candidate, &config.direct_addrs) {
+            Ok(target) => return Ok((candidate, target)),
+            Err(error) if first_error.is_none() => first_error = Some(error),
+            Err(_) => {}
+        }
+    }
+    Err(first_error.unwrap_or_else(|| "missing usable iroh transport candidate".to_string()))
+}
+
 impl RemoteIrohControllerTransport {
     pub async fn connect(
         config: &RemoteControllerTransportConfig,
@@ -1362,21 +1500,9 @@ impl RemoteIrohControllerTransport {
         on_state: RemoteTransportStateHandler,
         on_log: Option<RemoteTransportLogHandler>,
     ) -> Result<Arc<Self>, String> {
-        let candidate = config
-            .transports
-            .iter()
-            .find(|candidate| {
-                is_dialable_iroh_candidate(candidate, !config.direct_addrs.is_empty())
-            })
-            .ok_or_else(|| "missing iroh transport candidate".to_string())?;
-        // The ticket says where the host was at pairing time; the remembered
-        // addresses say where we have actually reached it since. Dial both.
-        let endpoint_addr = candidate_dial_addr(candidate, &config.direct_addrs)?;
-        let relay_url = endpoint_addr
-            .relay_urls()
-            .next()
-            .cloned()
-            .or_else(|| parse_relay_url(&candidate.relay_url).ok());
+        let (candidate, target) = select_controller_dial_target(config)?;
+        let endpoint_addr = target.endpoint_addr;
+        let relay_url = target.controller_relay_url;
         let relay_authentication = candidate.relay_authentication.trim().to_string();
         on_state(String::new(), "connecting".to_string());
         // Reuse the process-shared, already-online controller endpoint: the first
@@ -1391,8 +1517,8 @@ impl RemoteIrohControllerTransport {
         } = acquire_controller_endpoint(relay_url.as_ref(), &relay_authentication, &on_log).await?;
         // Read the relay state live off the endpoint, not from how it was built:
         // this endpoint is pooled and reused, and iroh may have acquired a relay
-        // home for it since. See `has_relay_home`.
-        let relay_online = has_relay_home(&endpoint);
+        // home for it since. See `connected_relay_url`.
+        let relay_online = connected_relay_url(&endpoint).is_some();
         // Dial with a short timeout and retry on the SAME endpoint. A relay-routed
         // first dial routinely stalls while the relay primes the cross-path (the
         // next dial then connects in ~milliseconds); re-dialling here keeps the
@@ -1407,7 +1533,7 @@ impl RemoteIrohControllerTransport {
         // RTT or not at all. See `DialSchedule`.
         let schedule = DialSchedule::for_relay_state(relay_online);
         let mut connection = None;
-        let mut last_dial_error = dial_exhausted_error(relay_online);
+        let mut last_dial_cause = None;
         for attempt in 0..schedule.attempts {
             let dial_timeout = schedule.timeout_for(attempt);
             let dial_started = std::time::Instant::now();
@@ -1430,16 +1556,17 @@ impl RemoteIrohControllerTransport {
                     break;
                 }
                 Ok(Err(error)) => {
-                    last_dial_error = format!("iroh controller connect failed: {error}");
+                    last_dial_cause = Some(format!("connect failed: {error}"));
                 }
                 Err(_) => {
-                    last_dial_error = dial_exhausted_error(relay_online);
+                    last_dial_cause = None;
                 }
             }
+            let attempt_error = dial_exhausted_error(relay_online, last_dial_cause.as_deref());
             log_transport(
                 &on_log,
                 format!(
-                    "iroh_controller dial retry attempt={} elapsed_ms={} reason={last_dial_error}",
+                    "iroh_controller dial retry attempt={} elapsed_ms={} reason={attempt_error}",
                     attempt + 1,
                     dial_started.elapsed().as_millis()
                 ),
@@ -1451,7 +1578,10 @@ impl RemoteIrohControllerTransport {
             // Generation-guarded + no-close so this late evict can't pull the rug
             // out from a newer reconnect that already reused this endpoint.
             evict_controller_endpoint(endpoint_generation).await;
-            return Err(last_dial_error);
+            return Err(dial_exhausted_error(
+                relay_online,
+                last_dial_cause.as_deref(),
+            ));
         };
         // Time the handshake on every outcome: it is the one span between "QUIC
         // is up" and "the link is usable", and the budget above can only be
@@ -1518,6 +1648,7 @@ impl RemoteIrohControllerTransport {
             upload_rx,
             upload_control_tx,
             credentials,
+            Arc::clone(&on_message),
             on_log.clone(),
         );
         let close_controller: Arc<dyn Fn() + Send + Sync + 'static> = {
@@ -1614,7 +1745,12 @@ impl RemoteTransport for RemoteIrohControllerTransport {
     }
 
     fn send_terminal_upload(&self, upload: RemoteTransportUpload) -> bool {
-        if self.closed.load(Ordering::SeqCst) {
+        if self.closed.load(Ordering::SeqCst)
+            || !upload
+                .request_id
+                .as_deref()
+                .is_some_and(|request_id| !request_id.trim().is_empty())
+        {
             return false;
         }
         self.upload_tx
@@ -1924,16 +2060,27 @@ fn spawn_upload_writer(
     mut rx: mpsc::Receiver<RemoteTransportUpload>,
     control_tx: IrohSender,
     credentials: Arc<Mutex<ControllerCredentials>>,
+    on_message: RemoteTransportMessageHandler,
     on_log: Option<RemoteTransportLogHandler>,
 ) {
     tokio::spawn(async move {
         while let Some(upload) = rx.recv().await {
+            let reply = TerminalUploadReply::from(&upload);
             if let Err(error) =
                 send_terminal_upload_blob(&blob_store, &endpoint, &control_tx, &credentials, upload)
                     .await
-                && let Some(on_log) = on_log.as_ref()
             {
-                on_log(format!("iroh_upload_blob failed error={error}"));
+                if let Some(on_log) = on_log.as_ref() {
+                    on_log(format!("iroh_upload_blob failed error={error}"));
+                }
+                let result = Err(error);
+                let Some(data) = terminal_upload_reply_data(&reply, &result) else {
+                    if let Some(on_log) = on_log.as_ref() {
+                        on_log("iroh_upload_blob error_encode_failed".to_string());
+                    }
+                    continue;
+                };
+                (on_message)(reply.device_id, data);
             }
         }
     });
@@ -1946,6 +2093,12 @@ async fn send_terminal_upload_blob(
     credentials: &Arc<Mutex<ControllerCredentials>>,
     upload: RemoteTransportUpload,
 ) -> Result<(), String> {
+    let request_id = upload
+        .request_id
+        .as_deref()
+        .filter(|request_id| !request_id.trim().is_empty())
+        .ok_or_else(|| "upload request id is required".to_string())?
+        .to_string();
     if upload.bytes.is_empty() || upload.bytes.len() > REMOTE_BLOB_MAX_BYTES {
         return Err("upload size is not supported".to_string());
     }
@@ -1960,6 +2113,7 @@ async fn send_terminal_upload_blob(
         "deviceId": credentials.device_id,
         "deviceToken": credentials.device_token,
         "sessionId": upload.session_id,
+        "requestId": request_id,
         "payload": {
             "name": upload.name,
             "mime": upload.mime,
@@ -1997,15 +2151,20 @@ fn authenticated_controller_envelope(
 fn upload_metadata_from_blob_envelope(
     envelope: &RemoteEnvelope,
     fallback_device_id: &str,
-) -> RemoteTransportUpload {
+) -> Result<RemoteTransportUpload, String> {
     let payload = &envelope.payload;
-    RemoteTransportUpload {
+    let request_id = envelope
+        .request_id
+        .clone()
+        .filter(|request_id| !request_id.trim().is_empty());
+    Ok(RemoteTransportUpload {
         device_id: envelope
             .device_id
             .clone()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| fallback_device_id.to_string()),
         session_id: envelope.session_id.clone().unwrap_or_default(),
+        request_id,
         name: payload
             .get("name")
             .and_then(serde_json::Value::as_str)
@@ -2027,7 +2186,7 @@ fn upload_metadata_from_blob_envelope(
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .to_string(),
-    }
+    })
 }
 
 async fn download_terminal_upload_blob(
@@ -2318,59 +2477,89 @@ fn iroh_relay_url(config: &RemoteHostTransportConfig) -> Result<Option<RelayUrl>
     parse_relay_url(trimmed).map(Some)
 }
 
-/// Everywhere this controller might reach the host described by `candidate`,
-/// including `remembered` addresses it has actually connected on before.
+/// Fully resolved iroh dial target.
 ///
-/// An `EndpointAddr` is an identity plus a set of routes, and every route is
-/// worth having: iroh tries them together and keeps whichever answers. So this
-/// gathers rather than chooses.
-///
-/// The ticket is the richest source — it carries the host's own direct
-/// addresses — but a ticket that fails to parse says nothing about the node id
-/// and relay stored beside it, so a bad one degrades to the rest instead of
-/// failing the dial. Equally, a relay is one route among several rather than a
-/// requirement: node id plus an address we have reached the host on is a
-/// complete target, which is the whole point of remembering them.
-///
-/// Fails only when nothing usable remains: no identity, or an identity with no
-/// route at all.
-fn candidate_dial_addr(
+/// Construction is the sole definition of dialability. Callers must not first
+/// judge field presence: tickets, node ids, relays and remembered addresses are
+/// only routes after they parse and agree on one endpoint identity. All usable
+/// ticket, reported-relay and remembered-address routes are retained so iroh can
+/// race them and keep whichever answers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IrohDialTarget {
+    endpoint_addr: EndpointAddr,
+    /// Relay to use as this controller endpoint's home, preferring the host's
+    /// current independently reported route over a stale ticket snapshot.
+    controller_relay_url: Option<RelayUrl>,
+}
+
+pub fn build_iroh_dial_target(
     candidate: &RemoteTransportCandidate,
     remembered: &[String],
-) -> Result<EndpointAddr, String> {
-    let ticket = candidate.ticket.trim();
-    let from_ticket = (!ticket.is_empty())
-        .then(|| {
-            EndpointTicket::from_str(ticket)
-                .map(EndpointAddr::from)
-                .ok()
-        })
-        .flatten();
+) -> Result<IrohDialTarget, String> {
+    if candidate.kind != codux_protocol::REMOTE_TRANSPORT_IROH {
+        return Err(format!(
+            "unsupported remote transport kind: {}",
+            candidate.kind
+        ));
+    }
 
-    let addr = match from_ticket {
-        Some(addr) => addr,
-        None => {
-            let endpoint_id = candidate
-                .node_id
-                .trim()
-                .parse()
-                .map_err(|error| format!("invalid iroh node id: {error}"))?;
-            let mut addr = EndpointAddr::new(endpoint_id);
-            if let Ok(relay_url) = parse_relay_url(&candidate.relay_url) {
-                addr = addr.with_relay_url(relay_url);
-            }
-            addr
-        }
+    let ticket = candidate.ticket.trim();
+    // A corrupt ticket may coexist with a usable refreshed node/relay pair, so
+    // it degrades to those routes. A valid ticket, however, establishes an
+    // identity that every redundant identity field must agree with.
+    let from_ticket = if ticket.is_empty() {
+        None
+    } else {
+        EndpointTicket::from_str(ticket)
+            .map(EndpointAddr::from)
+            .ok()
     };
 
-    let addr = with_remembered_addrs(addr, remembered);
+    let node_id = candidate.node_id.trim();
+    let parsed_node_id = if node_id.is_empty() {
+        None
+    } else {
+        Some(
+            node_id
+                .parse()
+                .map_err(|error| format!("invalid iroh node id: {error}"))?,
+        )
+    };
+
+    let mut addr = match (from_ticket, parsed_node_id) {
+        (Some(addr), Some(node_id)) if addr.id != node_id => {
+            return Err(format!(
+                "iroh candidate identity mismatch: ticket={} nodeId={node_id}",
+                addr.id
+            ));
+        }
+        (Some(addr), _) => addr,
+        (None, Some(node_id)) => EndpointAddr::new(node_id),
+        (None, None) if !ticket.is_empty() => {
+            return Err("invalid iroh endpoint ticket and missing node id".to_string());
+        }
+        (None, None) => return Err("missing iroh endpoint identity".to_string()),
+    };
+
+    let reported_relay = match candidate.relay_url.trim() {
+        "" => None,
+        relay_url => parse_relay_url(relay_url).ok(),
+    };
+    if let Some(relay_url) = reported_relay.as_ref() {
+        addr = addr.with_relay_url(relay_url.clone());
+    }
+    addr = with_remembered_addrs(addr, remembered);
     if addr.is_empty() {
         return Err(
             "iroh candidate has no route: no usable ticket, relay, or remembered address"
                 .to_string(),
         );
     }
-    Ok(addr)
+    let controller_relay_url = reported_relay.or_else(|| addr.relay_urls().next().cloned());
+    Ok(IrohDialTarget {
+        endpoint_addr: addr,
+        controller_relay_url,
+    })
 }
 
 fn parse_relay_url(value: &str) -> Result<RelayUrl, String> {
@@ -2422,8 +2611,8 @@ mod tests {
 
     #[test]
     fn dial_exhausted_error_names_the_path_that_was_tried() {
-        let relayed = dial_exhausted_error(true);
-        let direct = dial_exhausted_error(false);
+        let relayed = dial_exhausted_error(true, None);
+        let direct = dial_exhausted_error(false, None);
         assert_ne!(
             relayed, direct,
             "a relay-less failure must not read as a plain relay timeout"
@@ -2437,6 +2626,14 @@ mod tests {
             relayed, "iroh controller connect timeout",
             "the relayed error string is load-bearing for existing log analysis"
         );
+    }
+
+    #[test]
+    fn an_immediate_relay_less_failure_keeps_the_route_class() {
+        let error = dial_exhausted_error(false, Some("connection refused"));
+
+        assert!(error.contains("no relay home"), "{error}");
+        assert!(error.contains("connection refused"), "{error}");
     }
 
     #[test]
@@ -2462,6 +2659,71 @@ mod tests {
 
     fn test_endpoint_id() -> iroh::EndpointId {
         SecretKey::from_bytes(&[7u8; 32]).public()
+    }
+
+    fn other_test_endpoint_id() -> iroh::EndpointId {
+        SecretKey::from_bytes(&[8u8; 32]).public()
+    }
+
+    fn endpoint_ticket(addr: EndpointAddr) -> String {
+        EndpointTicket::from(addr).to_string()
+    }
+
+    #[test]
+    fn controller_selection_continues_after_an_invalid_candidate() {
+        let ticket = endpoint_ticket(
+            EndpointAddr::new(test_endpoint_id())
+                .with_ip_addr("192.168.1.5:41234".parse().unwrap()),
+        );
+        let invalid = iroh_candidate(
+            &other_test_endpoint_id().to_string(),
+            "https://relay.example",
+            &ticket,
+        );
+        let valid = iroh_candidate(&test_endpoint_id().to_string(), "https://relay.example", "");
+        let config = RemoteControllerTransportConfig {
+            transports: vec![invalid, valid],
+            ..Default::default()
+        };
+
+        let (selected, target) =
+            select_controller_dial_target(&config).expect("second candidate is dialable");
+
+        assert_eq!(selected, &config.transports[1]);
+        assert_eq!(target.endpoint_addr.id, test_endpoint_id());
+    }
+
+    #[test]
+    fn controller_selection_preserves_the_first_constructor_error() {
+        let ticket = endpoint_ticket(
+            EndpointAddr::new(test_endpoint_id())
+                .with_ip_addr("192.168.1.5:41234".parse().unwrap()),
+        );
+        let first = iroh_candidate(
+            &other_test_endpoint_id().to_string(),
+            "https://relay.example",
+            &ticket,
+        );
+        let expected = build_iroh_dial_target(&first, &[]).unwrap_err();
+        let config = RemoteControllerTransportConfig {
+            transports: vec![first, iroh_candidate("invalid-node-id", "", "")],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            select_controller_dial_target(&config).unwrap_err(),
+            expected
+        );
+    }
+
+    #[test]
+    fn controller_selection_reports_a_missing_candidate_only_for_an_empty_list() {
+        let config = RemoteControllerTransportConfig::default();
+
+        assert_eq!(
+            select_controller_dial_target(&config).unwrap_err(),
+            "missing usable iroh transport candidate"
+        );
     }
 
     #[test]
@@ -2524,31 +2786,19 @@ mod tests {
 
     #[test]
     fn remembered_addresses_make_a_relay_less_candidate_dialable() {
-        // node id + an address we have reached the host on is a complete dial
-        // target. Judging dialability without looking at the remembered
-        // addresses discarded exactly the candidate they were stored to rescue.
-        assert!(is_dialable_iroh_transport(
-            codux_protocol::REMOTE_TRANSPORT_IROH,
-            "",
-            "node",
-            "",
-            true,
-        ));
-        assert!(!is_dialable_iroh_transport(
-            codux_protocol::REMOTE_TRANSPORT_IROH,
-            "",
-            "node",
-            "",
-            false,
-        ));
+        let candidate = iroh_candidate(&test_endpoint_id().to_string(), "", "");
+
+        assert!(build_iroh_dial_target(&candidate, &["10.8.0.3:41234".to_string()]).is_ok());
+        assert!(build_iroh_dial_target(&candidate, &[]).is_err());
     }
 
     #[test]
     fn a_node_id_and_a_remembered_address_build_a_dial_target() {
         let candidate = iroh_candidate(&test_endpoint_id().to_string(), "", "");
 
-        let addr = candidate_dial_addr(&candidate, &["10.8.0.3:41234".to_string()])
+        let target = build_iroh_dial_target(&candidate, &["10.8.0.3:41234".to_string()])
             .expect("node id + remembered address is dialable");
+        let addr = target.endpoint_addr;
 
         assert_eq!(addr.ip_addrs().count(), 1);
         assert_eq!(addr.relay_urls().count(), 0);
@@ -2564,7 +2814,9 @@ mod tests {
             "not-a-ticket",
         );
 
-        let addr = candidate_dial_addr(&candidate, &[]).expect("must fall back to node id + relay");
+        let target =
+            build_iroh_dial_target(&candidate, &[]).expect("must fall back to node id + relay");
+        let addr = target.endpoint_addr;
 
         assert_eq!(addr.relay_urls().count(), 1);
     }
@@ -2573,7 +2825,53 @@ mod tests {
     fn a_candidate_with_no_route_at_all_is_refused() {
         let candidate = iroh_candidate(&test_endpoint_id().to_string(), "", "");
 
-        assert!(candidate_dial_addr(&candidate, &[]).is_err());
+        assert!(build_iroh_dial_target(&candidate, &[]).is_err());
+    }
+
+    #[test]
+    fn a_valid_ticket_unions_the_independent_relay_route() {
+        let ticket = endpoint_ticket(
+            EndpointAddr::new(test_endpoint_id())
+                .with_ip_addr("192.168.1.5:41234".parse().unwrap()),
+        );
+        let candidate = iroh_candidate(
+            &test_endpoint_id().to_string(),
+            "https://relay.example",
+            &ticket,
+        );
+
+        let target =
+            build_iroh_dial_target(&candidate, &[]).expect("ticket plus relay is dialable");
+        let addr = target.endpoint_addr;
+
+        assert_eq!(addr.id, test_endpoint_id());
+        assert_eq!(addr.ip_addrs().count(), 1);
+        assert_eq!(addr.relay_urls().count(), 1);
+    }
+
+    #[test]
+    fn a_ticket_and_node_id_must_name_the_same_endpoint() {
+        let ticket = endpoint_ticket(
+            EndpointAddr::new(test_endpoint_id())
+                .with_ip_addr("192.168.1.5:41234".parse().unwrap()),
+        );
+        let candidate = iroh_candidate(
+            &other_test_endpoint_id().to_string(),
+            "https://relay.example",
+            &ticket,
+        );
+
+        let error = build_iroh_dial_target(&candidate, &[])
+            .expect_err("conflicting endpoint identities must fail closed");
+
+        assert!(error.contains("identity mismatch"), "{error}");
+    }
+
+    #[test]
+    fn malformed_routes_do_not_make_a_candidate_dialable() {
+        let candidate = iroh_candidate("not-a-node-id", "not-a-relay-url", "not-a-ticket");
+
+        assert!(build_iroh_dial_target(&candidate, &["not-a-socket-address".to_string()]).is_err());
     }
 
     #[test]
@@ -2581,43 +2879,47 @@ mod tests {
         // The host may have no relay at all — a LAN-only or SD-WAN-only
         // deployment. Its ticket still serialises the direct addresses, which is
         // everything `connect` needs.
-        assert!(is_dialable_iroh_candidate(
-            &iroh_candidate("", "", "ticket-bytes"),
-            false
-        ));
+        let ticket = endpoint_ticket(
+            EndpointAddr::new(test_endpoint_id())
+                .with_ip_addr("192.168.1.5:41234".parse().unwrap()),
+        );
+        assert!(build_iroh_dial_target(&iroh_candidate("", "", &ticket), &[]).is_ok());
     }
 
     #[test]
     fn node_id_needs_a_relay_when_there_is_no_ticket() {
         // Without a ticket there are no direct addresses, so the only way to
         // reach the peer is to route through its relay.
-        assert!(is_dialable_iroh_candidate(
-            &iroh_candidate("node", "https://relay.example", ""),
-            false
-        ));
-        assert!(!is_dialable_iroh_candidate(
-            &iroh_candidate("node", "", ""),
-            false
-        ));
-        assert!(!is_dialable_iroh_candidate(
-            &iroh_candidate("", "https://relay.example", ""),
-            false
-        ));
+        assert!(
+            build_iroh_dial_target(
+                &iroh_candidate(&test_endpoint_id().to_string(), "https://relay.example", ""),
+                &[]
+            )
+            .is_ok()
+        );
+        assert!(
+            build_iroh_dial_target(
+                &iroh_candidate(&test_endpoint_id().to_string(), "", ""),
+                &[]
+            )
+            .is_err()
+        );
+        assert!(
+            build_iroh_dial_target(&iroh_candidate("", "https://relay.example", ""), &[]).is_err()
+        );
     }
 
     #[test]
     fn a_candidate_of_another_kind_is_never_dialable_here() {
-        let mut candidate = iroh_candidate("node", "https://relay.example", "ticket");
+        let mut candidate =
+            iroh_candidate(&test_endpoint_id().to_string(), "https://relay.example", "");
         candidate.kind = "something-else".to_string();
-        assert!(!is_dialable_iroh_candidate(&candidate, false));
+        assert!(build_iroh_dial_target(&candidate, &[]).is_err());
     }
 
     #[test]
     fn whitespace_is_not_a_ticket() {
-        assert!(!is_dialable_iroh_candidate(
-            &iroh_candidate("", "", "   "),
-            false
-        ));
+        assert!(build_iroh_dial_target(&iroh_candidate("", "", "   "), &[]).is_err());
     }
 
     #[tokio::test]
@@ -2668,17 +2970,208 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_upload_blob_round_trips_top_level_request_id() {
+        let endpoint = direct_endpoint(vec![iroh_blobs::ALPN.to_vec()]).await;
+        let blob_store = new_blob_store();
+        let (control_tx, mut control_rx) = mpsc::channel(1);
+        let credentials = Arc::new(Mutex::new(ControllerCredentials {
+            device_id: "device-1".to_string(),
+            device_token: "token-1".to_string(),
+        }));
+
+        send_terminal_upload_blob(
+            &blob_store,
+            &endpoint,
+            &control_tx,
+            &credentials,
+            RemoteTransportUpload {
+                device_id: String::new(),
+                session_id: "session-1".to_string(),
+                request_id: Some("upload-request-1".to_string()),
+                name: "photo.png".to_string(),
+                mime: "image/png".to_string(),
+                kind: "image".to_string(),
+                bytes: vec![1, 2, 3],
+                ticket: String::new(),
+            },
+        )
+        .await
+        .expect("send upload envelope");
+
+        let bytes = control_rx.recv().await.expect("upload envelope");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("upload JSON");
+        assert_eq!(value["requestId"], "upload-request-1");
+        assert!(value["payload"].get("requestId").is_none());
+
+        let envelope: RemoteEnvelope = serde_json::from_value(value).expect("remote envelope");
+        let upload =
+            upload_metadata_from_blob_envelope(&envelope, "fallback-device").expect("metadata");
+        assert_eq!(upload.request_id.as_deref(), Some("upload-request-1"));
+        assert_eq!(upload.device_id, "device-1");
+        assert_eq!(upload.session_id, "session-1");
+        assert_eq!(upload.name, "photo.png");
+        assert_eq!(upload.mime, "image/png");
+        assert_eq!(upload.kind, "image");
+        assert!(!upload.ticket.is_empty());
+        endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn queued_upload_worker_failure_is_published_to_controller_once() {
+        let endpoint = direct_endpoint(Vec::new()).await;
+        let blob_store = new_blob_store();
+        let (control_tx, _control_rx) = mpsc::channel(1);
+        control_tx
+            .try_send(b"occupied".to_vec())
+            .expect("fill control queue");
+        let (upload_tx, upload_rx) = mpsc::channel(1);
+        let credentials = Arc::new(Mutex::new(ControllerCredentials {
+            device_id: "credential-device".to_string(),
+            device_token: "token-1".to_string(),
+        }));
+        let (message_tx, mut message_rx) = mpsc::unbounded_channel();
+        let on_message: RemoteTransportMessageHandler = Arc::new(move |device_id, data| {
+            message_tx.send((device_id, data)).unwrap();
+        });
+        spawn_upload_writer(
+            blob_store,
+            endpoint.clone(),
+            upload_rx,
+            control_tx,
+            credentials,
+            on_message,
+            None,
+        );
+
+        let enqueued = upload_tx
+            .try_send(RemoteTransportUpload {
+                device_id: "original-device".to_string(),
+                session_id: "session-1".to_string(),
+                request_id: Some("upload-request-1".to_string()),
+                name: "photo.png".to_string(),
+                mime: "image/png".to_string(),
+                kind: "image".to_string(),
+                bytes: vec![1, 2, 3],
+                ticket: String::new(),
+            })
+            .is_ok();
+        assert!(
+            enqueued,
+            "upload enqueue result remains transport acceptance"
+        );
+
+        let (callback_device_id, data) =
+            tokio::time::timeout(Duration::from_secs(2), message_rx.recv())
+                .await
+                .expect("upload failure callback timeout")
+                .expect("upload failure callback");
+        let error: serde_json::Value = serde_json::from_slice(&data).expect("error envelope");
+        assert_eq!(callback_device_id, "original-device");
+        assert_eq!(error["type"], codux_protocol::REMOTE_ERROR);
+        assert_eq!(error["deviceId"], "original-device");
+        assert_eq!(error["sessionId"], "session-1");
+        assert_eq!(error["requestId"], "upload-request-1");
+        assert_eq!(error["payload"]["code"], "terminal_upload_failed");
+        assert!(
+            error["payload"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("no available capacity"))
+        );
+        tokio::task::yield_now().await;
+        assert!(message_rx.try_recv().is_err(), "failure must publish once");
+        drop(upload_tx);
+        endpoint.close().await;
+    }
+
+    #[test]
+    fn terminal_upload_metadata_accepts_legacy_missing_request_id() {
+        let envelope = RemoteEnvelope {
+            kind: REMOTE_TERMINAL_UPLOAD_BLOB.to_string(),
+            device_id: Some("device-1".to_string()),
+            session_id: Some("session-1".to_string()),
+            request_id: None,
+            seq: None,
+            payload: serde_json::json!({
+                "name": "photo.png",
+                "ticket": "ticket",
+            }),
+        };
+
+        let upload =
+            upload_metadata_from_blob_envelope(&envelope, "fallback-device").expect("metadata");
+        assert_eq!(upload.request_id, None);
+    }
+
+    #[tokio::test]
+    async fn upload_result_is_published_only_to_captured_origin() {
+        let (origin, mut origin_rx) = mpsc::channel(1);
+        let (_replacement, mut replacement_rx) = mpsc::channel::<Vec<u8>>(1);
+        publish_terminal_upload_reply(
+            origin,
+            TerminalUploadReply {
+                device_id: "device-1".to_string(),
+                session_id: "session-1".to_string(),
+                request_id: Some("upload-1".to_string()),
+            },
+            Ok(RemoteTransportUploadOutcome {
+                path: "/tmp/photo.png".to_string(),
+                name: "photo.png".to_string(),
+                kind: "image".to_string(),
+            }),
+            None,
+        )
+        .await;
+
+        let response = origin_rx.recv().await.expect("origin response");
+        let response: serde_json::Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(response["type"], codux_protocol::REMOTE_TERMINAL_UPLOADED);
+        assert_eq!(response["requestId"], "upload-1");
+        assert_eq!(response["payload"]["inserted"], true);
+        assert!(replacement_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn legacy_upload_reply_omits_request_id() {
+        let response = terminal_upload_reply_data(
+            &TerminalUploadReply {
+                device_id: "device-1".to_string(),
+                session_id: "session-1".to_string(),
+                request_id: None,
+            },
+            &Err("PTY write failed".to_string()),
+        )
+        .expect("reply");
+        let response: serde_json::Value = serde_json::from_slice(&response).unwrap();
+
+        assert_eq!(response["type"], codux_protocol::REMOTE_ERROR);
+        assert_eq!(response["payload"]["code"], "terminal_upload_failed");
+        assert!(response.get("requestId").is_none());
+    }
+
+    #[tokio::test]
     async fn relay_state_is_read_live_from_the_endpoint() {
         // A relay-disabled endpoint can never have a home, so this pins the
         // reader to the endpoint's own state rather than a build-time flag —
         // the property that lets a recovered relay change the schedule back.
         let endpoint = direct_endpoint(Vec::new()).await;
-        assert!(!has_relay_home(&endpoint));
+        assert!(connected_relay_url(&endpoint).is_none());
         assert_eq!(
-            DialSchedule::for_relay_state(has_relay_home(&endpoint)),
+            DialSchedule::for_relay_state(connected_relay_url(&endpoint).is_some()),
             DialSchedule::for_relay_state(false)
         );
         endpoint.close().await;
+    }
+
+    #[test]
+    fn only_connected_home_relays_are_live_routes() {
+        let connecting = parse_relay_url("https://connecting.example").expect("relay url");
+        let connected = parse_relay_url("https://connected.example").expect("relay url");
+
+        assert_eq!(
+            select_connected_relay_url([(connecting.clone(), false), (connected.clone(), true)]),
+            Some(connected)
+        );
+        assert_eq!(select_connected_relay_url([(connecting, false)]), None);
     }
 
     #[tokio::test]
@@ -2687,40 +3180,42 @@ mod tests {
         // dial set from them. With no relay the candidate must still be one a
         // controller will accept, or the report strands the device.
         let host = test_host().await;
-        let (node_id, relay_url) = host.transport.iroh_candidate().expect("candidate");
-        let ticket = host.transport.iroh_endpoint_ticket().expect("ticket");
+        let candidate = host.transport.current_dial_candidate().expect("candidate");
 
-        assert!(relay_url.is_empty(), "this host has no relay home");
-        assert!(!ticket.is_empty());
-        assert!(is_dialable_iroh_transport(
-            codux_protocol::REMOTE_TRANSPORT_IROH,
-            &ticket,
-            &node_id,
-            &relay_url,
-            false,
-        ));
+        assert!(
+            candidate.relay_url.is_empty(),
+            "this host has no relay home"
+        );
+        assert!(!candidate.ticket.is_empty());
+        assert!(build_iroh_dial_target(&candidate, &[]).is_ok());
     }
 
     #[tokio::test]
     async fn the_published_candidate_agrees_with_its_endpoint() {
-        // `relay_url` on the transport records only what was true at bind time,
-        // and iroh keeps working on the relay afterwards. The published
-        // candidate must therefore agree with the endpoint it claims to
-        // describe — reporting the live relay whenever there is one, and the
-        // configured value only as a fallback.
+        // Node and ticket describe one known-address snapshot; the top-level
+        // relay independently describes a connected home. A configured-but-
+        // offline relay must not appear there: the QR serializer would treat it
+        // as a usable route and omit the direct-address ticket.
         let host = test_host().await;
-        let (_, reported) = host.transport.iroh_candidate().expect("candidate");
+        let candidate = host.transport.current_dial_candidate().expect("candidate");
 
         let live = host
             .transport
             .endpoint
-            .addr()
-            .relay_urls()
-            .next()
-            .map(|url| url.to_string());
+            .home_relay_status()
+            .get()
+            .into_iter()
+            .find(|status| status.is_connected())
+            .map(|status| status.url().to_string())
+            .unwrap_or_default();
+        assert_eq!(candidate.relay_url, live);
+        assert_eq!(candidate.node_id, host.transport.endpoint.id().to_string());
         assert_eq!(
-            reported,
-            live.unwrap_or_else(|| host.transport.relay_url.clone())
+            EndpointTicket::from_str(&candidate.ticket)
+                .expect("candidate ticket")
+                .endpoint_addr()
+                .id,
+            host.transport.endpoint.id()
         );
     }
 
@@ -2729,9 +3224,9 @@ mod tests {
         // The whole point of removing the relay gate: no relay anywhere, and the
         // dial still completes from the addresses in the peer's `EndpointAddr`.
         let host = test_host().await;
-        assert!(!has_relay_home(&host.transport.endpoint));
+        assert!(connected_relay_url(&host.transport.endpoint).is_none());
         let peer = test_peer(&host.transport).await;
-        assert!(!has_relay_home(&peer.endpoint));
+        assert!(connected_relay_url(&peer.endpoint).is_none());
         assert_eq!(peer.connection.remote_id(), host.transport.endpoint.id());
     }
 
@@ -2746,7 +3241,7 @@ mod tests {
         endpoint: Endpoint,
         connection: Connection,
         control_send: SendStream,
-        _control_recv: RecvStream,
+        control_recv: RecvStream,
         _terminal_send: SendStream,
         terminal_recv: RecvStream,
     }
@@ -2762,24 +3257,27 @@ mod tests {
     }
 
     async fn test_host() -> TestHost {
+        test_host_with_pairing(Arc::new(|_| None)).await
+    }
+
+    async fn test_host_with_pairing(on_pairing: RemoteTransportPairingHandler) -> TestHost {
         let endpoint = direct_endpoint(vec![CODUX_REMOTE_ALPN.to_vec()]).await;
         let (state_tx, states) = mpsc::unbounded_channel();
         let (message_tx, messages) = mpsc::unbounded_channel();
         let (log_tx, logs) = mpsc::unbounded_channel();
         let transport = Arc::new(RemoteIrohHostTransport {
-            node_id: endpoint.id().to_string(),
             endpoint: endpoint.clone(),
             blob_store: new_blob_store(),
-            relay_url: String::new(),
+            peer_ownership: Mutex::new(()),
             peers: Mutex::new(HashMap::new()),
             on_message: Arc::new(move |device_id, data| {
                 let _ = message_tx.send((device_id, data));
             }),
-            on_upload: Arc::new(|_| Ok(())),
+            on_upload: Arc::new(|_| Err("upload unsupported in test host".to_string())),
             on_state: Arc::new(move |device_id, state| {
                 let _ = state_tx.send((device_id, state));
             }),
-            on_pairing: Arc::new(|_| None),
+            on_pairing,
             on_authorize: Arc::new(|_, _| true),
             on_web_tunnel_tcp_connect: None,
             on_log: Some(Arc::new(move |message| {
@@ -2824,7 +3322,7 @@ mod tests {
             endpoint,
             connection,
             control_send,
-            _control_recv: control_recv,
+            control_recv,
             _terminal_send: terminal_send,
             terminal_recv,
         }
@@ -3115,6 +3613,145 @@ mod tests {
         new.connection.close(0u32.into(), b"test complete");
         old.endpoint.close().await;
         new.endpoint.close().await;
+        host.transport.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pairing_side_effect_and_response_share_peer_ownership() {
+        let entered = Arc::new(AtomicBool::new(false));
+        let entered_for_pairing = Arc::clone(&entered);
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let release_for_pairing = Arc::clone(&release_rx);
+        let host = test_host_with_pairing(Arc::new(move |handshake| {
+            entered_for_pairing.store(true, Ordering::SeqCst);
+            release_for_pairing.lock().unwrap().recv().unwrap();
+            Some(serde_json::json!({
+                "deviceId": handshake.device_id,
+                "token": "paired-token",
+            }))
+        }))
+        .await;
+        let peer = test_peer(&host.transport).await;
+        let peer_key = peer.endpoint.id().to_string();
+        let old_id = HOST_PEER_ID.fetch_add(2, Ordering::Relaxed);
+        let (control, mut control_rx) = mpsc::channel(1);
+        let (terminal, _terminal_rx) = mpsc::channel(1);
+        let old = PeerSenders {
+            id: old_id,
+            connection: peer.connection.clone(),
+            control,
+            terminal,
+            closed: Arc::new(AtomicBool::new(false)),
+        };
+        host.transport
+            .peers
+            .lock()
+            .unwrap()
+            .insert(peer_key.clone(), old.clone());
+
+        let frame = serde_json::to_vec(&serde_json::json!({
+            "type": codux_protocol::REMOTE_PAIRING_REQUEST,
+            "deviceId": "device-1",
+            "requestId": "pairing-1",
+            "payload": { "deviceId": "device-1" },
+        }))
+        .unwrap();
+        let transport = Arc::clone(&host.transport);
+        let peer_key_for_handler = peer_key.clone();
+        let old_for_handler = old.clone();
+        let handler = std::thread::spawn(move || {
+            transport.handle_frame(
+                &peer_key_for_handler,
+                &old_for_handler,
+                "pending".to_string(),
+                frame,
+            );
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !entered.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("pairing callback did not start");
+
+        let (replacement_control, _replacement_control_rx) = mpsc::channel(1);
+        let (replacement_terminal, _replacement_terminal_rx) = mpsc::channel(1);
+        let replacement = PeerSenders {
+            id: old_id + 1,
+            connection: peer.connection.clone(),
+            control: replacement_control,
+            terminal: replacement_terminal,
+            closed: Arc::new(AtomicBool::new(false)),
+        };
+        let replacement_done = Arc::new(AtomicBool::new(false));
+        let replacement_done_for_thread = Arc::clone(&replacement_done);
+        let transport = Arc::clone(&host.transport);
+        let replacer = std::thread::spawn(move || {
+            let inserted = transport.insert_peer(peer_key, replacement);
+            replacement_done_for_thread.store(true, Ordering::SeqCst);
+            inserted
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !replacement_done.load(Ordering::SeqCst),
+            "replacement crossed pairing's side-effect/publication transaction"
+        );
+        release_tx.send(()).unwrap();
+        handler.join().unwrap();
+
+        let response = control_rx.try_recv().expect("pairing response queued");
+        let response: serde_json::Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(response["type"], codux_protocol::REMOTE_PAIRING_CONFIRMED);
+        assert_eq!(response["requestId"], "pairing-1");
+        assert!(replacer.join().unwrap());
+
+        peer.connection.close(0u32.into(), b"test complete");
+        peer.endpoint.close().await;
+        host.transport.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn full_pairing_response_queue_prevents_pairing_side_effect() {
+        let pairing_calls = Arc::new(AtomicU64::new(0));
+        let pairing_calls_for_handler = Arc::clone(&pairing_calls);
+        let host = test_host_with_pairing(Arc::new(move |_| {
+            pairing_calls_for_handler.fetch_add(1, Ordering::SeqCst);
+            Some(serde_json::json!({ "token": "must-not-be-written" }))
+        }))
+        .await;
+        let peer = test_peer(&host.transport).await;
+        let peer_key = peer.endpoint.id().to_string();
+        let (control, _control_rx) = mpsc::channel(1);
+        control.try_send(vec![1]).unwrap();
+        let (terminal, _terminal_rx) = mpsc::channel(1);
+        let senders = PeerSenders {
+            id: HOST_PEER_ID.fetch_add(1, Ordering::Relaxed),
+            connection: peer.connection.clone(),
+            control,
+            terminal,
+            closed: Arc::new(AtomicBool::new(false)),
+        };
+        host.transport
+            .peers
+            .lock()
+            .unwrap()
+            .insert(peer_key.clone(), senders.clone());
+        let frame = serde_json::to_vec(&serde_json::json!({
+            "type": codux_protocol::REMOTE_PAIRING_REQUEST,
+            "deviceId": "device-1",
+            "requestId": "pairing-1",
+            "payload": { "deviceId": "device-1" },
+        }))
+        .unwrap();
+
+        host.transport
+            .handle_frame(&peer_key, &senders, "pending".to_string(), frame);
+
+        assert_eq!(pairing_calls.load(Ordering::SeqCst), 0);
+        peer.endpoint.close().await;
         host.transport.shutdown().await;
     }
 

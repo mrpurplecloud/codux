@@ -549,6 +549,9 @@ impl RemoteHostRuntime {
         device_id: Option<&str>,
         envelope: &RemoteEnvelope,
     ) {
+        let Some(owner) = self.current_callback_owner() else {
+            return;
+        };
         let runtime = Arc::clone(self);
         let session_id = session_id.to_string();
         let device_id = device_id.map(str::to_string);
@@ -556,7 +559,9 @@ impl RemoteHostRuntime {
         crate::async_runtime::spawn(async move {
             let session_id_for_log = session_id.clone();
             if let Err(error) = crate::async_runtime::spawn_blocking(move || {
-                runtime.send_terminal_baseline(&session_id, device_id.as_deref(), &envelope);
+                let _ = owner.run(|| {
+                    runtime.send_terminal_baseline(&session_id, device_id.as_deref(), &envelope);
+                });
             })
             .await
             {

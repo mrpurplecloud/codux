@@ -23,12 +23,11 @@ extension _HomePageActions on HomeController {
   }
 
   Future<void> _removeDevice(StoredDevice device) async {
-    final result = _deviceController.remove(
-      devices: _devices,
-      activeDevice: _activeDevice,
-      device: device,
+    final snapshot = await _storage.applyRequiredDeviceMutation(
+      DeviceRemoved(device.deviceId),
     );
-    if (result.removedActive) {
+    if (snapshot == null) return;
+    if (_activeDevice?.deviceId == device.deviceId) {
       _shouldReconnect = false;
       _transportConnected = false;
       unawaited(_closeActiveTransport());
@@ -37,8 +36,8 @@ extension _HomePageActions on HomeController {
         _syncRuntimeViewState();
       }
     }
-    await _saveDevices(result.state.devices);
-    if (result.state.devices.isEmpty) {
+    _publishDeviceSnapshot(snapshot);
+    if (snapshot.devices.isEmpty) {
       _applyState(() => _showTerminal = false);
     }
   }
@@ -68,7 +67,7 @@ extension _HomePageActions on HomeController {
   }
 
   Future<void> _editDevice(StoredDevice device) async {
-    final next = await showDialog<StoredDevice>(
+    final hostName = await showDialog<String>(
       context: context,
       builder: (ctx) => DeviceEditDialog(
         device: device,
@@ -78,16 +77,11 @@ extension _HomePageActions on HomeController {
         saveLabel: _t('common.save'),
       ),
     );
-    if (next == null) return;
-    final nextState = _deviceController.replace(
-      devices: _devices,
-      device: next,
-      activeDevice: _activeDevice,
+    if (hostName == null) return;
+    final snapshot = await _storage.applyRequiredDeviceMutation(
+      DeviceHostNameChanged(device.deviceId, hostName),
     );
-    await _saveDevices(nextState.devices);
-    if (_activeDevice?.deviceId == next.deviceId) {
-      _connect(next, true);
-    }
+    if (snapshot != null) _publishDeviceSnapshot(snapshot);
   }
 
   void _onProjectSelected(ProjectInfo project) {
@@ -157,10 +151,12 @@ extension _HomePageActions on HomeController {
     }
   }
 
-  Future<void> _pasteToTerminal() async {
+  Future<void> _pasteToTerminal({
+    required TerminalActivation activation,
+  }) async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     if (data?.text?.isNotEmpty == true) {
-      _insertTerminalText(data!.text!);
+      _insertTerminalText(data!.text!, activation: activation);
     }
   }
 
@@ -184,51 +180,178 @@ extension _HomePageActions on HomeController {
     return _terminalOutputController.cachedOutput(sessionId)?.trimRight() ?? '';
   }
 
-  Future<void> _startVoiceInput() async {
-    if (_showVoiceOverlay) return;
-    _applyState(() => _showVoiceOverlay = true);
+  Future<void> _startVoiceInput({
+    required TerminalActivation activation,
+  }) async {
+    if (_showVoiceOverlay || !_ownsTerminalActivation(activation)) return;
+    _applyState(() {
+      _voiceInputActivation = activation;
+      _showVoiceOverlay = true;
+    });
   }
 
-  Future<void> _chooseUploadForTerminal() async {
-    if (_terminalUploadLoading) return;
+  bool _terminalUploadOwnsContext(
+    TerminalUploadOperation<RemoteTransport> operation,
+  ) => operation.ownsContext(
+    activeOperation: _terminalUploadOperation,
+    activeSessionId: _sessionId,
+    activeDeviceId: _activeDevice?.deviceId,
+    activeTransport: _activeTransport,
+    mounted: mounted,
+    canUpload: _canUploadOverCurrentPath,
+  );
+
+  bool _continueTerminalUpload(
+    TerminalUploadOperation<RemoteTransport> operation,
+    String stage,
+  ) {
+    if (_terminalUploadOwnsContext(operation)) return true;
+    _finishTerminalUpload(
+      operation,
+      reason: 'ownership-lost-$stage',
+      notify: mounted,
+    );
+    return false;
+  }
+
+  void _finishTerminalUpload(
+    TerminalUploadOperation<RemoteTransport> operation, {
+    required String reason,
+    bool notify = false,
+  }) {
+    if (!identical(_terminalUploadOperation, operation)) return;
+    _terminalUploadReplyGuard.retire(operation);
+    _terminalUploadOperation = null;
+    operation.complete();
+    void clearPresentation() {
+      final uploadStatus = _terminalUploadStatus;
+      _terminalUploadLoading = false;
+      _terminalUploadStatus = '';
+      if (uploadStatus.isNotEmpty && _status == uploadStatus) {
+        _status = '';
+      }
+    }
+
+    if (notify && mounted && !_disposing) {
+      _applyState(clearPresentation);
+    } else {
+      clearPresentation();
+    }
     CoduxLog.info(
-      '[codux-flutter-upload] choose start connected=$_isConnected path=$_connectionPath session=$_sessionId',
+      '[codux-flutter-upload] finish request=${operation.requestId} reason=$reason',
     );
-    if (!_canUploadOverCurrentPath) {
-      _showSnack(_t('upload.directRequired'));
-      _applyState(() => _status = _t('upload.directRequired'));
-      return;
-    }
-    final prefs = AppPreferences.of(context);
-    final source = await showModalBottomSheet<TerminalUploadSource>(
-      context: context,
-      backgroundColor: AppColors.bgElevated,
-      barrierColor: AppColors.backdrop,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.lg)),
-      ),
-      builder: (context) => TerminalUploadSourceSheet(
-        fileLabel: prefs.t('upload.chooseFile'),
-        imageLabel: prefs.t('upload.chooseImage'),
-      ),
-    );
-    CoduxLog.info('[codux-flutter-upload] source selected source=$source');
-    if (source == null || !mounted) return;
-    await _uploadPickedFileToTerminal(source);
   }
 
-  Future<void> _uploadPickedFileToTerminal(TerminalUploadSource source) async {
-    if (_terminalUploadLoading) return;
+  void _cancelTerminalUpload({
+    required String reason,
+    RemoteTransport? transport,
+    bool notify = false,
+  }) {
+    final operation = _terminalUploadOperation;
+    if (operation == null) return;
+    if (transport != null && !identical(operation.transport, transport)) {
+      return;
+    }
+    _finishTerminalUpload(operation, reason: reason, notify: notify);
+  }
+
+  Future<void> _chooseUploadForTerminal({
+    required TerminalActivation activation,
+  }) async {
+    if (_terminalUploadOperation != null) return;
+    final sessionId = activation.sessionId;
+    CoduxLog.info(
+      '[codux-flutter-upload] choose start connected=$_isConnected path=$_connectionPath session=$sessionId',
+    );
+    if (!_ownsTerminalActivation(activation)) {
+      CoduxLog.info(
+        '[codux-flutter-upload] drop stale chooser session=$sessionId current=${_sessionId ?? ''}',
+      );
+      return;
+    }
     if (!_canUploadOverCurrentPath) {
       _showSnack(_t('upload.directRequired'));
       _applyState(() => _status = _t('upload.directRequired'));
       return;
     }
-    final id = _sessionId;
-    if (id == null) {
-      _applyState(() => _status = _t('terminal.createOrSelectFirst'));
+    final device = _activeDevice;
+    final transport = _activeTransport;
+    if (device == null || transport == null) return;
+    final uploadScope = TerminalUploadScope(
+      hostId: device.hostId,
+      deviceId: device.deviceId,
+      sessionId: sessionId,
+      runtimeInstanceId: _hostRuntimeInstanceId,
+    );
+    if (!_terminalUploadReplyGuard.canStart(
+      uploadScope,
+      requestIdSupported: _terminalUploadCapability.requestId,
+    )) {
+      final message = _t('upload.previousUnresolved');
+      CoduxLog.warn(
+        '[codux-flutter-upload] blocked ambiguous legacy reply host=${device.hostId} device=${device.deviceId} session=$sessionId',
+      );
+      _showSnack(message);
+      _applyState(() => _status = message);
       return;
     }
+    final operation = TerminalUploadOperation<RemoteTransport>(
+      requestId: const Uuid().v4(),
+      hostId: device.hostId,
+      sessionId: sessionId,
+      deviceId: device.deviceId,
+      transport: transport,
+      requestIdSupported: _terminalUploadCapability.requestId,
+      runtimeInstanceId: _hostRuntimeInstanceId,
+    );
+    _terminalUploadOperation = operation;
+    try {
+      final prefs = AppPreferences.of(context);
+      final source = await showModalBottomSheet<TerminalUploadSource>(
+        context: context,
+        backgroundColor: AppColors.bgElevated,
+        barrierColor: AppColors.backdrop,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(
+            top: Radius.circular(AppRadius.lg),
+          ),
+        ),
+        builder: (context) => TerminalUploadSourceSheet(
+          fileLabel: prefs.t('upload.chooseFile'),
+          imageLabel: prefs.t('upload.chooseImage'),
+        ),
+      );
+      if (!_continueTerminalUpload(operation, 'source-picker')) return;
+      CoduxLog.info('[codux-flutter-upload] source selected source=$source');
+      if (source == null) return;
+      await _uploadPickedFileToTerminal(source, operation);
+      if (!_continueTerminalUpload(operation, 'upload')) return;
+    } catch (error) {
+      if (!_terminalUploadOwnsContext(operation)) {
+        _finishTerminalUpload(
+          operation,
+          reason: 'error-after-ownership-loss',
+          notify: mounted,
+        );
+        return;
+      }
+      CoduxLog.warn(
+        '[codux-flutter-upload] upload failed request=${operation.requestId}: $error',
+      );
+      _applyState(() {
+        _terminalUploadLoading = false;
+        _terminalUploadStatus = '';
+        _status = '${_t('remote.error')}: $error';
+      });
+    } finally {
+      _finishTerminalUpload(operation, reason: 'flow-finished');
+    }
+  }
+
+  Future<void> _uploadPickedFileToTerminal(
+    TerminalUploadSource source,
+    TerminalUploadOperation<RemoteTransport> operation,
+  ) async {
     final result = await FilePicker.pickFiles(
       type: source == TerminalUploadSource.image
           ? FileType.image
@@ -236,19 +359,22 @@ extension _HomePageActions on HomeController {
       allowMultiple: false,
       withData: true,
     );
+    if (!_continueTerminalUpload(operation, 'file-picker')) return;
     final files = result?.files;
     final picked = files == null || files.isEmpty ? null : files.single;
     CoduxLog.info(
-      '[codux-flutter-upload] picker result selected=${picked != null} source=$source',
+      '[codux-flutter-upload] picker result selected=${picked != null} source=$source request=${operation.requestId}',
     );
     if (picked == null) return;
     if (picked.size > 20 * 1024 * 1024) {
       _showSnack(_t('upload.fileTooLarge'));
       return;
     }
-    final bytes =
-        picked.bytes ??
-        (picked.path == null ? null : await File(picked.path!).readAsBytes());
+    var bytes = picked.bytes;
+    if (bytes == null && picked.path != null) {
+      bytes = await File(picked.path!).readAsBytes();
+      if (!_continueTerminalUpload(operation, 'file-read')) return;
+    }
     if (bytes == null) {
       _showSnack(_t('upload.fileReadFailed'));
       return;
@@ -257,62 +383,40 @@ extension _HomePageActions on HomeController {
       CoduxLog.warn('[codux-flutter-upload] picked file is empty');
       return;
     }
-    if (!_canUploadOverCurrentPath) {
-      _showSnack(_t('upload.directRequired'));
-      _applyState(() => _status = _t('upload.directRequired'));
-      return;
-    }
-    _terminalUploadCompletion?.completeError(
-      StateError('Terminal upload superseded'),
-    );
-    final uploadCompletion = Completer<void>();
-    _terminalUploadCompletion = uploadCompletion;
+    if (!_continueTerminalUpload(operation, 'before-send')) return;
     final uploadingMessage = _t(terminalUploadUploadingKey(source));
     _applyState(() {
       _terminalUploadLoading = true;
       _terminalUploadStatus = uploadingMessage;
       _status = _terminalUploadStatus;
     });
-    try {
-      final sent = await _activeTransport?.sendTerminalUpload(
-        deviceId: _activeDevice?.deviceId ?? '',
-        sessionId: id,
-        name: picked.name,
-        mime: terminalUploadMime(
-          picked.name,
-          image: source == TerminalUploadSource.image,
-        ),
-        bytes: bytes,
-        kind: terminalUploadKind(source),
-      );
-      CoduxLog.info(
-        '[codux-flutter-upload] blob enqueue result=$sent session=$id name=${picked.name} bytes=${bytes.length}',
-      );
-      if (sent != true) {
-        throw StateError('Upload transport is not connected');
-      }
-      CoduxLog.info(
-        '[codux-flutter-upload] blob sent session=$id name=${picked.name} bytes=${bytes.length}',
-      );
-      if (!mounted) return;
-      final insertingMessage = _t(terminalUploadInsertingKey(source));
-      _applyState(() {
-        _terminalUploadStatus = insertingMessage;
-        _status = insertingMessage;
-      });
-      await uploadCompletion.future.timeout(const Duration(seconds: 30));
-    } catch (error) {
-      CoduxLog.warn('[codux-flutter-upload] upload failed: $error');
-      if (!mounted) return;
-      if (_terminalUploadCompletion == uploadCompletion) {
-        _terminalUploadCompletion = null;
-      }
-      _applyState(() {
-        _terminalUploadLoading = false;
-        _terminalUploadStatus = '';
-        _status = '${_t('remote.error')}: $error';
-      });
+    final sent = operation.transport.sendTerminalUpload(
+      requestId: operation.requestId,
+      deviceId: operation.deviceId,
+      sessionId: operation.sessionId,
+      name: picked.name,
+      mime: terminalUploadMime(
+        picked.name,
+        image: source == TerminalUploadSource.image,
+      ),
+      bytes: bytes,
+      kind: terminalUploadKind(source),
+    );
+    if (sent) operation.markSent();
+    if (!_continueTerminalUpload(operation, 'send')) return;
+    CoduxLog.info(
+      '[codux-flutter-upload] blob enqueue result=$sent request=${operation.requestId} session=${operation.sessionId} name=${picked.name} bytes=${bytes.length}',
+    );
+    if (!sent) {
+      throw StateError('Upload transport is not connected');
     }
+    final insertingMessage = _t(terminalUploadInsertingKey(source));
+    _applyState(() {
+      _terminalUploadStatus = insertingMessage;
+      _status = insertingMessage;
+    });
+    await operation.completion.future.timeout(const Duration(seconds: 30));
+    _continueTerminalUpload(operation, 'completion');
   }
 
   Future<void> _checkUpdate() async {

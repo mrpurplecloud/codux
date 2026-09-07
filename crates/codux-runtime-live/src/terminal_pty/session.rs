@@ -33,7 +33,6 @@ pub struct TerminalPtySession {
     pub(super) ai_runtime_binding: AIRuntimeTerminalBinding,
     pub(super) pty_control: LocalPtyProcessHandle,
     pub(super) viewport: Arc<parking_lot::Mutex<TerminalViewportLease>>,
-    pub(super) remote_screen_scrollback: usize,
 }
 
 pub(super) struct TerminalExitSignal {
@@ -275,7 +274,6 @@ impl TerminalPtySession {
                 ai_runtime_binding,
                 pty_control: process.control,
                 viewport,
-                remote_screen_scrollback,
             },
             Box::new(terminal_writer),
             Box::new(terminal_reader),
@@ -402,20 +400,20 @@ impl TerminalPtySession {
     pub fn baseline_snapshot(
         &self,
         max_chars: usize,
-        viewport_max_lines: Option<usize>,
+        use_remote_viewport: bool,
     ) -> TerminalBaselineSnapshot {
         let (data, offset, buffer_length, buffer_end, request) = {
             let _commit = self.output_commit.lock();
             let (data, offset, buffer_length, buffer_end) =
                 self.history.lock().snapshot_tail(max_chars);
             let screen = self.screen.lock();
-            let request = match viewport_max_lines {
+            let request = if use_remote_viewport {
                 // The baseline must describe the whole scrollable window the
-                // screen retains, not the rows the viewer currently shows.
-                Some(_) => {
-                    screen.remote_viewport_snapshot_request(0, 0, self.remote_screen_scrollback)
-                }
-                None => screen.snapshot_request(true),
+                // screen retains. `0` leaves capacity ownership with screen;
+                // its configured scrollback excludes visible grid rows.
+                screen.remote_viewport_snapshot_request(0, 0, 0)
+            } else {
+                screen.snapshot_request(true)
             };
             (data, offset, buffer_length, buffer_end, request)
         };

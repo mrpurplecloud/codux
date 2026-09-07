@@ -24,25 +24,34 @@ impl RemoteHostRuntime {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        let Some(binding) = self.current_transport_binding() else {
+            return;
+        };
         let runtime = Arc::clone(self);
         let envelope = envelope.clone();
         crate::async_runtime::spawn(async move {
-            let result = match runtime_file::file_read_blob_bytes(&path) {
-                Ok(bytes) => {
-                    let transport = runtime
-                        .transport
-                        .lock()
-                        .ok()
-                        .and_then(|transport| transport.clone());
-                    match transport {
-                        Some(transport) => match transport.publish_blob(bytes).await {
-                            Ok(ticket) => json!({ "ticket": ticket }),
-                            Err(error) => json!({ "error": error }),
-                        },
-                        None => json!({ "error": "transport unavailable" }),
-                    }
+            let bytes = match runtime_file::file_read_blob_bytes(&path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    let _ = binding.start.owner.run(|| {
+                        runtime.reply(
+                            &envelope,
+                            REMOTE_FILE_BLOB,
+                            json!({ "error": error.to_string() }),
+                        );
+                    });
+                    return;
                 }
-                Err(error) => json!({ "error": error.to_string() }),
+            };
+            // Blob publication itself is the async side effect. Keep the owner
+            // permit through it so retirement cannot split authorization from
+            // publication or redirect the reply through a replacement binding.
+            let Some(_permit) = binding.start.owner.acquire() else {
+                return;
+            };
+            let result = match binding.transport.publish_blob(bytes).await {
+                Ok(ticket) => json!({ "ticket": ticket }),
+                Err(error) => json!({ "error": error }),
             };
             runtime.reply(&envelope, REMOTE_FILE_BLOB, result);
         });
@@ -67,26 +76,39 @@ impl RemoteHostRuntime {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        let Some(binding) = self.current_transport_binding() else {
+            return;
+        };
         let runtime = Arc::clone(self);
         let envelope = envelope.clone();
         crate::async_runtime::spawn(async move {
-            let transport = runtime
-                .transport
-                .lock()
-                .ok()
-                .and_then(|transport| transport.clone());
-            let result = match transport {
-                Some(transport) => transport.fetch_blob(&ticket).await,
-                None => Err("transport unavailable".to_string()),
-            };
+            runtime
+                .complete_file_write_blob(binding, directory, name, ticket, envelope)
+                .await;
+        });
+    }
+
+    pub(super) async fn complete_file_write_blob(
+        self: &Arc<Self>,
+        binding: RemoteTransportBinding,
+        directory: String,
+        name: String,
+        ticket: String,
+        envelope: RemoteEnvelope,
+    ) {
+        // Fetch is read-only and belongs to the source binding. Revalidate the
+        // owner only at the filesystem commit, so stop/reconnect never waits on
+        // network I/O and stale bytes cannot reach disk or a replacement link.
+        let result = binding.transport.fetch_blob(&ticket).await;
+        let _ = binding.start.owner.run(|| {
             match result.and_then(|bytes| runtime_file::file_write_bytes(&directory, &name, &bytes))
             {
-                Ok(path) => runtime.reply(
+                Ok(path) => self.reply(
                     &envelope,
                     REMOTE_FILE_BYTES_WRITTEN,
                     json!({ "path": path }),
                 ),
-                Err(error) => runtime.send_error(&envelope, &error),
+                Err(error) => self.send_error(&envelope, &error),
             }
         });
     }

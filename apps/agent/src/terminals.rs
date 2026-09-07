@@ -16,8 +16,11 @@ use codux_protocol::{
     REMOTE_TERMINAL_OUTPUT, REMOTE_TERMINAL_VIEWPORT_STATE, RemoteTerminalBufferWindow,
     RemoteTerminalSubscriptions, terminal_buffer_payloads, terminal_live_output_payload,
 };
-use codux_remote_transport::RemoteTransport;
+use codux_remote_transport::{
+    RemoteTransport, RemoteTransportUpload, RemoteTransportUploadOutcome,
+};
 use codux_runtime_core::terminal::terminal_snapshot_payload;
+use codux_runtime_core::upload as runtime_upload;
 use codux_runtime_live::remote_terminal_dispatch::{
     self, RemoteTerminalDispatch, TerminalMessage, apply_terminal_osc_color_env,
     finish_terminal_create_viewer_lifecycle, prepare_terminal_create_lifecycle,
@@ -30,6 +33,7 @@ use codux_runtime_live::terminal_pty::{
 use codux_terminal_core::TerminalEvent;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::fs;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -330,6 +334,44 @@ fn reply(
         envelope["requestId"] = json!(request_id);
     }
     send(transport, device_id, envelope, false);
+}
+
+pub(crate) fn handle_terminal_upload(
+    driver: &TerminalManager,
+    upload: RemoteTransportUpload,
+) -> Result<RemoteTransportUploadOutcome, String> {
+    let session_id = upload.session_id.trim();
+    if session_id.is_empty() {
+        return Err("Terminal session is required.".to_string());
+    }
+    if upload.bytes.is_empty() || upload.bytes.len() > codux_protocol::REMOTE_BLOB_MAX_BYTES {
+        return Err("Upload size is not supported.".to_string());
+    }
+
+    let name = runtime_upload::sanitized_upload_name(&upload.name);
+    let kind = if upload.kind.trim().eq_ignore_ascii_case("image") {
+        "image"
+    } else {
+        "file"
+    };
+    let directory = runtime_upload::terminal_upload_directory(session_id);
+    let path = runtime_upload::write_unique_upload_file(&directory, &name, &upload.bytes)
+        .map_err(|error| error.to_string())?;
+    let input = format!("{} ", runtime_upload::terminal_upload_path_input(&path));
+    if let Err(error) = driver.write(session_id, input.as_bytes()) {
+        let _ = fs::remove_file(&path);
+        return Err(error.to_string());
+    }
+
+    Ok(RemoteTransportUploadOutcome {
+        path: path.to_string_lossy().to_string(),
+        name: path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_string(),
+        kind: kind.to_string(),
+    })
 }
 
 pub(crate) fn list_payload(driver: &TerminalManager, fanout_state: &TerminalFanout) -> Value {
@@ -649,13 +691,8 @@ fn send_terminal_baseline(
     let viewport = baseline_viewport(payload);
     let use_viewport = apply_baseline_viewport(driver, session_id, device_id, viewport);
     let output_seq = fanout_state.current_seq(session_id);
-    let viewport_max_lines = use_viewport.then(|| {
-        viewport
-            .map(|viewport| viewport.rows.max(8) as usize)
-            .unwrap_or(8)
-    });
     let baseline = driver
-        .baseline_snapshot(session_id, max_chars, viewport_max_lines)
+        .baseline_snapshot(session_id, max_chars, use_viewport)
         .ok();
     let baseline_failed = baseline.is_none();
     let (data, offset, buffer_length, buffer_end, screen_data, screen_wrapped_rows) = baseline
@@ -1572,6 +1609,84 @@ mod tests {
             message.get("requestId").and_then(Value::as_str),
             Some("request-1")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_upload_returns_outcome_after_pty_write() {
+        let driver = TerminalManager::new();
+        let session_id = format!("agent-upload-{}", uuid::Uuid::new_v4());
+        driver
+            .create(
+                TerminalPtyConfig {
+                    terminal_id: Some(session_id.clone()),
+                    shell: Some("/bin/sh".to_string()),
+                    command: Some("cat".to_string()),
+                    ..Default::default()
+                },
+                |_| {},
+            )
+            .expect("create terminal");
+        let outcome = handle_terminal_upload(
+            &driver,
+            RemoteTransportUpload {
+                device_id: "phone-a".to_string(),
+                session_id: session_id.clone(),
+                request_id: Some("upload-request-1".to_string()),
+                name: "photo.png".to_string(),
+                mime: "image/png".to_string(),
+                kind: "image".to_string(),
+                bytes: vec![1, 2, 3],
+                ticket: String::new(),
+            },
+        )
+        .expect("finish upload");
+
+        assert_eq!(outcome.name, "photo.png");
+        assert_eq!(outcome.kind, "image");
+        let path = std::path::PathBuf::from(outcome.path);
+        assert_eq!(fs::read(&path).expect("stored upload"), [1, 2, 3]);
+
+        let _ = driver.kill_and_wait(&session_id, Duration::from_secs(2));
+        fs::remove_dir_all(runtime_upload::terminal_upload_directory(&session_id)).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_upload_accepts_legacy_request_without_id() {
+        let driver = TerminalManager::new();
+        let session_id = format!("agent-legacy-upload-{}", uuid::Uuid::new_v4());
+        driver
+            .create(
+                TerminalPtyConfig {
+                    terminal_id: Some(session_id.clone()),
+                    shell: Some("/bin/sh".to_string()),
+                    command: Some("cat".to_string()),
+                    ..Default::default()
+                },
+                |_| {},
+            )
+            .expect("create terminal");
+
+        let outcome = handle_terminal_upload(
+            &driver,
+            RemoteTransportUpload {
+                device_id: "phone-a".to_string(),
+                session_id: session_id.clone(),
+                request_id: None,
+                name: "photo.png".to_string(),
+                mime: "image/png".to_string(),
+                kind: "image".to_string(),
+                bytes: vec![1, 2, 3],
+                ticket: String::new(),
+            },
+        )
+        .expect("legacy upload");
+
+        assert_eq!(outcome.name, "photo.png");
+        assert_eq!(fs::read(&outcome.path).expect("stored upload"), [1, 2, 3]);
+        let _ = driver.kill_and_wait(&session_id, Duration::from_secs(2));
+        fs::remove_dir_all(runtime_upload::terminal_upload_directory(&session_id)).ok();
     }
 
     #[test]

@@ -2,7 +2,6 @@ use super::crypto::{display_host_name, remote_pairing_payload};
 use super::host::{
     remote_file_list, remote_file_read, remote_file_rename, remote_file_write,
     remote_terminal_upload_directory, sanitized_remote_upload_name, terminal_upload_path_input,
-    unique_remote_upload_path,
 };
 use super::summary::remote_summary_from_settings;
 use super::transport_factory::host_transport_config;
@@ -618,18 +617,6 @@ fn remote_terminal_upload_helpers_match_tauri_shape() {
             .and_then(|value| value.to_str()),
         Some("term_id")
     );
-    let dir = std::env::temp_dir().join(format!(
-        "codux-gpui-upload-path-test-{}",
-        uuid::Uuid::new_v4()
-    ));
-    fs::create_dir_all(&dir).expect("create temp support");
-    fs::write(dir.join("asset.png"), "existing").expect("write existing");
-    let unique = unique_remote_upload_path(&dir, "asset.png");
-    assert_eq!(
-        unique.file_name().and_then(|value| value.to_str()),
-        Some("asset-1.png")
-    );
-    fs::remove_dir_all(dir).ok();
 }
 
 #[test]
@@ -707,36 +694,6 @@ fn register_host_disabled_is_noop() {
         .expect("register noop");
     assert!(!summary.enabled);
     assert_eq!(summary.status, "stopped");
-    fs::remove_dir_all(dir).ok();
-}
-
-#[test]
-fn sync_settings_background_is_noop_when_disabled() {
-    let dir = std::env::temp_dir().join(format!(
-        "codux-gpui-remote-sync-disabled-test-{}",
-        uuid::Uuid::new_v4()
-    ));
-    fs::create_dir_all(&dir).expect("create temp support");
-    fs::write(
-        dir.join("settings.json"),
-        serde_json::to_string_pretty(&serde_json::json!({
-            "remote": {
-                "isEnabled": false,
-                "relayUrl": "http://relay.example",
-                "hostID": "host-1",
-                "hostToken": "secret-token"
-            }
-        }))
-        .unwrap(),
-    )
-    .expect("write settings");
-
-    let summary = RemoteService::new(dir.clone()).sync_settings_background();
-
-    assert!(!summary.enabled);
-    assert_eq!(summary.status, "stopped");
-    let raw = fs::read_to_string(dir.join("settings.json")).expect("settings");
-    assert!(raw.contains("secret-token"));
     fs::remove_dir_all(dir).ok();
 }
 

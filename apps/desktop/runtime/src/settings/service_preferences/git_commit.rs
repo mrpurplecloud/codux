@@ -26,27 +26,27 @@ impl SettingsService {
         if provider_id.is_empty() {
             return Err("AI provider id is empty.".to_string());
         }
-        let mut raw = self.raw_settings();
-        let providers = ai_providers_mut(&mut raw)?;
-        let Some(provider) = providers.iter_mut().find(|provider| {
-            provider
-                .get("id")
-                .and_then(Value::as_str)
-                .map(|id| id == provider_id)
-                .unwrap_or(false)
-        }) else {
-            return Err("AI provider not found.".to_string());
-        };
-        let Some(provider) = provider.as_object_mut() else {
-            return Err("AI provider record is invalid.".to_string());
-        };
-        let current = provider
-            .get("isEnabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
-        provider.insert("isEnabled".to_string(), Value::Bool(!current));
-        self.save_raw_settings(&raw)?;
-        Ok(summary_from_raw(&raw))
+        self.update_raw_settings(|raw| {
+            let providers = ai_providers_mut(raw)?;
+            let Some(provider) = providers.iter_mut().find(|provider| {
+                provider
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(|id| id == provider_id)
+                    .unwrap_or(false)
+            }) else {
+                return Err("AI provider not found.".to_string());
+            };
+            let Some(provider) = provider.as_object_mut() else {
+                return Err("AI provider record is invalid.".to_string());
+            };
+            let current = provider
+                .get("isEnabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            provider.insert("isEnabled".to_string(), Value::Bool(!current));
+            Ok(summary_from_raw(raw))
+        })
     }
 
     pub fn set_git_commit_provider(&self, provider_id: &str) -> Result<SettingsSummary, String> {
@@ -57,25 +57,25 @@ impl SettingsService {
         if provider_id == "automatic" || provider_id == "off" {
             return self.update_ai_string("gitCommitMessageProviderId", provider_id.to_string());
         }
-        let mut raw = self.raw_settings();
-        let providers = ai_providers_mut(&mut raw)?;
-        let found = providers.iter().any(|provider| {
-            provider
-                .get("id")
-                .and_then(Value::as_str)
-                .map(|id| id == provider_id)
-                .unwrap_or(false)
-        });
-        if !found {
-            return Err("AI provider not found.".to_string());
-        }
-        let ai = ai_mut(&mut raw)?;
-        ai.insert(
-            "gitCommitMessageProviderId".to_string(),
-            Value::String(provider_id.to_string()),
-        );
-        self.save_raw_settings(&raw)?;
-        Ok(summary_from_raw(&raw))
+        self.update_raw_settings(|raw| {
+            let providers = ai_providers_mut(raw)?;
+            let found = providers.iter().any(|provider| {
+                provider
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(|id| id == provider_id)
+                    .unwrap_or(false)
+            });
+            if !found {
+                return Err("AI provider not found.".to_string());
+            }
+            let ai = ai_mut(raw)?;
+            ai.insert(
+                "gitCommitMessageProviderId".to_string(),
+                Value::String(provider_id.to_string()),
+            );
+            Ok(summary_from_raw(raw))
+        })
     }
 
     pub fn cycle_git_commit_tone(&self) -> Result<SettingsSummary, String> {

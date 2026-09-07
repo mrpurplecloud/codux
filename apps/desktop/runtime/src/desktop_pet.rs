@@ -1,6 +1,6 @@
 use crate::{
     pet::PetStore,
-    settings::{AppSettings, AppSettingsStore},
+    settings::{AppSettings, AppSettingsStore, SettingsService},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -321,15 +321,13 @@ pub fn apply_desktop_pet_menu_action(
     support_dir: PathBuf,
     action_id: &str,
 ) -> Result<AppSettings, String> {
-    let store = AppSettingsStore::from_support_dir(support_dir);
-    store.update(|settings| match action_id {
+    let service = SettingsService::new(support_dir.clone());
+    match action_id {
         DESKTOP_PET_MUTE_30_MINUTES => {
-            settings.ai.pet.speech_temporary_mute_until =
-                Some(chrono::Utc::now().timestamp() + 1800);
+            service.set_pet_speech_temporary_mute_until(chrono::Utc::now().timestamp() + 1800)
         }
         DESKTOP_PET_MUTE_1_HOUR => {
-            settings.ai.pet.speech_temporary_mute_until =
-                Some(chrono::Utc::now().timestamp() + 3600);
+            service.set_pet_speech_temporary_mute_until(chrono::Utc::now().timestamp() + 3600)
         }
         DESKTOP_PET_MUTE_TODAY => {
             let tomorrow = chrono::Local::now()
@@ -339,22 +337,17 @@ pub fn apply_desktop_pet_menu_action(
                 .and_then(|date| date.and_local_timezone(chrono::Local).single())
                 .map(|date| date.timestamp())
                 .unwrap_or_else(|| chrono::Utc::now().timestamp() + 86_400);
-            settings.ai.pet.speech_temporary_mute_until = Some(tomorrow);
+            service.set_pet_speech_temporary_mute_until(tomorrow)
         }
         DESKTOP_PET_SPEAK_MORE => {
-            settings.ai.pet.speech_frequency =
-                desktop_pet_raised_speech_frequency(&settings.ai.pet.speech_frequency);
+            service.update_pet_speech_frequency(desktop_pet_raised_speech_frequency)
         }
         DESKTOP_PET_SPEAK_LESS => {
-            settings.ai.pet.speech_frequency =
-                desktop_pet_lowered_speech_frequency(&settings.ai.pet.speech_frequency);
+            service.update_pet_speech_frequency(desktop_pet_lowered_speech_frequency)
         }
-        DESKTOP_PET_HIDE => {
-            settings.pet.desktop_widget = false;
-        }
-        DESKTOP_PET_SKIP_LINE => {}
-        _ => {}
-    })
+        DESKTOP_PET_HIDE => service.set_desktop_pet_widget(false),
+        _ => Ok(AppSettingsStore::from_support_dir(support_dir).snapshot()),
+    }
 }
 
 fn valid_saved_origin(origin: DesktopPetSavedOrigin) -> Option<DesktopPetSavedOrigin> {

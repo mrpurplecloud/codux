@@ -66,6 +66,7 @@ abstract interface class ControllerTransportEventHandle {
   bool sendTerminalUpload({
     required String deviceId,
     required String sessionId,
+    required String requestId,
     required String name,
     required String mime,
     required String kind,
@@ -82,9 +83,13 @@ abstract interface class RemoteTransport {
   Future<void> connect(StoredDevice device);
   Future<bool> send(Map<String, dynamic> envelope);
   Future<bool> sendTerminal(Map<String, dynamic> envelope);
-  Future<bool> sendTerminalUpload({
+
+  /// Synchronous by contract: `true` means enqueue finished before return, so
+  /// upload ownership can record the side effect in the same Dart turn.
+  bool sendTerminalUpload({
     required String deviceId,
     required String sessionId,
+    required String requestId,
     required String name,
     required String mime,
     required String kind,
@@ -161,7 +166,7 @@ class RustControllerTransport implements RemoteTransport {
   Future<void> connect(StoredDevice device) async {
     await close();
     final connected = Completer<void>();
-    final config = _controllerTransportConfig(device);
+    final config = controllerTransportConfig(device);
     final summary = codux_protocol_ffi.controllerTransportConfigSummary(config);
     _kind = '${summary['transportKind'] ?? RemoteTransportKind.iroh}';
     _onState?.call('connecting');
@@ -199,17 +204,19 @@ class RustControllerTransport implements RemoteTransport {
   }
 
   @override
-  Future<bool> sendTerminalUpload({
+  bool sendTerminalUpload({
     required String deviceId,
     required String sessionId,
+    required String requestId,
     required String name,
     required String mime,
     required String kind,
     required Uint8List bytes,
-  }) async {
+  }) {
     return _handle?.sendTerminalUpload(
           deviceId: deviceId,
           sessionId: sessionId,
+          requestId: requestId,
           name: name,
           mime: mime,
           kind: kind,
@@ -313,6 +320,7 @@ class _FfiControllerTransportHandle implements ControllerTransportEventHandle {
   bool sendTerminalUpload({
     required String deviceId,
     required String sessionId,
+    required String requestId,
     required String name,
     required String mime,
     required String kind,
@@ -320,6 +328,7 @@ class _FfiControllerTransportHandle implements ControllerTransportEventHandle {
   }) => _inner.sendTerminalUpload(
     deviceId: deviceId,
     sessionId: sessionId,
+    requestId: requestId,
     name: name,
     mime: mime,
     kind: kind,
@@ -333,7 +342,12 @@ class _FfiControllerTransportHandle implements ControllerTransportEventHandle {
   void close() => _inner.close();
 }
 
-Map<String, dynamic> _controllerTransportConfig(StoredDevice device) {
+/// Complete native controller configuration for [device].
+///
+/// Keep one builder for real connects and preflight validation: transport
+/// candidates are only dialable in the context of the device-level remembered
+/// direct addresses.
+Map<String, dynamic> controllerTransportConfig(StoredDevice device) {
   return {
     'relayUrl': device.server,
     'hostId': device.hostId,
@@ -346,4 +360,13 @@ Map<String, dynamic> _controllerTransportConfig(StoredDevice device) {
     // distinguish "no history" from "old client".
     'directAddrs': device.directAddrs,
   };
+}
+
+/// Whether native dial-target construction accepts any candidate in [device].
+bool hasDialableControllerTransport(StoredDevice device) {
+  final summary = codux_protocol_ffi.controllerTransportConfigSummary(
+    controllerTransportConfig(device),
+  );
+  final count = summary['transportCount'];
+  return count is int && count > 0;
 }

@@ -608,7 +608,6 @@ impl RemoteTerminalOutputRouter {
         // never pays for a frame nobody keeps.
         if !replaying_held_live
             && !is_buffer
-            && decoded.screen_data.is_none()
             && self
                 .session(session_id)
                 .hold_live(output_seq, || message.to_string())
@@ -624,9 +623,8 @@ impl RemoteTerminalOutputRouter {
             let resync = self
                 .sequencer
                 .observe(session_id, false, output_seq, None, false);
-            let mut held_live: Vec<String> = Vec::new();
             if resync.should_render() && (!raw.is_empty() || decoded.screen_data.is_some()) {
-                held_live = self.apply_live_to_session(
+                self.apply_live_to_session(
                     session_id,
                     &raw,
                     decoded.screen_data.as_deref(),
@@ -635,11 +633,6 @@ impl RemoteTerminalOutputRouter {
                     decoded.buffer_end,
                     output_seq,
                 );
-                if decoded.screen_data.is_some() {
-                    self.active_buffer_request_by_session.remove(session_id);
-                    self.remove_restore_request(session_id);
-                    self.assembler.remove(session_id);
-                }
             }
             let mut effects = Vec::new();
             if resync.gap && self.gap_sessions.insert(session_id.to_string()) {
@@ -653,7 +646,6 @@ impl RemoteTerminalOutputRouter {
                 output_seq,
                 decoded.buffer_length,
             ));
-            self.replay_held(held_live, active_session_id, &mut effects);
             return effects;
         }
 
@@ -796,7 +788,7 @@ impl RemoteTerminalOutputRouter {
                     ));
                 }
             } else {
-                held_live = self.apply_live_to_session(
+                self.apply_live_to_session(
                     session_id,
                     &raw,
                     decoded.screen_data.as_deref(),
@@ -827,7 +819,7 @@ impl RemoteTerminalOutputRouter {
         }
 
         if !is_buffer && (!raw.is_empty() || decoded.screen_data.is_some()) {
-            held_live = self.apply_live_to_session(
+            self.apply_live_to_session(
                 session_id,
                 &raw,
                 decoded.screen_data.as_deref(),
@@ -836,11 +828,6 @@ impl RemoteTerminalOutputRouter {
                 decoded.buffer_end,
                 output_seq,
             );
-            if decoded.screen_data.is_some() {
-                self.active_buffer_request_by_session.remove(session_id);
-                self.remove_restore_request(session_id);
-                self.assembler.remove(session_id);
-            }
             if is_active_session {
                 effects.push(RemoteTerminalOutputEffect::simple(
                     RemoteTerminalOutputEffectKind::SessionUpdated,
@@ -926,36 +913,22 @@ impl RemoteTerminalOutputRouter {
         buffer_length: Option<i64>,
         buffer_end: Option<i64>,
         output_seq: Option<TerminalSequence>,
-    ) -> Vec<String> {
+    ) {
         let buffer_len = buffer_length.and_then(|value| usize::try_from(value).ok());
-        let awaiting = self.session(session_id).is_restoring_baseline();
-        // Fold a screen keyframe in as the baseline when either: we are still
-        // awaiting a restore (the keyframe completes it), OR the frame carries
-        // no incremental bytes (`data` empty) -- a pure keyframe. The latter is
-        // the host's authoritative current screen and the ONLY message that can
-        // reconcile a grid that drifted from a torn snapshot (e.g. a viewport
-        // resize captured mid-repaint): plain live frames merely append deltas
-        // and never re-sync the grid, so without this a once-torn screen never
-        // self-heals even though the host keeps sending a fresh keyframe. Empty
-        // `data` is unique to the viewport keyframe -- flushed live batches
-        // always carry bytes -- so this does not disturb normal streaming, and
-        // re-processing the kept scrollback below preserves history.
-        if screen_data.is_some() && (awaiting || data.is_empty()) {
-            let existing = self
-                .content(session_id)
-                .map(str::to_string)
-                .unwrap_or_default();
-            let combined = format!("{existing}{data}");
-            let replay = self.session(session_id).replace_from_baseline(
-                &combined,
+        // A pure keyframe owns only the visible grid. Rebuilding through the
+        // bounded raw cache would silently discard older headless history and
+        // reset its absolute watermark. Baseline publication remains exclusive
+        // to `buffer: true` handling above.
+        if data.is_empty()
+            && let Some(screen_data) = screen_data
+        {
+            self.session(session_id).reconcile_visible_keyframe(
                 screen_data,
                 screen_wrapped_rows,
-                buffer_len,
-                buffer_end.and_then(|value| usize::try_from(value).ok()),
                 output_seq,
             );
             self.bump_render(session_id);
-            return replay;
+            return;
         }
         self.session(session_id).append_live(
             data,
@@ -964,7 +937,6 @@ impl RemoteTerminalOutputRouter {
             output_seq,
         );
         self.bump_render(session_id);
-        Vec::new()
     }
 }
 
@@ -1098,6 +1070,15 @@ mod tests {
             .join("\n")
     }
 
+    fn screen_snapshot(router: &RemoteTerminalOutputRouter, session_id: &str) -> Value {
+        serde_json::from_str(
+            &router
+                .screen_snapshot_json(session_id)
+                .expect("screen snapshot"),
+        )
+        .expect("snapshot json")
+    }
+
     fn buffer(
         session: &str,
         data: &str,
@@ -1227,6 +1208,63 @@ mod tests {
             ]
         );
         assert_eq!(router.content("session-1"), Some("old-new"));
+    }
+
+    #[test]
+    fn live_keyframe_waits_for_and_replays_after_buffer_baseline() {
+        let mut router = RemoteTerminalOutputRouter::new(65536, 65536);
+        router.bind_session("session-1", true);
+        assert!(router.start_buffer_request("session-1", "baseline-1", true, true, true));
+
+        let held = router.accept(
+            &json!({
+                "type": "terminal.output",
+                "sessionId": "session-1",
+                "payload": {
+                    "data": "",
+                    "screenData": "\x1b[H\x1b[2Jfresh-live-screen",
+                    "bufferLength": 8,
+                    "outputSeq": 11,
+                },
+            }),
+            Some("session-1"),
+        );
+
+        assert_eq!(kinds(&held), ["ack"]);
+        assert_eq!(
+            router.active_buffer_request_id("session-1"),
+            Some("baseline-1")
+        );
+        assert!(
+            router
+                .session_ref("session-1")
+                .is_some_and(RemotePtySession::is_restoring_baseline)
+        );
+
+        let mut baseline = buffer_with_screen_data(
+            "session-1",
+            "baseline-history",
+            "\x1b[H\x1b[2Jbaseline-screen",
+            10,
+        );
+        baseline["payload"]["requestId"] = json!("baseline-1");
+        router.accept(&baseline, Some("session-1"));
+
+        assert_eq!(router.active_buffer_request_id("session-1"), None);
+        assert!(
+            router
+                .session_ref("session-1")
+                .is_some_and(|session| !session.is_restoring_baseline())
+        );
+        let screen = screen_text(&router, "session-1");
+        assert!(
+            screen.contains("fresh-live-screen"),
+            "replayed screen: {screen}"
+        );
+        assert!(
+            !screen.contains("baseline-screen"),
+            "held keyframe must reconcile after baseline: {screen}"
+        );
     }
 
     #[test]
@@ -1441,6 +1479,78 @@ mod tests {
         );
         // Raw history (native render content / scrollback) is left intact.
         assert_eq!(router.content("session-1"), Some("raw-history"));
+    }
+
+    #[test]
+    fn pure_keyframe_preserves_full_screen_history_scroll_and_watermark() {
+        let mut router = RemoteTerminalOutputRouter::new(1_000_000, 1_000_000);
+        router.bind_session("session-1", true);
+        router.resize_screen("session-1", 20, 8);
+        let history = (0..900)
+            .map(|index| format!("line-{index:04}"))
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        let history_end = history.chars().count() as i64;
+        let mut baseline =
+            buffer_with_screen_data("session-1", &history, "\x1b[H\x1b[2Jold-live-screen", 10);
+        baseline["payload"]["bufferEnd"] = json!(history_end);
+        router.accept(&baseline, Some("session-1"));
+
+        let cached_lines = router
+            .content("session-1")
+            .expect("raw cache")
+            .lines()
+            .count();
+        let full_before = screen_snapshot(&router, "session-1");
+        let total_before = full_before["totalLines"].as_u64().expect("total lines");
+        assert!(
+            total_before > cached_lines as u64,
+            "test must exceed capped raw cache"
+        );
+
+        router.scroll_screen_pixels("session-1", 120.0 * 20.0, 20.0);
+        let scrolled_before = screen_snapshot(&router, "session-1");
+        assert_eq!(scrolled_before["displayOffset"], json!(120));
+        let watermark_before = router
+            .session_ref("session-1")
+            .and_then(RemotePtySession::buffer_end);
+
+        router.accept(
+            &json!({
+                "type": "terminal.output",
+                "sessionId": "session-1",
+                "payload": {
+                    "data": "",
+                    "screenData": "\x1b[H\x1b[2Jfresh-live-screen",
+                    "bufferLength": history_end,
+                    "outputSeq": 11,
+                },
+            }),
+            Some("session-1"),
+        );
+
+        let scrolled_after = screen_snapshot(&router, "session-1");
+        assert_eq!(scrolled_after["totalLines"], json!(total_before));
+        assert_eq!(scrolled_after["displayOffset"], json!(120));
+        assert_eq!(
+            router
+                .session_ref("session-1")
+                .and_then(RemotePtySession::buffer_end),
+            watermark_before
+        );
+
+        router.scroll_screen_pixels("session-1", 100_000.0, 20.0);
+        let oldest = screen_text(&router, "session-1");
+        assert!(
+            oldest.contains("line-0000") || oldest.contains("line-0001"),
+            "oldest retained history vanished: {oldest}"
+        );
+        router.scroll_screen_pixels("session-1", -100_000.0, 20.0);
+        let bottom = screen_text(&router, "session-1");
+        assert!(
+            bottom.contains("fresh-live-screen"),
+            "bottom screen: {bottom}"
+        );
     }
 
     #[test]

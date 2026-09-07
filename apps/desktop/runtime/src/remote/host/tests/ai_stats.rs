@@ -64,9 +64,7 @@ fn ai_stats_rejects_unknown_project_instead_of_using_first_project() {
     write_two_project_state(&support_dir);
     let runtime = RemoteHostRuntime::new(support_dir.clone());
     let transport = Arc::new(CapturingTransport::default());
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(transport.clone());
-    }
+    runtime.set_transport_for_test(transport.clone());
 
     runtime.handle_ai_stats(&RemoteEnvelope {
         kind: REMOTE_AI_STATS.to_string(),
@@ -98,9 +96,7 @@ fn ai_session_error_reply_preserves_request_id() {
     let support_dir = temp_support_dir("codux-remote-ai-session-error");
     let runtime = RemoteHostRuntime::new(support_dir.clone());
     let transport = Arc::new(CapturingTransport::default());
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(transport.clone());
-    }
+    runtime.set_transport_for_test(transport.clone());
 
     runtime.handle_ai_session(&RemoteEnvelope {
         kind: REMOTE_AI_SESSION.to_string(),

@@ -10,11 +10,11 @@ impl SettingsService {
             "privacyScrubEnabled" => "privacyScrubEnabled",
             _ => return Err("Unsupported memory setting.".to_string()),
         };
-        let mut raw = self.raw_settings();
-        let memory = ai_memory_mut(&mut raw)?;
-        memory.insert(key.to_string(), Value::Bool(value));
-        self.save_raw_settings(&raw)?;
-        Ok(summary_from_raw(&raw))
+        self.update_raw_settings(|raw| {
+            let memory = ai_memory_mut(raw)?;
+            memory.insert(key.to_string(), Value::Bool(value));
+            Ok(summary_from_raw(raw))
+        })
     }
 
     pub fn set_ai_memory_number(&self, key: &str, value: &str) -> Result<SettingsSummary, String> {
@@ -79,21 +79,21 @@ impl SettingsService {
         let value = allowed
             .and_then(|options| options.iter().find(|option| **option == parsed).copied())
             .unwrap_or(parsed);
-        let mut raw = self.raw_settings();
-        let memory = ai_memory_mut(&mut raw)?;
-        memory.insert(key.to_string(), Value::Number(value.into()));
-        self.save_raw_settings(&raw)?;
-        Ok(summary_from_raw(&raw))
+        self.update_raw_settings(|raw| {
+            let memory = ai_memory_mut(raw)?;
+            memory.insert(key.to_string(), Value::Number(value.into()));
+            Ok(summary_from_raw(raw))
+        })
     }
 
     pub fn set_ai_memory_provider(&self, provider_id: &str) -> Result<SettingsSummary, String> {
-        let mut raw = self.raw_settings();
-        let memory = ai_memory_mut(&mut raw)?;
-        memory.insert(
-            "defaultExtractorProviderId".to_string(),
-            Value::String(sanitize_provider_reference(provider_id)),
-        );
-        self.save_raw_settings(&raw)?;
-        Ok(summary_from_raw(&raw))
+        self.update_raw_settings(|raw| {
+            let memory = ai_memory_mut(raw)?;
+            memory.insert(
+                "defaultExtractorProviderId".to_string(),
+                Value::String(sanitize_provider_reference(provider_id)),
+            );
+            Ok(summary_from_raw(raw))
+        })
     }
 }

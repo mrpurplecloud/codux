@@ -58,14 +58,83 @@ pub(crate) struct RemoteProjectSyncState {
     sync_ready: bool,
     /// Highest catalog version applied on this connection.
     version: Option<u64>,
+    #[cfg(test)]
+    commit_pause: Option<RemoteProjectCommitPause>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoteProjectCommitPoint {
+    Snapshot,
+    LegacyIds,
+    MigrationMarker,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+struct RemoteProjectCommitPause {
+    point: RemoteProjectCommitPoint,
+    accepted: std::sync::mpsc::SyncSender<()>,
+    resume: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
 }
 
 impl RuntimeService {
+    #[cfg(test)]
+    fn pause_next_remote_project_commit_for_test(
+        &self,
+        device_id: &str,
+        epoch: u64,
+        point: RemoteProjectCommitPoint,
+    ) -> (
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::SyncSender<()>,
+    ) {
+        let (accepted, accepted_rx) = std::sync::mpsc::sync_channel(0);
+        let (resume, resume_rx) = std::sync::mpsc::sync_channel(0);
+        let mut states = self.remote_project_sync.lock().unwrap();
+        let state = sync_state_for(&mut states, device_id, epoch).unwrap();
+        state.commit_pause = Some(RemoteProjectCommitPause {
+            point,
+            accepted,
+            resume: Arc::new(Mutex::new(resume_rx)),
+        });
+        (accepted_rx, resume)
+    }
+
+    #[cfg(test)]
+    fn pause_remote_project_commit_for_test(
+        &self,
+        device_id: &str,
+        epoch: u64,
+        point: RemoteProjectCommitPoint,
+    ) {
+        let pause = self.remote_project_sync.lock().ok().and_then(|mut states| {
+            states
+                .get_mut(device_id)
+                .filter(|state| state.connection_epoch == epoch)
+                .and_then(|state| {
+                    if state
+                        .commit_pause
+                        .as_ref()
+                        .is_some_and(|pause| pause.point == point)
+                    {
+                        state.commit_pause.take()
+                    } else {
+                        None
+                    }
+                })
+        });
+        if let Some(pause) = pause {
+            let _ = pause.accepted.send(());
+            let _ = pause.resume.lock().map(|resume| resume.recv());
+        }
+    }
+
     /// Bring every connected host's project catalog up to date. Called on the
     /// runtime tick: cheap when nothing changed, and the one blocking step
-    /// (subscribe on a fresh connection) runs off the caller's thread.
-    pub(crate) fn sync_remote_project_catalogs(&self) -> Vec<RemoteHostEvent> {
-        let mut events = Vec::new();
+    /// (subscribe on a fresh connection) runs off the caller's thread. Project
+    /// changes enqueue their event in the same guarded commit that applies them.
+    pub(crate) fn sync_remote_project_catalogs(&self) {
         for (device_id, epoch, controller) in self.remote_controllers.connected_controllers() {
             if self.claim_remote_project_subscription(&device_id, epoch) {
                 self.spawn_remote_project_subscription(device_id, epoch, controller);
@@ -81,8 +150,7 @@ impl RuntimeService {
             }
             for payload in controller.drain_pushed_project_lists() {
                 match self.apply_remote_project_snapshot(&device_id, epoch, &payload, &controller) {
-                    Ok(true) => events.push(RemoteHostEvent::ProjectsChanged),
-                    Ok(false) => {}
+                    Ok(_) => {}
                     Err(error) => crate::runtime_trace::runtime_trace(
                         "remote-projects",
                         &format!("ignored snapshot from {device_id}: {error}"),
@@ -90,7 +158,6 @@ impl RuntimeService {
                 }
             }
         }
-        events
     }
 
     /// Reserve the once-per-connection subscription for `device_id`. Returns
@@ -246,51 +313,52 @@ impl RuntimeService {
             // already holds for it.
             return Ok(());
         }
+        // Remote reads stay outside the lifecycle hold. If this request outlives
+        // its controller, each local commit below rejects that stale owner.
         let baseline = controller.subscribe_projects()?;
-        if self
-            .remote_controllers
-            .live_connection_epoch(device_id, controller)
-            != Some(epoch)
-        {
-            return Ok(());
-        }
         let store = ProjectStore::new(self.support_dir.clone());
         let pending_migration =
             store.remote_project_migration_version(device_id) < REMOTE_PROJECT_MIGRATION_VERSION;
         let snapshot = if pending_migration {
-            self.register_legacy_remote_projects(device_id, controller, &store, baseline)?
+            self.register_legacy_remote_projects(device_id, epoch, controller, &store, baseline)?
         } else {
             baseline
         };
-        let changed = self.apply_remote_project_snapshot(device_id, epoch, &snapshot, controller)?;
-        if self
-            .remote_controllers
-            .live_connection_epoch(device_id, controller)
-            != Some(epoch)
-        {
+        self.apply_remote_project_snapshot(device_id, epoch, &snapshot, controller)?;
+        #[cfg(test)]
+        self.pause_remote_project_commit_for_test(
+            device_id,
+            epoch,
+            RemoteProjectCommitPoint::MigrationMarker,
+        );
+        let Some(completed) = self.remote_controllers.with_live_connection_owner(
+            device_id,
+            epoch,
+            controller,
+            || -> Result<(), String> {
+                let mut states = self
+                    .remote_project_sync
+                    .lock()
+                    .map_err(|_| "Remote project sync state is poisoned.".to_string())?;
+                let Some(state) = sync_state_for(&mut states, device_id, epoch) else {
+                    return Ok(());
+                };
+                if pending_migration {
+                    // Only now: a marker stored before the reconciliation lands
+                    // would leave a legacy record unmigrated forever.
+                    store.set_remote_project_migration_version(
+                        device_id,
+                        REMOTE_PROJECT_MIGRATION_VERSION,
+                    )?;
+                }
+                state.sync_ready = true;
+                Ok(())
+            },
+        )?
+        else {
             return Ok(());
-        }
-        if pending_migration {
-            // Only now: a marker stored before the reconciliation lands would
-            // leave a legacy record unmigrated and never looked at again.
-            store.set_remote_project_migration_version(
-                device_id,
-                REMOTE_PROJECT_MIGRATION_VERSION,
-            )?;
-        }
-        {
-            let mut states = self
-                .remote_project_sync
-                .lock()
-                .map_err(|_| "Remote project sync state is poisoned.".to_string())?;
-            let Some(state) = sync_state_for(&mut states, device_id, epoch) else {
-                return Ok(());
-            };
-            state.sync_ready = true;
-        }
-        if changed && let Ok(mut events) = self.hosted_runtime_events.lock() {
-            events.push_back(RemoteHostEvent::ProjectsChanged);
-        }
+        };
+        completed?;
         Ok(())
     }
 
@@ -312,6 +380,7 @@ impl RuntimeService {
     fn register_legacy_remote_projects(
         &self,
         device_id: &str,
+        epoch: u64,
         controller: &crate::remote::RemoteController,
         store: &ProjectStore,
         baseline: Value,
@@ -328,29 +397,53 @@ impl RuntimeService {
             ),
         );
         let mut assignments = Vec::with_capacity(legacy.len());
+        // `project.add` is remote and idempotent by normalized path, so never
+        // hold the lifecycle lock across it. If cancellation loses the race and
+        // a stale request completes, the guarded local attachment below is
+        // rejected; the next owner can safely retry registration.
         for project in &legacy {
             let host_project_id = controller.project_add(&project.name, &project.path)?;
             assignments.push((project.project_id.clone(), host_project_id));
         }
-        let change = store.attach_host_project_ids(device_id, &assignments)?;
-        if !change.is_empty() {
-            self.follow_remote_catalog_change(&change);
-            if let Ok(mut events) = self.hosted_runtime_events.lock() {
-                events.push_back(RemoteHostEvent::ProjectsChanged);
-            }
-        }
+        #[cfg(test)]
+        self.pause_remote_project_commit_for_test(
+            device_id,
+            epoch,
+            RemoteProjectCommitPoint::LegacyIds,
+        );
+        let Some(attached) = self.remote_controllers.with_live_connection_owner(
+            device_id,
+            epoch,
+            controller,
+            || -> Result<(), String> {
+                let change = store.attach_host_project_ids(device_id, &assignments)?;
+                if !change.is_empty() {
+                    self.follow_remote_catalog_change(&change);
+                    if let Ok(mut events) = self.hosted_runtime_events.lock() {
+                        events.push_back(RemoteHostEvent::ProjectsChanged);
+                    }
+                }
+                Ok(())
+            },
+        )?
+        else {
+            return Ok(baseline);
+        };
+        attached?;
+        // Keep the follow-up remote read out of the lifecycle hold too. Its
+        // snapshot still passes through the exact-owner commit guard.
         controller.project_list()
     }
 
     /// Reconcile one `project.list` snapshot and refresh the transport's id
     /// bridge. Returns whether the local store changed.
     ///
-    /// Version check, store write, and version record happen under one hold of
-    /// the sync-state lock. Latest-wins needs the applied version and the
-    /// applied catalog to be the same fact: recording a version around a write
-    /// that then fails would make the host's next re-delivery of it a duplicate
-    /// and ignore it forever, and two snapshots applying at once could leave the
-    /// older one's catalog behind the newer one's version.
+    /// Exact controller ownership is the outer hold; version check, store write,
+    /// version record, local lifecycle, and generic publication complete before
+    /// it is released. Latest-wins needs the applied version and catalog to be
+    /// the same fact: recording a version around a failed write would make the
+    /// host's next re-delivery a duplicate and ignore it forever, while releasing
+    /// before publication could let a newer snapshot's effects land first.
     fn apply_remote_project_snapshot(
         &self,
         device_id: &str,
@@ -358,13 +451,6 @@ impl RuntimeService {
         payload: &Value,
         controller: &crate::remote::RemoteController,
     ) -> Result<bool, String> {
-        if self
-            .remote_controllers
-            .live_connection_epoch(device_id, controller)
-            != Some(epoch)
-        {
-            return Ok(false);
-        }
         // Parsing is the caller's error to report, and it needs no lock.
         let catalog = remote_catalog_from_payload(payload)?;
         let version = match payload.get("version") {
@@ -374,33 +460,56 @@ impl RuntimeService {
             })?),
         };
         let store = ProjectStore::new(self.support_dir.clone());
-        let change = {
-            let mut states = self
-                .remote_project_sync
-                .lock()
-                .map_err(|_| "Remote project sync state is poisoned.".to_string())?;
-            let Some(state) = sync_state_for(&mut states, device_id, epoch) else {
-                return Ok(false);
-            };
-            // An unversioned snapshot comes from a host without the resource
-            // version stamp; apply it and leave the guard where it is.
-            if version.is_some_and(|version| {
-                state.version.is_some_and(|applied| version <= applied)
-            }) {
-                return Ok(false);
-            }
-            let change = store.reconcile_remote_projects(device_id, &catalog)?;
-            controller.set_project_id_pairs(store.remote_project_id_pairs(device_id));
-            if let Some(version) = version {
-                state.version = Some(version);
-            }
-            change
-        };
-        if change.is_empty() {
+        #[cfg(test)]
+        self.pause_remote_project_commit_for_test(
+            device_id,
+            epoch,
+            RemoteProjectCommitPoint::Snapshot,
+        );
+        let Some(change) = self.remote_controllers.with_live_connection_owner(
+            device_id,
+            epoch,
+            controller,
+            || -> Result<Option<_>, String> {
+                let mut states = self
+                    .remote_project_sync
+                    .lock()
+                    .map_err(|_| "Remote project sync state is poisoned.".to_string())?;
+                let Some(state) = sync_state_for(&mut states, device_id, epoch) else {
+                    return Ok(None);
+                };
+                // An unversioned snapshot comes from a host without the resource
+                // version stamp; apply it and leave the guard where it is.
+                if version.is_some_and(|version| {
+                    state.version.is_some_and(|applied| version <= applied)
+                }) {
+                    return Ok(None);
+                }
+                // Reserve publication before mutating the authoritative local
+                // projection. A poisoned queue must not leave a committed
+                // change that can never produce its one generic refresh.
+                let mut events = self
+                    .hosted_runtime_events
+                    .lock()
+                    .map_err(|_| "Remote runtime event queue is poisoned.".to_string())?;
+                let change = store.reconcile_remote_projects(device_id, &catalog)?;
+                controller.set_project_id_pairs(store.remote_project_id_pairs(device_id));
+                if let Some(version) = version {
+                    state.version = Some(version);
+                }
+                if change.is_empty() {
+                    return Ok(Some(false));
+                }
+                drop(states);
+                self.follow_remote_catalog_change(&change);
+                events.push_back(RemoteHostEvent::ProjectsChanged);
+                Ok(Some(true))
+            },
+        )?
+        else {
             return Ok(false);
-        }
-        self.follow_remote_catalog_change(&change);
-        Ok(true)
+        };
+        Ok(change?.unwrap_or(false))
     }
 
     /// Follow a catalog change with the runtime lifecycle the local paths run.

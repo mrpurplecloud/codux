@@ -434,11 +434,11 @@ impl TerminalManager {
         &self,
         session_id: &str,
         max_chars: usize,
-        viewport_max_lines: Option<usize>,
+        use_remote_viewport: bool,
     ) -> Result<TerminalBaselineSnapshot> {
         Ok(self
             .session(session_id)?
-            .baseline_snapshot(max_chars, viewport_max_lines))
+            .baseline_snapshot(max_chars, use_remote_viewport))
     }
 
     pub fn screen_snapshot(&self, session_id: &str) -> Result<TerminalScreenSnapshot> {

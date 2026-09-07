@@ -79,7 +79,7 @@ void main() {
       ]),
     });
 
-    final devices = await StorageService().loadDevices();
+    final devices = (await StorageService().initializeDevices()).devices;
 
     expect(devices.single.transports, hasLength(1));
     final iroh = devices.single.transportByKind(RemoteTransportKind.iroh);
@@ -89,5 +89,48 @@ void main() {
     // field by field dropped the endpoint ticket on every app start, so a
     // device paired with direct addresses lost them at the next launch.
     expect(iroh?.ticket, 'endpoint-ticket');
+  });
+
+  test('device normalization writes through the snapshot owner', () async {
+    SharedPreferences.setMockInitialValues({
+      'flutter.${StorageService.devicesKey}': jsonEncode([
+        {
+          'hostId': 'host-1',
+          'deviceId': 'device-1',
+          'token': '',
+          'name': 'Phone',
+          'transports': [
+            {'kind': 'unsupported'},
+          ],
+        },
+      ]),
+    });
+
+    final devices = (await StorageService().initializeDevices()).devices;
+    final persisted = (await SharedPreferences.getInstance()).getString(
+      StorageService.devicesKey,
+    );
+
+    expect(devices.single.transports, isEmpty);
+    expect(persisted, isNotNull);
+    expect((jsonDecode(persisted!) as List).single['transports'], isEmpty);
+  });
+
+  test('single-device migration writes through the snapshot owner', () async {
+    SharedPreferences.setMockInitialValues({
+      'flutter.${StorageService.singleDeviceKey}': jsonEncode({
+        'hostId': 'host-1',
+        'deviceId': 'device-1',
+        'token': '',
+        'name': 'Phone',
+      }),
+    });
+    final devices = (await StorageService().initializeDevices()).devices;
+    final persisted = (await SharedPreferences.getInstance()).getString(
+      StorageService.devicesKey,
+    );
+
+    expect(devices.single.hostId, 'host-1');
+    expect(persisted, isNotNull);
   });
 }

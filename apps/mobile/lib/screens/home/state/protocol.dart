@@ -83,6 +83,7 @@ extension _HomePageProtocol on HomeController {
           }
           final hostRuntimeChanged = _recordHostRuntimeInstance(
             message.payload,
+            hostId: target.hostId,
           );
           _markHostResponsive(
             'host.info',
@@ -93,6 +94,9 @@ extension _HomePageProtocol on HomeController {
           final payload = message.payload;
           if (payload is Map) {
             _terminalBufferCapability = TerminalBufferCapability.fromHostInfo(
+              payload,
+            );
+            _terminalUploadCapability = TerminalUploadCapability.fromHostInfo(
               payload,
             );
             _resourceSubscriptionCoordinator.configure(
@@ -181,7 +185,7 @@ extension _HomePageProtocol on HomeController {
         case final type when type == RemoteMessageType.gitRead:
           _handleGitRead(message.payload);
         case final type when type == RemoteMessageType.aiSessionResult:
-          _handleAISessionResult(message.payload);
+          _handleAISessionResult(message);
         case final type when type == RemoteMessageType.sshListResult:
           _handleSshListResult(message.payload);
         case final type when type == RemoteMessageType.fileRead:
@@ -440,11 +444,49 @@ extension _HomePageProtocol on HomeController {
       _requireRepairPairing(payload);
       return;
     }
+    final pendingRestore = _pendingAISessionRestore;
+    if (pendingRestore != null &&
+        message.requestId == pendingRestore.requestId) {
+      _pendingAISessionRestore = null;
+    }
     final errorMessage =
         message.error ??
         (payload is Map
             ? '${payload['message'] ?? _t('remote.error')}'
             : _t('remote.error'));
+    if (_terminalUploadReplyGuard.consumeAmbiguousLegacyReply(
+      message,
+      hostId: _activeDevice?.hostId,
+      runtimeInstanceId: _hostRuntimeInstanceId,
+    )) {
+      CoduxLog.info(
+        '[codux-flutter-upload] resolve retired legacy failure session=${message.sessionId ?? ''} device=${message.deviceId ?? ''}',
+      );
+      return;
+    }
+    final uploadDisposition = classifyTerminalUploadError(
+      message,
+      activeOperation: _terminalUploadOperation,
+      activeSessionId: _sessionId,
+      activeDeviceId: _activeDevice?.deviceId,
+      activeTransport: _activeTransport,
+      mounted: mounted,
+      canUpload: _canUploadOverCurrentPath,
+    );
+    if (uploadDisposition != TerminalUploadErrorDisposition.notUploadError) {
+      if (uploadDisposition == TerminalUploadErrorDisposition.matched) {
+        _terminalUploadOperation!.completeFromReply();
+        _applyState(() => _status = errorMessage);
+        CoduxLog.warn(
+          '[codux-flutter-upload] remote failure request=${message.requestId ?? ''} message=$errorMessage',
+        );
+      } else {
+        CoduxLog.info(
+          '[codux-flutter-upload] drop stale failure request=${message.requestId ?? ''} session=${message.sessionId ?? ''}',
+        );
+      }
+      return;
+    }
     CoduxLog.warn(
       '[codux-flutter-remote] error type=${message.type} session=${message.sessionId ?? ''} message=$errorMessage',
     );

@@ -208,6 +208,11 @@ extension _HomePageTransport on HomeController {
 
   Future<void> _closeActiveTransport() async {
     final transport = _activeTransport;
+    _cancelTerminalUpload(
+      reason: 'transport-close',
+      transport: transport,
+      notify: false,
+    );
     _activeTransport = null;
     await transport?.close();
   }

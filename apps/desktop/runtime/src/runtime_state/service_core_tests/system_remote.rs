@@ -63,6 +63,93 @@ fn revoke_remote_device_preserves_connected_host_snapshot() {
 }
 
 #[test]
+fn relay_reconfigure_paths_share_reset_and_refresh_contract() {
+    let support_dir =
+        std::env::temp_dir().join(format!("codux-relay-reconfigure-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&support_dir).expect("create support dir");
+    fs::write(
+        support_dir.join("settings.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "remote": {
+                "isEnabled": false,
+                "relayPreset": "custom",
+                "relayUrl": "https://old-relay.example",
+                "relayAuthentication": "old-auth",
+                "hostID": "host-1",
+                "futureRemoteField": "keep-remote",
+                "cachedDevices": [
+                    {
+                        "id": "device-1",
+                        "hostId": "host-1",
+                        "name": "Phone",
+                        "token": "device-token",
+                        "platform": "ios",
+                        "futureField": "keep-device"
+                    }
+                ]
+            }
+        }))
+        .expect("settings json"),
+    )
+    .expect("write settings");
+    let service = RuntimeService::new(support_dir.clone());
+    let config = crate::config::ConfigStore::for_file(crate::config::settings_file_path(
+        support_dir.clone(),
+    ));
+    let mut expected_remote = config.get("remote").expect("remote settings");
+
+    let (settings, remote) = service
+        .set_remote_relay_url("https://new-relay.example")
+        .expect("set relay URL");
+    assert_eq!(settings.remote_relay_preset, "custom");
+    assert_eq!(settings.remote_relay_url, "https://new-relay.example");
+    assert_eq!(
+        service.app_settings_snapshot().remote.cached_devices.len(),
+        1
+    );
+    expected_remote["relayUrl"] =
+        serde_json::Value::String("https://new-relay.example".to_string());
+    assert_eq!(config.get("remote"), Some(expected_remote.clone()));
+    assert_eq!(remote.status, "stopped");
+
+    let (settings, remote) = service
+        .set_remote_relay_authentication_with_device_reset(" new-auth ", false)
+        .expect("set relay authentication");
+    assert_eq!(settings.remote_relay_authentication, "new-auth");
+    assert_eq!(
+        service.app_settings_snapshot().remote.cached_devices.len(),
+        1
+    );
+    expected_remote["relayAuthentication"] = serde_json::Value::String("new-auth".to_string());
+    assert_eq!(config.get("remote"), Some(expected_remote.clone()));
+    assert_eq!(remote.status, "stopped");
+
+    let (settings, remote) = service
+        .set_remote_relay_preset_with_device_reset("global", true)
+        .expect("set relay preset and reset devices");
+    assert_eq!(settings.remote_relay_preset, "global");
+    assert!(
+        service
+            .app_settings_snapshot()
+            .remote
+            .cached_devices
+            .is_empty()
+    );
+    expected_remote["relayPreset"] = serde_json::Value::String("global".to_string());
+    expected_remote["relayUrl"] = serde_json::Value::String(String::new());
+    expected_remote["cachedDevices"] = serde_json::Value::Array(Vec::new());
+    assert_eq!(config.get("remote"), Some(expected_remote.clone()));
+    assert_eq!(remote.status, "stopped");
+    crate::config::flush_all_config_writes();
+    let saved: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(support_dir.join("settings.json")).expect("flushed settings"),
+    )
+    .expect("settings json");
+    assert_eq!(saved.get("remote"), Some(&expected_remote));
+    let _ = fs::remove_dir_all(support_dir);
+}
+
+#[test]
 fn runtime_dock_badge_count_matches_tauri_attention_semantics() {
     let mut snapshot = AIRuntimeStateSnapshot::default();
 
@@ -174,29 +261,47 @@ fn ai_history_global_scope_includes_project_roots_and_worktrees() {
     assert!(requests.iter().any(|request| request.id == "project-a"));
     assert!(requests.iter().any(|request| request.id == "project-b"));
     assert!(requests.iter().any(|request| request.id == "worktree-a"));
-    assert!(requests.iter().any(|request| request.id == "project-windows"));
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.id == "project-windows")
+    );
     assert!(!requests.iter().any(|request| request.id == "project-wsl"));
     assert!(!requests.iter().any(|request| request.id == "worktree-wsl"));
-    assert!(!requests.iter().any(|request| request.id == "project-remote"));
-    assert!(!requests.iter().any(|request| request.id == "worktree-remote"));
-    assert!(!requests.iter().any(|request| request.id == "duplicate-root"));
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.id == "project-remote")
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.id == "worktree-remote")
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.id == "duplicate-root")
+    );
     #[cfg(windows)]
-    assert!(!requests
-        .iter()
-        .any(|request| request.id == "duplicate-windows-root"));
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.id == "duplicate-windows-root")
+    );
     #[cfg(not(windows))]
-    assert!(requests
-        .iter()
-        .any(|request| request.id == "duplicate-windows-root"));
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.id == "duplicate-windows-root")
+    );
     let _ = fs::remove_dir_all(support_dir);
 }
 
 #[test]
 fn applying_global_history_updates_daily_level_from_the_same_snapshot() {
-    let support_dir = std::env::temp_dir().join(format!(
-        "codux-ai-history-level-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let support_dir =
+        std::env::temp_dir().join(format!("codux-ai-history-level-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&support_dir).expect("create support dir");
     let mut state = RuntimeState::load_from_support_dir(support_dir.clone());
     let history = AIGlobalHistorySummary {

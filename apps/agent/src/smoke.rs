@@ -94,7 +94,7 @@ async fn run_transport_smoke_async() -> Result<String, String> {
                     let _ = tx.send(format!("{source}:{text}"));
                 })
             },
-            on_upload: Arc::new(|_| Ok(())),
+            on_upload: Arc::new(|_| Err("upload unsupported in smoke test".to_string())),
             on_state: Arc::new(|_, _| {}),
             on_pairing: Arc::new(|_| None),
             on_authorize: Arc::new(|_, _| true),
@@ -103,8 +103,8 @@ async fn run_transport_smoke_async() -> Result<String, String> {
         },
     )
     .await?;
-    let (node_id, relay_url) = host
-        .iroh_candidate()
+    let candidate = host
+        .current_dial_candidate()
         .ok_or_else(|| "iroh host candidate missing".to_string())?;
     let controller_config = RemoteControllerTransportConfig {
         relay_url: config.relay_url,
@@ -114,9 +114,9 @@ async fn run_transport_smoke_async() -> Result<String, String> {
         transports: vec![RemoteTransportCandidate {
             kind: codux_protocol::REMOTE_TRANSPORT_IROH.to_string(),
             url: "https://relay.example/v3".to_string(),
-            node_id,
-            relay_url,
-            ticket: host.iroh_endpoint_ticket().unwrap_or_default(),
+            node_id: candidate.node_id,
+            relay_url: candidate.relay_url,
+            ticket: candidate.ticket,
             relay_authentication: String::new(),
         }],
         direct_addrs: Vec::new(),

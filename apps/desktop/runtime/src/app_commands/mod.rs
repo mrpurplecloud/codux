@@ -49,7 +49,7 @@ use crate::{
     },
     remote::RemoteSummary,
     runtime_state::{AppRuntimeReadySnapshot, RuntimeService, RuntimeWindowStateSnapshot},
-    settings::{AIProviderSettings, AppSettings, AppSettingsStore, sync_process_locale_preference},
+    settings::{AIProviderSettings, AppSettings},
     ssh::SSHLaunchCommand,
     ssh::{SSHProfileTestResult, SSHProfileUpsertRequest, SSHProfilesSnapshot},
     worktree::{

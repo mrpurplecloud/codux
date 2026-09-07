@@ -7,21 +7,22 @@ impl RemoteService {
         if device_id.is_empty() {
             return Err("Missing device id.".to_string());
         }
-        let mut raw = self.raw_settings();
-        let mut settings = remote_settings_from_raw(&raw);
-        let before_len = settings.cached_devices.len();
-        settings
-            .cached_devices
-            .retain(|device| device.id != device_id);
-        if settings.cached_devices.len() == before_len {
-            return Err("Remote device not found.".to_string());
-        }
-        raw.insert(
-            "remote".to_string(),
-            serde_json::to_value(&settings).map_err(|error| error.to_string())?,
-        );
-        self.save_raw_settings(&raw)?;
-        let mut summary = self.summary();
+        let settings = self.update_raw_settings(|raw| {
+            let mut settings = remote_settings_from_raw(raw);
+            let before_len = settings.cached_devices.len();
+            settings
+                .cached_devices
+                .retain(|device| device.id != device_id);
+            if settings.cached_devices.len() == before_len {
+                return Err("Remote device not found.".to_string());
+            }
+            raw.insert(
+                "remote".to_string(),
+                serde_json::to_value(&settings).map_err(|error| error.to_string())?,
+            );
+            Ok(settings)
+        })?;
+        let mut summary = super::summary::remote_summary_from_settings(settings);
         summary.message = "Device removed.".to_string();
         Ok(summary)
     }
@@ -35,19 +36,20 @@ impl RemoteService {
     }
 
     fn refresh_devices_local(&self) -> Result<RemoteSummary, String> {
-        let mut raw = self.raw_settings();
-        let mut settings = remote_settings_from_raw(&raw);
-        if !settings.is_enabled {
-            return Ok(super::summary::remote_summary_from_settings(settings));
-        }
-        for device in &mut settings.cached_devices {
-            device.online = Some(false);
-        }
-        raw.insert(
-            "remote".to_string(),
-            serde_json::to_value(&settings).map_err(|error| error.to_string())?,
-        );
-        self.save_raw_settings(&raw)?;
+        let settings = self.update_raw_settings(|raw| {
+            let mut settings = remote_settings_from_raw(raw);
+            if !settings.is_enabled {
+                return Ok(settings);
+            }
+            for device in &mut settings.cached_devices {
+                device.online = Some(false);
+            }
+            raw.insert(
+                "remote".to_string(),
+                serde_json::to_value(&settings).map_err(|error| error.to_string())?,
+            );
+            Ok(settings)
+        })?;
         Ok(super::summary::remote_summary_from_settings(settings))
     }
 }

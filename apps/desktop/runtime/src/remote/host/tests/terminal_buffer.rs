@@ -255,9 +255,7 @@ fn remote_terminal_buffer_window_tail_includes_target_viewport_keyframe() {
         Arc::clone(&terminals),
     ));
     let transport = Arc::new(CapturingTransport::default());
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(transport.clone());
-    }
+    runtime.set_transport_for_test(transport.clone());
     let session_id = terminals
         .create(
             TerminalPtyConfig {
@@ -343,9 +341,7 @@ fn terminal_resource_subscribe_baseline_keyframe_for_alt_screen() {
         Arc::clone(&terminals),
     ));
     let transport = Arc::new(CapturingTransport::default());
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(transport.clone());
-    }
+    runtime.set_transport_for_test(transport.clone());
     let session_id = terminals
         .create(
             TerminalPtyConfig {
@@ -436,9 +432,7 @@ fn remote_terminal_live_output_is_data_only_without_screen_keyframe() {
         Arc::clone(&terminals),
     ));
     let transport = Arc::new(CapturingTransport::default());
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(transport.clone());
-    }
+    runtime.set_transport_for_test(transport.clone());
     let session_id = terminals
         .create(
             TerminalPtyConfig {
@@ -562,9 +556,7 @@ fn terminal_subscribe_does_not_push_screen_keyframe() {
         Arc::clone(&terminals),
     ));
     let transport = Arc::new(CapturingTransport::default());
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(transport.clone());
-    }
+    runtime.set_transport_for_test(transport.clone());
     let session_id = terminals
         .create(
             TerminalPtyConfig {

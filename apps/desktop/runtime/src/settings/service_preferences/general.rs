@@ -36,48 +36,48 @@ impl SettingsService {
     }
 
     pub fn toggle_dock_badge(&self) -> Result<SettingsSummary, String> {
-        let mut raw = self.raw_settings();
-        let current = raw
-            .get("showsDockBadge")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
-        raw.insert("showsDockBadge".to_string(), Value::Bool(!current));
-        self.save_raw_settings(&raw)?;
-        Ok(summary_from_raw(&raw))
+        self.update_raw_settings(|raw| {
+            let current = raw
+                .get("showsDockBadge")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            raw.insert("showsDockBadge".to_string(), Value::Bool(!current));
+            Ok(summary_from_raw(raw))
+        })
     }
 
     pub fn toggle_developer_hud(&self) -> Result<SettingsSummary, String> {
-        let mut raw = self.raw_settings();
-        let current = raw
-            .get("developerHud")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        raw.insert("developerHud".to_string(), Value::Bool(!current));
-        self.save_raw_settings(&raw)?;
-        Ok(summary_from_raw(&raw))
+        self.update_raw_settings(|raw| {
+            let current = raw
+                .get("developerHud")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            raw.insert("developerHud".to_string(), Value::Bool(!current));
+            Ok(summary_from_raw(raw))
+        })
     }
 
     pub fn toggle_wsl_enabled(&self) -> Result<SettingsSummary, String> {
-        let mut raw = self.raw_settings();
-        let current = raw
-            .get("wslEnabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
-        raw.insert("wslEnabled".to_string(), Value::Bool(!current));
-        self.save_raw_settings(&raw)?;
-        Ok(summary_from_raw(&raw))
+        self.update_raw_settings(|raw| {
+            let current = raw
+                .get("wslEnabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            raw.insert("wslEnabled".to_string(), Value::Bool(!current));
+            Ok(summary_from_raw(raw))
+        })
     }
 
     pub fn toggle_memory_enabled(&self) -> Result<SettingsSummary, String> {
-        let mut raw = self.raw_settings();
-        let memory = ai_memory_mut(&mut raw)?;
-        let current = memory
-            .get("enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        memory.insert("enabled".to_string(), Value::Bool(!current));
-        self.save_raw_settings(&raw)?;
-        Ok(summary_from_raw(&raw))
+        self.update_raw_settings(|raw| {
+            let memory = ai_memory_mut(raw)?;
+            let current = memory
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            memory.insert("enabled".to_string(), Value::Bool(!current));
+            Ok(summary_from_raw(raw))
+        })
     }
 
     pub fn set_sleep_mode(&self, mode: &str) -> Result<SettingsSummary, String> {

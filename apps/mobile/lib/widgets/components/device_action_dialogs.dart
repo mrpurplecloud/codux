@@ -69,12 +69,7 @@ class _DeviceEditDialogState extends State<DeviceEditDialog> {
           style: TextButton.styleFrom(foregroundColor: accent),
           onPressed: () {
             final name = _controller.text.trim();
-            Navigator.pop(
-              context,
-              widget.device.copyWith(
-                hostName: name.isEmpty ? widget.device.hostName : name,
-              ),
-            );
+            Navigator.pop<String>(context, name.isEmpty ? null : name);
           },
           child: Text(widget.saveLabel),
         ),

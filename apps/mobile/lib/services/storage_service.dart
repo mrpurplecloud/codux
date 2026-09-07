@@ -1,15 +1,23 @@
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/remote_models.dart';
+import 'device_snapshot_store.dart';
 
 class StorageService {
+  StorageService({DeviceSnapshotStore? deviceSnapshots})
+    : _deviceSnapshots =
+          deviceSnapshots ??
+          DeviceSnapshotStore(read: _readDeviceSeed, write: _writeDevices);
+
   static const devicesKey = 'codux.mobile.devices';
   static const singleDeviceKey = 'codux.mobile.device';
   static const lastDeviceIdKey = 'codux.mobile.last_device_id';
   static const settingsKey = 'codux.mobile.settings';
   static const projectCachePrefix = 'codux.mobile.projects';
 
-  Future<List<StoredDevice>> loadDevices() async {
+  final DeviceSnapshotStore _deviceSnapshots;
+
+  static Future<DeviceSnapshotSeed> _readDeviceSeed() async {
     final prefs = await SharedPreferences.getInstance();
     final value = prefs.getString(devicesKey);
     if (value != null && value.isNotEmpty) {
@@ -17,33 +25,38 @@ class StorageService {
       final devices = list
           .map((item) => StoredDevice.fromJson(item as Map<String, dynamic>))
           .toList();
-      return _normalizeAndPersistDevices(prefs, devices);
+      final normalized = devices.map(_normalizeDeviceTransport).toList();
+      return DeviceSnapshotSeed(
+        normalized,
+        requiresCommit: _encodeDevices(normalized) != _encodeDevices(devices),
+      );
     }
     final singleDevice = prefs.getString(singleDeviceKey);
     if (singleDevice != null && singleDevice.isNotEmpty) {
       final migrated = [
         StoredDevice.fromJson(jsonDecode(singleDevice) as Map<String, dynamic>),
-      ];
-      await saveDevices(migrated);
-      return migrated;
+      ].map(_normalizeDeviceTransport);
+      return DeviceSnapshotSeed(migrated, requiresCommit: true);
     }
-    return [];
+    return DeviceSnapshotSeed(const []);
   }
 
-  Future<List<StoredDevice>> _normalizeAndPersistDevices(
-    SharedPreferences prefs,
-    List<StoredDevice> devices,
-  ) async {
-    final normalized = devices.map(_normalizeDeviceTransport).toList();
-    if (jsonEncode(normalized.map((item) => item.toJson()).toList()) !=
-        jsonEncode(devices.map((item) => item.toJson()).toList())) {
-      await prefs.setString(
-        devicesKey,
-        jsonEncode(normalized.map((item) => item.toJson()).toList()),
-      );
-    }
-    return normalized;
+  static Future<bool> _writeDevices(List<StoredDevice> devices) async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.setString(devicesKey, _encodeDevices(devices));
   }
+
+  Future<DeviceSnapshot> initializeDevices() => _deviceSnapshots.initialize();
+
+  Future<DeviceSnapshot> currentDeviceSnapshot() => _deviceSnapshots.snapshot();
+
+  Future<DeviceSnapshot?> applyRequiredDeviceMutation(
+    DeviceMutation mutation,
+  ) => _deviceSnapshots.applyRequired(mutation);
+
+  Future<DeviceSnapshot?> applyBackgroundDeviceMutation(
+    DeviceMutation mutation,
+  ) => _deviceSnapshots.applyBackground(mutation);
 
   /// Drop transports this build cannot dial, keeping the rest as stored.
   ///
@@ -52,19 +65,11 @@ class StorageService {
   /// pairing lost it on the next launch, and with it the host's direct
   /// addresses. Filtering is the whole job; the candidates pass through
   /// untouched.
-  StoredDevice _normalizeDeviceTransport(StoredDevice device) {
+  static StoredDevice _normalizeDeviceTransport(StoredDevice device) {
     final transports = device.transports
         .where((candidate) => candidate.kind == RemoteTransportKind.iroh)
         .toList();
     return device.copyWith(transports: transports);
-  }
-
-  Future<void> saveDevices(List<StoredDevice> devices) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      devicesKey,
-      jsonEncode(devices.map((item) => item.toJson()).toList()),
-    );
   }
 
   Future<String?> loadLastDeviceId() async {
@@ -115,3 +120,6 @@ class StorageService {
   String _projectCacheKey(StoredDevice device) =>
       '$projectCachePrefix.${device.hostId}';
 }
+
+String _encodeDevices(Iterable<StoredDevice> devices) =>
+    jsonEncode(devices.map((item) => item.toJson()).toList());

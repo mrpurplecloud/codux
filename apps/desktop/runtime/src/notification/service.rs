@@ -20,26 +20,26 @@ impl NotificationService {
         if channel_id.is_empty() {
             return Err("Notification channel id is empty.".to_string());
         }
-        let mut raw = self.raw_settings();
-        let channels = notification_channels_mut(&mut raw)?;
-        let channel = channels
-            .entry(channel_id.to_string())
-            .or_insert_with(|| Value::Object(Map::new()))
-            .as_object_mut()
-            .ok_or_else(|| "Notification channel settings are invalid.".to_string())?;
-        let current = channel
-            .get("enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        channel.insert("enabled".to_string(), Value::Bool(!current));
-        channel
-            .entry("endpoint".to_string())
-            .or_insert_with(|| Value::String(String::new()));
-        channel
-            .entry("token".to_string())
-            .or_insert_with(|| Value::String(String::new()));
-        self.save_raw_settings(&raw)?;
-        Ok(summary_from_raw(&raw))
+        self.update_raw_settings(|raw| {
+            let channels = notification_channels_mut(raw)?;
+            let channel = channels
+                .entry(channel_id.to_string())
+                .or_insert_with(|| Value::Object(Map::new()))
+                .as_object_mut()
+                .ok_or_else(|| "Notification channel settings are invalid.".to_string())?;
+            let current = channel
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            channel.insert("enabled".to_string(), Value::Bool(!current));
+            channel
+                .entry("endpoint".to_string())
+                .or_insert_with(|| Value::String(String::new()));
+            channel
+                .entry("token".to_string())
+                .or_insert_with(|| Value::String(String::new()));
+            Ok(summary_from_raw(raw))
+        })
     }
 
     pub fn set_channel_enabled(
@@ -47,11 +47,11 @@ impl NotificationService {
         channel_id: &str,
         enabled: bool,
     ) -> Result<NotificationSummary, String> {
-        let mut raw = self.raw_settings();
-        let channel = notification_channel_mut(&mut raw, channel_id)?;
-        channel.insert("enabled".to_string(), Value::Bool(enabled));
-        self.save_raw_settings(&raw)?;
-        Ok(summary_from_raw(&raw))
+        self.update_raw_settings(|raw| {
+            let channel = notification_channel_mut(raw, channel_id)?;
+            channel.insert("enabled".to_string(), Value::Bool(enabled));
+            Ok(summary_from_raw(raw))
+        })
     }
 
     pub fn update_channel_string(
@@ -65,14 +65,14 @@ impl NotificationService {
             "token" => "token",
             _ => return Err("Unsupported notification channel field.".to_string()),
         };
-        let mut raw = self.raw_settings();
-        let channel = notification_channel_mut(&mut raw, channel_id)?;
-        channel.insert(
-            key.to_string(),
-            Value::String(value.trim().chars().take(1_000).collect()),
-        );
-        self.save_raw_settings(&raw)?;
-        Ok(summary_from_raw(&raw))
+        self.update_raw_settings(|raw| {
+            let channel = notification_channel_mut(raw, channel_id)?;
+            channel.insert(
+                key.to_string(),
+                Value::String(value.trim().chars().take(1_000).collect()),
+            );
+            Ok(summary_from_raw(raw))
+        })
     }
 
     pub fn test_channel(&self, channel_id: &str) -> Result<NotificationDispatchResult, String> {
@@ -105,7 +105,10 @@ impl NotificationService {
         ConfigStore::for_file(self.settings_path.clone()).snapshot()
     }
 
-    fn save_raw_settings(&self, settings: &Map<String, Value>) -> Result<(), String> {
-        ConfigStore::for_file(self.settings_path.clone()).save_snapshot(settings)
+    fn update_raw_settings<R>(
+        &self,
+        update: impl FnOnce(&mut Map<String, Value>) -> Result<R, String>,
+    ) -> Result<R, String> {
+        ConfigStore::for_file(self.settings_path.clone()).update(update)
     }
 }

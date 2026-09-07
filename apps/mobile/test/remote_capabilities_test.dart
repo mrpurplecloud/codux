@@ -49,6 +49,22 @@ void main() {
     expect(capability.requestId, isTrue);
   });
 
+  test('terminal upload request IDs use their own advertised capability', () {
+    final legacy = TerminalUploadCapability.fromHostInfo({
+      'capabilities': {
+        'terminalBuffer': {'requestId': true},
+      },
+    });
+    final correlated = TerminalUploadCapability.fromHostInfo({
+      'capabilities': {
+        'terminalUpload': {'requestId': true},
+      },
+    });
+
+    expect(legacy.requestId, isFalse);
+    expect(correlated.requestId, isTrue);
+  });
+
   test('limits terminal buffer capability to mobile default', () {
     final capability = TerminalBufferCapability.fromHostInfo({
       'protocolVersion': 'v3.2',

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:codux_flutter/models/remote_models.dart';
+import 'package:codux_flutter/services/terminal_activation.dart';
 import 'package:codux_flutter/services/terminal_input_reliable_sender.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -8,8 +9,9 @@ void main() {
   test('sends terminal input with input id and retries until ack', () {
     final timers = <_FakeTimer>[];
     final sent = <RelayEnvelope>[];
+    final activation = TerminalActivation('session-1');
     final sender = TerminalInputReliableSender(
-      activeSessionId: () => 'session-1',
+      activeActivation: () => activation,
       retryBaseDelay: const Duration(milliseconds: 10),
       send: (message) {
         sent.add(message);
@@ -23,7 +25,7 @@ void main() {
     );
 
     expect(
-      sender.send(sessionId: 'session-1', data: 'a', source: 'key'),
+      sender.send(activation: activation, data: 'a', source: 'key'),
       isTrue,
     );
     expect(sent.single.type, 'terminal.input');
@@ -43,12 +45,13 @@ void main() {
     expect(sender.pendingCount, 0);
   });
 
-  test('does not resend when active session changes', () {
+  test('does not revive an old retry after A-B-A activation changes', () {
     final timers = <_FakeTimer>[];
     final sent = <RelayEnvelope>[];
-    var activeSession = 'session-1';
+    final firstA = TerminalActivation('session-a');
+    var activeActivation = firstA;
     final sender = TerminalInputReliableSender(
-      activeSessionId: () => activeSession,
+      activeActivation: () => activeActivation,
       send: (message) {
         sent.add(message);
         return true;
@@ -60,18 +63,23 @@ void main() {
       },
     );
 
-    sender.send(sessionId: 'session-1', data: 'a', source: 'key');
-    activeSession = 'session-2';
+    sender.send(activation: firstA, data: 'a', source: 'key');
+    activeActivation = TerminalActivation('session-b');
+    activeActivation = TerminalActivation('session-a');
     timers.single.fire();
 
     expect(sent.length, 1);
-    expect(sender.pendingCount, 1);
+    expect(sender.pendingCount, 0);
+    expect(timers.single.isActive, isFalse);
+    expect(timers.single.wasCancelled, isTrue);
   });
 
-  test('clear cancels pending retry timers', () {
+  test('drops pending input when active session disappears', () {
     final timers = <_FakeTimer>[];
+    final activation = TerminalActivation('session-1');
+    TerminalActivation? activeActivation = activation;
     final sender = TerminalInputReliableSender(
-      activeSessionId: () => 'session-1',
+      activeActivation: () => activeActivation,
       send: (_) => true,
       timerFactory: (delay, callback) {
         final timer = _FakeTimer(callback);
@@ -80,8 +88,30 @@ void main() {
       },
     );
 
-    sender.send(sessionId: 'session-1', data: 'a', source: 'key');
-    sender.clear(sessionId: 'session-1');
+    sender.send(activation: activation, data: 'a', source: 'key');
+    activeActivation = null;
+    timers.single.fire();
+
+    expect(sender.pendingCount, 0);
+    expect(timers.single.isActive, isFalse);
+    expect(timers.single.wasCancelled, isTrue);
+  });
+
+  test('clear cancels pending retry timers', () {
+    final timers = <_FakeTimer>[];
+    final activation = TerminalActivation('session-1');
+    final sender = TerminalInputReliableSender(
+      activeActivation: () => activation,
+      send: (_) => true,
+      timerFactory: (delay, callback) {
+        final timer = _FakeTimer(callback);
+        timers.add(timer);
+        return timer;
+      },
+    );
+
+    sender.send(activation: activation, data: 'a', source: 'key');
+    sender.clear(activation: activation);
 
     expect(sender.pendingCount, 0);
     expect(timers.single.isActive, isFalse);
@@ -90,8 +120,9 @@ void main() {
   test('non retrying control input is sent once and not retained', () {
     final timers = <_FakeTimer>[];
     final sent = <RelayEnvelope>[];
+    final activation = TerminalActivation('session-1');
     final sender = TerminalInputReliableSender(
-      activeSessionId: () => 'session-1',
+      activeActivation: () => activation,
       send: (message) {
         sent.add(message);
         return true;
@@ -104,7 +135,7 @@ void main() {
     );
 
     final ok = sender.send(
-      sessionId: 'session-1',
+      activation: activation,
       data: '\u0003',
       source: 'key',
       retry: false,
@@ -123,6 +154,7 @@ final class _FakeTimer implements Timer {
 
   final void Function() _callback;
   var _active = true;
+  var wasCancelled = false;
 
   void fire() {
     if (!_active) return;
@@ -132,6 +164,7 @@ final class _FakeTimer implements Timer {
 
   @override
   void cancel() {
+    wasCancelled = true;
     _active = false;
   }
 

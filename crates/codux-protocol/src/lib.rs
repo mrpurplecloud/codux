@@ -426,26 +426,12 @@ pub fn iroh_transport_candidate_with_ticket_and_authentication(
 /// default — the previous hand-rolled copies silently dropped anything new,
 /// which is how the endpoint ticket went missing from the whole pairing chain.
 fn transport_entry_fields(candidate: &RemoteTransportCandidate) -> serde_json::Map<String, Value> {
-    let mut item = serde_json::Map::new();
-    item.insert("kind".to_string(), json!(candidate.kind));
-    let non_empty = |value: &Option<String>| {
-        value
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
+    let Value::Object(mut item) =
+        serde_json::to_value(candidate).expect("RemoteTransportCandidate must serialize as JSON")
+    else {
+        unreachable!("RemoteTransportCandidate must serialize as an object");
     };
-    for (key, value) in [
-        ("nodeId", &candidate.node_id),
-        ("relayUrl", &candidate.relay_url),
-        ("relayAuthentication", &candidate.relay_authentication),
-        ("ticket", &candidate.ticket),
-        ("url", &candidate.url),
-    ] {
-        if let Some(value) = non_empty(value) {
-            item.insert(key.to_string(), json!(value));
-        }
-    }
+    item.retain(|_, value| !value.as_str().is_some_and(|value| value.trim().is_empty()));
     item
 }
 
@@ -457,14 +443,14 @@ fn transport_entry_fields(candidate: &RemoteTransportCandidate) -> serde_json::M
 /// dial a host that has a relay home.
 ///
 /// A host WITHOUT a relay is the exception, and the ticket stays. Dropping it
-/// there leaves a QR encoding an identity and no way to reach it, which this
-/// module's own parser then rejects — an unusable QR is a worse outcome than a
-/// dense one.
+/// there leaves a QR encoding an identity and no route the transport can dial —
+/// an unusable QR is a worse outcome than a dense one.
 ///
 /// THE single definition of the pairing-QR transport shape, shared by every Rust
 /// host so a format change happens in one place.
 pub fn pairing_transport_entry(candidate: &RemoteTransportCandidate) -> Value {
     let mut item = transport_entry_fields(candidate);
+    item.remove("role");
     item.remove("url");
     let has_relay = candidate
         .relay_url
@@ -512,11 +498,13 @@ pub fn pairing_payload(
     })
 }
 
-/// Whether `candidate` is a usable iroh transport for pairing: it must be an
-/// iroh kind AND carry enough to dial — either the full `ticket` OR both
-/// `nodeId` and `relayUrl` (the slim QR form). THE single rule, shared by the
-/// hosts that emit the QR and the clients that parse it, so "valid" never drifts
-/// between sender and receiver.
+/// Whether `candidate` carries a self-contained iroh route for pairing.
+///
+/// A stored candidate can also be dialable through controller-local remembered
+/// addresses. A pairing QR has no such state: it must carry either a ticket or
+/// the compact node-id-plus-relay route emitted by [`pairing_transport_entry`].
+/// This validates that wire contract; transport parsing still owns runtime
+/// dialability.
 pub fn is_valid_iroh_pairing_candidate(candidate: &RemoteTransportCandidate) -> bool {
     if candidate.kind != REMOTE_TRANSPORT_IROH {
         return false;
@@ -1164,6 +1152,9 @@ pub fn host_capabilities() -> Value {
             "staleOutput": true,
             "bufferEnd": true,
         },
+        "terminalUpload": {
+            "requestId": true,
+        },
         "terminalViewport": {
             "ownership": true,
             "state": true,
@@ -1364,38 +1355,65 @@ mod tests {
     fn a_relay_less_pairing_qr_carries_the_ticket() {
         // Omitting the ticket keeps the QR sparse, and a host with a relay can
         // be dialled from node id + relay alone. A host WITHOUT one cannot: drop
-        // its ticket and the QR encodes an identity with no way to reach it,
-        // which our own parser then rejects. Density is worth less than a QR
-        // that works.
+        // its ticket and the QR encodes an identity with no way to reach it.
+        // Density is worth less than a QR that works.
         let entry = pairing_transport_entry(&iroh_candidate("", "endpoint-ticket-bytes"));
 
-        assert_eq!(entry["ticket"], "endpoint-ticket-bytes");
-        assert_eq!(entry["nodeId"], "node-x");
+        assert_eq!(
+            entry,
+            json!({
+                "kind": REMOTE_TRANSPORT_IROH,
+                "nodeId": "node-x",
+                "ticket": "endpoint-ticket-bytes",
+            })
+        );
     }
 
     #[test]
-    fn a_relayed_pairing_qr_stays_slim() {
-        let entry = pairing_transport_entry(&iroh_candidate(
-            "https://relay.example",
-            "endpoint-ticket-bytes",
-        ));
+    fn a_live_relay_keeps_the_pairing_qr_slim() {
+        let entry =
+            pairing_transport_entry(&iroh_transport_candidate_with_ticket_and_authentication(
+                "https://dial.example",
+                "node-x",
+                "https://relay.example",
+                "endpoint-ticket-bytes",
+                "relay-token",
+            ));
 
-        assert!(
-            entry.get("ticket").is_none(),
-            "a relay is enough to dial, so the bulky ticket stays out of the QR"
+        assert_eq!(
+            entry,
+            json!({
+                "kind": REMOTE_TRANSPORT_IROH,
+                "nodeId": "node-x",
+                "relayUrl": "https://relay.example",
+                "relayAuthentication": "relay-token",
+            })
         );
-        assert_eq!(entry["relayUrl"], "https://relay.example");
     }
 
     #[test]
     fn a_confirmation_always_carries_the_ticket() {
         // Unlike the QR, this reply has no density budget, and it is the one
         // chance the controller gets to persist the host's direct addresses.
-        let entry =
-            confirmed_transport_entry(&iroh_candidate("https://relay.example", "ticket-bytes"));
+        let candidate = iroh_transport_candidate_with_ticket_and_authentication(
+            "https://dial.example",
+            "node-x",
+            "https://relay.example",
+            "ticket-bytes",
+            "relay-token",
+        );
+        let canonical = json!({
+            "kind": REMOTE_TRANSPORT_IROH,
+            "role": REMOTE_TRANSPORT_ROLE_HOST,
+            "url": "https://dial.example",
+            "nodeId": "node-x",
+            "relayUrl": "https://relay.example",
+            "ticket": "ticket-bytes",
+            "relayAuthentication": "relay-token",
+        });
 
-        assert_eq!(entry["ticket"], "ticket-bytes");
-        assert_eq!(entry["relayUrl"], "https://relay.example");
+        assert_eq!(serde_json::to_value(&candidate).unwrap(), canonical);
+        assert_eq!(confirmed_transport_entry(&candidate), canonical);
     }
 
     #[test]
@@ -1432,6 +1450,7 @@ mod tests {
         assert_eq!(capabilities["terminalBuffer"]["baselineFailed"], true);
         assert_eq!(capabilities["terminalOutput"]["sequence"], true);
         assert_eq!(capabilities["terminalOutput"]["staleOutput"], true);
+        assert_eq!(capabilities["terminalUpload"]["requestId"], true);
         // Live `terminal.output` no longer carries a screen keyframe (it
         // duplicated the screen in the viewer's scrollback); the baseline buffer
         // still does — hence terminalBuffer.screenData above but not here.
@@ -1566,15 +1585,28 @@ mod tests {
 
     #[test]
     fn parse_pairing_payload_reports_missing_iroh_transport() {
-        // A candidate with neither ticket nor nodeId+relayUrl isn't dialable.
+        let payload = json!({
+            "code": "123456",
+            "secret": "secret",
+            "pairingId": "pair-1",
+            "transports": [{ "kind": "unsupported" }],
+        });
+        let err = parse_pairing_payload(&payload).expect_err("no iroh transport");
+        assert!(err.contains(&"transports.iroh".to_string()));
+    }
+
+    #[test]
+    fn pairing_parser_rejects_an_iroh_candidate_without_a_self_contained_route() {
         let payload = json!({
             "code": "123456",
             "secret": "secret",
             "pairingId": "pair-1",
             "transports": [{ "kind": REMOTE_TRANSPORT_IROH }],
         });
-        let err = parse_pairing_payload(&payload).expect_err("no dialable transport");
-        assert!(err.contains(&"transports.iroh".to_string()));
+
+        let missing = parse_pairing_payload(&payload).expect_err("route-less iroh transport");
+
+        assert_eq!(missing, vec!["transports.iroh"]);
     }
 
     #[test]

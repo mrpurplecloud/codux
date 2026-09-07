@@ -1,5 +1,9 @@
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::{
+    fs::OpenOptions,
+    io::{self, Write},
+    path::{Path, PathBuf},
+};
 
 pub fn terminal_upload_directory(session_id: &str) -> PathBuf {
     std::env::temp_dir()
@@ -76,7 +80,12 @@ pub fn quote_terminal_path(value: &str) -> String {
     }
 }
 
-pub fn unique_upload_path(directory: &Path, file_name: &str) -> PathBuf {
+pub fn write_unique_upload_file(
+    directory: &Path,
+    file_name: &str,
+    bytes: &[u8],
+) -> io::Result<PathBuf> {
+    std::fs::create_dir_all(directory)?;
     let file_name = sanitized_upload_name(file_name);
     let path = PathBuf::from(&file_name);
     let stem = path
@@ -84,22 +93,52 @@ pub fn unique_upload_path(directory: &Path, file_name: &str) -> PathBuf {
         .and_then(|value| value.to_str())
         .unwrap_or("upload");
     let extension = path.extension().and_then(|value| value.to_str());
-    let mut candidate = directory.join(&file_name);
-    let mut index = 1;
-    while candidate.exists() {
-        let next = match extension {
-            Some(extension) if !extension.is_empty() => format!("{stem}-{index}.{extension}"),
+    let mut index = 0_u64;
+
+    loop {
+        let name = match (index, extension) {
+            (0, _) => file_name.clone(),
+            (_, Some(extension)) if !extension.is_empty() => {
+                format!("{stem}-{index}.{extension}")
+            }
             _ => format!("{stem}-{index}"),
         };
-        candidate = directory.join(next);
-        index += 1;
+        let candidate = directory.join(name);
+        let mut file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                index = index.checked_add(1).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::AlreadyExists, "upload name space exhausted")
+                })?;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+
+        if let Err(write_error) = file.write_all(bytes) {
+            drop(file);
+            return match std::fs::remove_file(&candidate) {
+                Ok(()) => Err(write_error),
+                Err(cleanup_error) => Err(io::Error::new(
+                    write_error.kind(),
+                    format!(
+                        "could not write upload: {write_error}; could not remove owned file: {cleanup_error}"
+                    ),
+                )),
+            };
+        }
+        return Ok(candidate);
     }
-    candidate
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
 
     #[test]
     fn upload_names_are_sanitized() {
@@ -122,5 +161,36 @@ mod tests {
             terminal_upload_path_input(Path::new("/tmp/Codux Uploads/file name.txt")),
             "'/tmp/Codux Uploads/file name.txt'"
         );
+    }
+
+    #[test]
+    fn concurrent_upload_writes_claim_distinct_paths() {
+        let directory = std::env::temp_dir().join(format!(
+            "codux-runtime-upload-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).expect("create upload directory");
+        let start = Arc::new(Barrier::new(3));
+        let handles = [b"first".as_slice(), b"second".as_slice()].map(|bytes| {
+            let directory = directory.clone();
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                write_unique_upload_file(&directory, "asset.png", bytes)
+                    .expect("write unique upload")
+            })
+        });
+
+        start.wait();
+        let [first, second] = handles.map(|handle| handle.join().expect("join upload writer"));
+
+        assert_ne!(first, second);
+        let mut contents = [
+            std::fs::read(first).expect("read first upload"),
+            std::fs::read(second).expect("read second upload"),
+        ];
+        contents.sort();
+        assert_eq!(contents, [b"first".to_vec(), b"second".to_vec()]);
+        std::fs::remove_dir_all(directory).ok();
     }
 }

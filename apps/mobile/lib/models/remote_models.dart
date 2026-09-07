@@ -124,11 +124,14 @@ class RemoteTransportCandidate {
   );
 }
 
-List<String> _stringListFromJson(Object? value) {
+List<String> _directAddrsFromJson(Object? value) {
   if (value is! List) return const [];
+  final seen = <String>{};
   return value
-      .map((item) => '$item'.trim())
-      .where((item) => item.isNotEmpty)
+      .whereType<String>()
+      .map((item) => item.trim())
+      .where((item) => item.isNotEmpty && seen.add(item))
+      .take(StoredDevice.maxDirectAddrs)
       .toList(growable: false);
 }
 
@@ -255,7 +258,7 @@ class StoredDevice {
       name: '${json['name'] ?? ''}',
       hostName: json['hostName'] == null ? null : '${json['hostName']}',
       transports: transports,
-      directAddrs: _stringListFromJson(json['directAddrs']),
+      directAddrs: _directAddrsFromJson(json['directAddrs']),
     );
   }
 
@@ -280,6 +283,7 @@ class RelayEnvelope {
     this.hostId,
     this.deviceId,
     this.sessionId,
+    this.requestId,
     this.seq,
     this.payload,
     this.error,
@@ -291,6 +295,7 @@ class RelayEnvelope {
   final String? hostId;
   final String? deviceId;
   final String? sessionId;
+  final String? requestId;
   final int? seq;
   final Object? payload;
   final String? error;
@@ -313,6 +318,7 @@ class RelayEnvelope {
     hostId: json['hostId']?.toString(),
     deviceId: json['deviceId']?.toString(),
     sessionId: json['sessionId']?.toString(),
+    requestId: json['requestId']?.toString(),
     seq: json['seq'] is num ? (json['seq'] as num).toInt() : null,
     payload: json['payload'],
     error: json['error']?.toString(),
@@ -326,6 +332,7 @@ class RelayEnvelope {
     if (hostId != null) 'hostId': hostId,
     if (deviceId != null) 'deviceId': deviceId,
     if (sessionId != null) 'sessionId': sessionId,
+    if (requestId != null) 'requestId': requestId,
     if (seq != null) 'seq': seq,
     if (payload != null) 'payload': payload,
     if (error != null) 'error': error,
@@ -338,6 +345,7 @@ class RelayEnvelope {
     String? hostId,
     String? deviceId,
     String? sessionId,
+    String? requestId,
     int? seq,
     Object? payload,
     String? error,
@@ -348,6 +356,7 @@ class RelayEnvelope {
     hostId: hostId ?? this.hostId,
     deviceId: deviceId ?? this.deviceId,
     sessionId: sessionId ?? this.sessionId,
+    requestId: requestId ?? this.requestId,
     seq: seq ?? this.seq,
     payload: payload ?? this.payload,
     error: error ?? this.error,

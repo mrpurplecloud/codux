@@ -253,7 +253,7 @@ impl RemoteHostRuntime {
         let Ok(data) = serde_json::to_vec(&envelope) else {
             return false;
         };
-        let transport = self.transport.lock().ok().and_then(|value| value.clone());
+        let transport = self.current_transport();
         let Some(transport) = transport else {
             return false;
         };
@@ -295,7 +295,7 @@ impl RemoteHostRuntime {
         let Some(text) = text else {
             return false;
         };
-        let transport = self.transport.lock().ok().and_then(|value| value.clone());
+        let transport = self.current_transport();
         let Some(transport) = transport else {
             return false;
         };

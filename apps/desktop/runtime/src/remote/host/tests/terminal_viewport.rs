@@ -11,9 +11,7 @@ fn terminal_baseline_viewport_does_not_steal_from_other_owner() {
         Arc::clone(&terminals),
     ));
     let transport = Arc::new(CapturingTransport::default());
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(transport.clone());
-    }
+    runtime.set_transport_for_test(transport.clone());
     let session_id = terminals
         .create(
             TerminalPtyConfig {
@@ -88,9 +86,7 @@ fn session_terminal_baseline_auto_claims_and_targets_only_subscribed_split() {
         Arc::clone(&terminals),
     ));
     let transport = Arc::new(CapturingTransport::default());
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(transport.clone());
-    }
+    runtime.set_transport_for_test(transport.clone());
     let session_a = terminals
         .create(
             TerminalPtyConfig {
@@ -222,9 +218,7 @@ fn viewport_state_marks_stale_output_per_viewer() {
         Arc::clone(&terminals),
     ));
     let transport = Arc::new(CapturingTransport::default());
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(transport.clone());
-    }
+    runtime.set_transport_for_test(transport.clone());
     let session_id = terminals
         .create(
             TerminalPtyConfig {
@@ -410,9 +404,7 @@ fn terminal_viewport_resize_pushes_state_without_screen_keyframe() {
         Arc::clone(&terminals),
     ));
     let transport = Arc::new(CapturingTransport::default());
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(transport.clone());
-    }
+    runtime.set_transport_for_test(transport.clone());
     let session_id = terminals
         .create(
             TerminalPtyConfig {
@@ -508,9 +500,7 @@ fn terminal_input_reclaims_viewport_after_lease_expired_to_host() {
         Default::default(),
         Arc::clone(&terminals),
     ));
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(Arc::new(CapturingTransport::default()));
-    }
+    runtime.set_transport_for_test(Arc::new(CapturingTransport::default()));
     let session_id = terminals
         .create(
             TerminalPtyConfig {
@@ -619,9 +609,7 @@ fn terminal_resize_without_dimensions_is_rejected() {
         Arc::clone(&terminals),
     ));
     let transport = Arc::new(CapturingTransport::default());
-    if let Ok(mut current) = runtime.transport.lock() {
-        *current = Some(transport.clone());
-    }
+    runtime.set_transport_for_test(transport.clone());
     let session_id = terminals
         .create(
             TerminalPtyConfig {

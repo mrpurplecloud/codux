@@ -206,14 +206,15 @@ class _FakeTransport implements RemoteTransport {
   }
 
   @override
-  Future<bool> sendTerminalUpload({
+  bool sendTerminalUpload({
     required String deviceId,
     required String sessionId,
+    required String requestId,
     required String name,
     required String mime,
     required String kind,
     required Uint8List bytes,
-  }) async {
+  }) {
     return sendResult;
   }
 }

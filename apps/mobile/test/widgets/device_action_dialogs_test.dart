@@ -14,13 +14,13 @@ void main() {
   );
 
   testWidgets('returns edited device name', (tester) async {
-    StoredDevice? edited;
+    String? editedName;
     await tester.pumpWidget(
       _wrap(
         Builder(
           builder: (context) => TextButton(
             onPressed: () async {
-              edited = await showDialog<StoredDevice>(
+              editedName = await showDialog<String>(
                 context: context,
                 builder: (_) => const DeviceEditDialog(
                   device: device,
@@ -43,7 +43,7 @@ void main() {
     await tester.tap(find.text('Save'));
     await tester.pumpAndSettle();
 
-    expect(edited?.hostName, 'Studio Mac');
+    expect(editedName, 'Studio Mac');
   });
 
   testWidgets('confirms device removal', (tester) async {

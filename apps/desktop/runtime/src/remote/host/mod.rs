@@ -16,14 +16,13 @@ use super::protocol::{
     REMOTE_RESOURCE_WORKTREES, REMOTE_SSH_LIST, REMOTE_SSH_LIST_RESULT, REMOTE_SSH_REMOVE,
     REMOTE_SSH_UPSERT, REMOTE_TERMINAL_BUFFER_MAX_CHARS, REMOTE_TERMINAL_CLOSED,
     REMOTE_TERMINAL_CREATED, REMOTE_TERMINAL_INPUT_ACK, REMOTE_TERMINAL_LIST,
-    REMOTE_TERMINAL_OUTPUT, REMOTE_TERMINAL_STATUS, REMOTE_TERMINAL_UPLOADED,
-    REMOTE_TERMINAL_VIEWPORT_STATE, REMOTE_TRANSPORT_PING, REMOTE_TRANSPORT_PONG,
-    REMOTE_WORKTREE_CREATE, REMOTE_WORKTREE_DELETE, REMOTE_WORKTREE_LIST, REMOTE_WORKTREE_MERGE,
-    REMOTE_WORKTREE_REMOVE, REMOTE_WORKTREE_SELECT, REMOTE_WORKTREE_UPDATED,
-    RemoteTerminalBufferWindow, RemoteTerminalSubscriptionTarget, terminal_buffer_payloads,
-    terminal_live_output_payload,
+    REMOTE_TERMINAL_OUTPUT, REMOTE_TERMINAL_STATUS, REMOTE_TERMINAL_VIEWPORT_STATE,
+    REMOTE_TRANSPORT_PING, REMOTE_TRANSPORT_PONG, REMOTE_WORKTREE_CREATE, REMOTE_WORKTREE_DELETE,
+    REMOTE_WORKTREE_LIST, REMOTE_WORKTREE_MERGE, REMOTE_WORKTREE_REMOVE, REMOTE_WORKTREE_SELECT,
+    REMOTE_WORKTREE_UPDATED, RemoteTerminalBufferWindow, RemoteTerminalSubscriptionTarget,
+    terminal_buffer_payloads, terminal_live_output_payload,
 };
-use super::relay::{remote_pairing_payload_url, remote_relay_url};
+use super::relay::remote_pairing_payload_url;
 use super::transport::RemoteTransport;
 use super::transport_factory::RemoteTransportFactory;
 use super::types::{
@@ -45,7 +44,9 @@ use crate::terminal_pty::{
 use crate::worktree::{
     WorktreeCreateRequest, WorktreeMergeRequest, WorktreeRemoveRequest, WorktreeService,
 };
-use codux_remote_transport::{RemoteTransportUpload, WebTunnelTcpConnectRequest};
+use codux_remote_transport::{
+    RemoteTransportUpload, RemoteTransportUploadOutcome, WebTunnelTcpConnectRequest,
+};
 use codux_runtime_core::{
     ai_stats as runtime_ai_stats, file as runtime_file, git as runtime_git, host as runtime_host,
     project as runtime_project, subscription::RuntimeSubscriptionRouter,
@@ -70,7 +71,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -136,6 +137,49 @@ struct TerminalBaselineOptions {
     viewport: Option<BaselineViewport>,
 }
 
+#[derive(Default)]
+struct RemoteTransportCallbackOwner {
+    transition_serial: Mutex<()>,
+    state: Mutex<RemoteTransportCallbackOwnerState>,
+    idle: Condvar,
+}
+
+#[derive(Default)]
+struct RemoteTransportCallbackOwnerState {
+    published: bool,
+    in_flight: usize,
+}
+
+struct RemoteTransportCallbackPermit {
+    owner: Arc<RemoteTransportCallbackOwner>,
+}
+
+#[derive(Clone)]
+struct RemoteTransportStart {
+    generation: u64,
+    owner: Arc<RemoteTransportCallbackOwner>,
+}
+
+#[derive(Clone)]
+struct RemoteTransportBinding {
+    start: RemoteTransportStart,
+    transport: Arc<dyn RemoteTransport>,
+    relay_authentication: String,
+}
+
+#[derive(Default)]
+struct RemoteTransportLifecycle {
+    generation: u64,
+    starting: Option<RemoteTransportStart>,
+    active: Option<RemoteTransportBinding>,
+}
+
+#[derive(Clone)]
+struct RemoteActivePairing {
+    owner: Arc<RemoteTransportCallbackOwner>,
+    info: RemotePairingInfo,
+}
+
 pub struct RemoteHostRuntime {
     pub(crate) runtime_instance_id: String,
     pub(crate) support_dir: PathBuf,
@@ -155,16 +199,16 @@ pub struct RemoteHostRuntime {
     pub(crate) terminal_buffer_baselines: Mutex<HashMap<String, RemoteTerminalBufferBaseline>>,
     pub(crate) remote_project_scope_by_device: Mutex<HashMap<String, String>>,
     pub(crate) terminal_event_subscriptions: Mutex<HashSet<String>>,
-    pub(crate) transport: Mutex<Option<Arc<dyn RemoteTransport>>>,
-    pub(crate) transport_start_lock: tokio::sync::Mutex<()>,
-    pub(crate) active_pairing: Mutex<Option<RemotePairingInfo>>,
+    transport_lifecycle: Mutex<RemoteTransportLifecycle>,
+    // Serializes endpoint construction only. Lifecycle ownership remains in
+    // `transport_lifecycle`; this lock never authorizes publication.
+    transport_start_serial: tokio::sync::Mutex<()>,
+    active_pairing: Mutex<Option<RemoteActivePairing>>,
     pub(crate) pending_pairings: Mutex<HashMap<String, RemoteTransportPairingRequest>>,
     pub(crate) events: Mutex<VecDeque<RemoteHostEvent>>,
     pub(crate) snapshot: Mutex<RemoteSummary>,
-    pub(crate) connection_generation: AtomicU64,
     // Sequence for terminal layout changes emitted by remote clients.
     pub(crate) remote_terminal_layout_generation: AtomicU64,
-    pub(crate) resolved_relay: Mutex<Option<String>>,
     pub(crate) send_seq_by_device: Mutex<HashMap<String, i64>>,
     pub(crate) receive_seq_by_device: Mutex<HashMap<String, RemoteSequenceGuard>>,
     // Devices currently watching a project's `ai.stats` (project_id -> device_id
@@ -202,7 +246,6 @@ pub(crate) use terminal_buffer::{remote_terminal_order_key, remote_terminal_snap
 #[cfg(test)]
 pub(crate) use terminal_dispatch::{
     remote_terminal_upload_directory, sanitized_remote_upload_name, terminal_upload_path_input,
-    unique_remote_upload_path,
 };
 
 use projects::*;
@@ -294,15 +337,13 @@ impl RemoteHostRuntime {
             terminal_buffer_baselines: Mutex::new(HashMap::new()),
             remote_project_scope_by_device: Mutex::new(HashMap::new()),
             terminal_event_subscriptions: Mutex::new(HashSet::new()),
-            transport: Mutex::new(None),
-            transport_start_lock: tokio::sync::Mutex::new(()),
+            transport_lifecycle: Mutex::new(RemoteTransportLifecycle::default()),
+            transport_start_serial: tokio::sync::Mutex::new(()),
             active_pairing: Mutex::new(None),
             pending_pairings: Mutex::new(HashMap::new()),
             events: Mutex::new(VecDeque::new()),
             snapshot: Mutex::new(snapshot),
-            connection_generation: AtomicU64::new(0),
             remote_terminal_layout_generation: AtomicU64::new(0),
-            resolved_relay: Mutex::new(None),
             send_seq_by_device: Mutex::new(HashMap::new()),
             receive_seq_by_device: Mutex::new(HashMap::new()),
             ai_stats_watchers: Mutex::new(HashMap::new()),
@@ -322,13 +363,7 @@ impl RemoteHostRuntime {
         summary
     }
 
-    pub fn clear_pairing_state(&self) {
-        if let Ok(mut active) = self.active_pairing.lock() {
-            *active = None;
-        }
-        if let Ok(mut pending) = self.pending_pairings.lock() {
-            pending.clear();
-        }
+    pub(crate) fn clear_remote_device_connection_state(&self) {
         if let Ok(mut scopes) = self.remote_project_scope_by_device.lock() {
             scopes.clear();
         }
@@ -465,38 +500,32 @@ impl RemoteHostRuntime {
             self.stop_with_message("Remote Host stopped.");
             return self.snapshot();
         }
-        let current = self.snapshot();
-        let has_transport = self
-            .transport
-            .lock()
-            .ok()
-            .and_then(|value| value.clone())
-            .is_some();
-        let is_starting = current.enabled
-            && current.status == "connecting"
-            && self.connection_generation.load(Ordering::SeqCst) > 0;
-        let is_connected = current.enabled && current.status == "connected" && has_transport;
-        if is_starting || is_connected {
-            return current;
+        let mut lifecycle = self.lock_transport_lifecycle();
+        if lifecycle.starting.is_some() || lifecycle.active.is_some() {
+            return self.snapshot();
         }
-        let generation = self.connection_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        self.update_snapshot(summary);
-        self.spawn_transport_start(generation);
+        let start = self.commit_transport_lifecycle(&mut lifecycle, |lifecycle, _| {
+            (summary, lifecycle.begin_start())
+        });
+        drop(lifecycle);
+        self.spawn_transport_start(start);
         self.snapshot()
     }
 
     pub fn stop_with_message(&self, message: &str) {
-        self.connection_generation.fetch_add(1, Ordering::SeqCst);
-        let transport = self.take_transport();
+        let message = message.to_string();
+        let transport = self.retire_transport_lifecycle(|lifecycle, _| {
+            let mut summary = self.service().summary();
+            summary.status = "stopped".to_string();
+            summary.message = message;
+            summary.pairing = None;
+            (summary, lifecycle.stop())
+        });
         if let Some(transport) = transport {
             crate::async_runtime::spawn(async move {
                 transport.shutdown().await;
             });
         }
-        let mut summary = self.service().summary();
-        summary.status = "stopped".to_string();
-        summary.message = message.to_string();
-        self.update_snapshot(summary);
     }
 
     /// Tell connected clients the host is going offline before we tear down the
@@ -525,15 +554,39 @@ impl RemoteHostRuntime {
 
     pub fn reconnect(self: &Arc<Self>) -> RemoteSummary {
         crate::runtime_trace::runtime_trace("remote", "host_reconnect requested");
-        let generation = self.connection_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let transport = self.take_transport();
-        let mut summary = self.service().summary();
-        summary.status = "connecting".to_string();
-        summary.message = "Connecting remote transport...".to_string();
-        summary.pairing = self.snapshot().pairing;
-        self.update_snapshot(summary);
-        self.spawn_transport_restart(transport, generation);
-        self.snapshot()
+        self.reconfigure_transport(|| ()).1
+    }
+
+    /// Drain current callback ownership before changing transport settings,
+    /// then reconcile from whichever settings remain visible after the change.
+    pub(crate) fn reconfigure_transport<R>(
+        self: &Arc<Self>,
+        mutate_settings: impl FnOnce() -> R,
+    ) -> (R, RemoteSummary) {
+        let (transport, start, result) = self.retire_transport_lifecycle(|lifecycle, _| {
+            let result = mutate_settings();
+            let mut summary = self.service().summary();
+            summary.pairing = None;
+            if summary.enabled {
+                summary.status = "connecting".to_string();
+                summary.message = "Connecting remote transport...".to_string();
+                let transport = lifecycle.retire();
+                let start = lifecycle.begin_start();
+                (summary, (transport, Some(start), result))
+            } else {
+                summary.status = "stopped".to_string();
+                summary.message = "Remote Host stopped.".to_string();
+                (summary, (lifecycle.stop(), None, result))
+            }
+        });
+        if let Some(start) = start {
+            self.spawn_transport_restart(transport, start);
+        } else if let Some(transport) = transport {
+            crate::async_runtime::spawn(async move {
+                transport.shutdown().await;
+            });
+        }
+        (result, self.snapshot())
     }
 
     fn handle_remote_envelope(self: &Arc<Self>, envelope: RemoteEnvelope) {
@@ -650,19 +703,26 @@ impl RemoteHostRuntime {
     }
 
     fn handle_host_metrics(self: &Arc<Self>, envelope: &RemoteEnvelope) {
+        let Some(owner) = self.current_callback_owner() else {
+            return;
+        };
         let runtime = Arc::clone(self);
         let envelope = envelope.clone();
         crate::async_runtime::spawn(async move {
             match crate::async_runtime::spawn_blocking(sample_host_metrics).await {
                 Ok(metrics) => {
                     let payload = serde_json::to_value(metrics).unwrap_or(Value::Null);
-                    runtime.reply(&envelope, REMOTE_HOST_METRICS, payload);
+                    let _ = owner.run(|| {
+                        runtime.reply(&envelope, REMOTE_HOST_METRICS, payload);
+                    });
                 }
                 Err(error) => {
-                    runtime.send_error(
-                        &envelope,
-                        &format!("Unable to sample host metrics: {error}"),
-                    );
+                    let _ = owner.run(|| {
+                        runtime.send_error(
+                            &envelope,
+                            &format!("Unable to sample host metrics: {error}"),
+                        );
+                    });
                 }
             }
         });

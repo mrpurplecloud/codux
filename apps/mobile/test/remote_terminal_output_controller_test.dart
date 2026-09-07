@@ -134,10 +134,10 @@ void main() {
     controller.bindSession('session-1', requireBaseline: true);
 
     controller.accept(
-      _liveOutput('overlap', outputSeq: 11).withPayload({
-        'bufferLength': 12,
-        'bufferEnd': 12,
-      }),
+      _liveOutput(
+        'overlap',
+        outputSeq: 11,
+      ).withPayload({'bufferLength': 12, 'bufferEnd': 12}),
       activeSessionId: 'session-1',
     );
     controller.accept(
@@ -517,66 +517,98 @@ void main() {
     },
   );
 
+  test('live screen keyframe waits while baseline request is pending', () {
+    final controller = RemoteTerminalOutputController(maxBufferChars: 65536);
+
+    controller.bindSession('session-1', requireBaseline: true);
+    expect(
+      controller.startBufferRequest(
+        'session-1',
+        'baseline-1',
+        requireBaseline: true,
+      ),
+      isTrue,
+    );
+    final renderGeneration = controller.renderGeneration('session-1');
+
+    final result = controller.accept(
+      _liveOutput(
+        '',
+        outputSeq: 11,
+        screenData: '\u001b[2J\u001b[Hfresh-live-screen',
+      ),
+      activeSessionId: 'session-1',
+    );
+
+    expect(_kinds(result), [RemoteTerminalOutputEffectKind.ack]);
+    expect(controller.activeBufferRequestId('session-1'), 'baseline-1');
+    expect(controller.hasCompleteBaseline('session-1'), isFalse);
+    expect(controller.cachedOutput('session-1'), isNull);
+    expect(controller.renderGeneration('session-1'), renderGeneration);
+  });
+
   test(
-    'live output with screen keyframe updates visible screen without waiting for baseline',
+    'matching baseline replays held screen keyframe and ignores stale buffer',
     () {
       final controller = RemoteTerminalOutputController(maxBufferChars: 65536);
 
       controller.bindSession('session-1', requireBaseline: true);
-
-      final result = controller.accept(
+      expect(
+        controller.startBufferRequest(
+          'session-1',
+          'baseline-1',
+          requireBaseline: true,
+        ),
+        isTrue,
+      );
+      final live = controller.accept(
         _liveOutput(
-          'partial live raw',
+          '',
           outputSeq: 11,
-          screenData: '\u001b[2J\u001b[Hrestored tui\n\u001b[3;1Hinput box',
+          screenData: '\u001b[2J\u001b[Hfresh-live-screen',
         ),
         activeSessionId: 'session-1',
       );
-
-      expect(_kinds(result), [
-        RemoteTerminalOutputEffectKind.loading,
-        RemoteTerminalOutputEffectKind.sessionUpdated,
-        RemoteTerminalOutputEffectKind.ack,
-      ]);
-      expect(controller.cachedOutput('session-1'), 'partial live raw');
-      expect(controller.cachedOutput('session-1'), 'partial live raw');
-    },
-  );
-
-  test(
-    'live screen keyframe completes pending baseline and ignores stale buffer',
-    () {
-      final controller = RemoteTerminalOutputController(maxBufferChars: 65536);
-
-      controller.bindSession('session-1', requireBaseline: true);
-      final live = controller.accept(
-        _liveOutput(
-          'partial live raw',
-          outputSeq: 11,
-          screenData: '\u001b[2J\u001b[Hrestored tui\n\u001b[3;1Hinput box',
+      final baseline = controller.accept(
+        _terminalBuffer(
+          'baseline-history',
+          offset: 0,
+          bufferLength: 16,
+          truncated: false,
+          outputSeq: 10,
+          requestId: 'baseline-1',
+          screenData: '\u001b[2J\u001b[Hbaseline-screen',
         ),
         activeSessionId: 'session-1',
       );
       final stale = controller.accept(
         _terminalBuffer(
-          'old screen',
+          'stale-history',
           offset: 0,
-          bufferLength: 10,
+          bufferLength: 13,
           truncated: false,
-          outputSeq: 10,
+          outputSeq: 9,
           requestId: 'stale-restore',
-          screenData: '\u001b[2J\u001b[Hold screen',
+          screenData: '\u001b[2J\u001b[Hstale-screen',
         ),
         activeSessionId: 'session-1',
       );
 
-      expect(_kinds(live), [
+      expect(_kinds(live), [RemoteTerminalOutputEffectKind.ack]);
+      expect(_kinds(baseline), [
+        ..._activeBufferUpdate,
         RemoteTerminalOutputEffectKind.loading,
         RemoteTerminalOutputEffectKind.sessionUpdated,
         RemoteTerminalOutputEffectKind.ack,
       ]);
       expect(_kinds(stale), [RemoteTerminalOutputEffectKind.ack]);
-      expect(controller.cachedOutput('session-1'), 'partial live raw');
+      expect(controller.activeBufferRequestId('session-1'), isNull);
+      expect(controller.hasCompleteBaseline('session-1'), isTrue);
+      expect(controller.cachedOutput('session-1'), 'baseline-history');
+      final screenText = _screenText(controller, 'session-1');
+      expect(screenText, contains('fresh-live-screen'));
+      expect(screenText, isNot(contains('baseline-screen')));
+      expect(screenText, isNot(contains('stale-screen')));
     },
   );
 
@@ -1087,6 +1119,12 @@ RemoteTerminalOutputEffect _markBufferReceived(
 ) => effects.firstWhere(
   (effect) => effect.kind == RemoteTerminalOutputEffectKind.markBufferReceived,
 );
+
+String _screenText(
+  RemoteTerminalOutputController controller,
+  String sessionId,
+) =>
+    controller.screenSnapshot(sessionId)!.cells.map((cell) => cell.text).join();
 
 const _activeBufferUpdate = [
   RemoteTerminalOutputEffectKind.sessionUpdated,

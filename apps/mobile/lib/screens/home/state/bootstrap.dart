@@ -24,8 +24,10 @@ extension _HomePageBootstrap on HomeController {
     }
     await _loadDeviceName();
     final loadedSettings = await _storage.loadSettings();
-    final devices = await _storage.loadDevices();
+    await _storage.initializeDevices();
     final lastDeviceId = await _storage.loadLastDeviceId();
+    final deviceSnapshot = await _storage.currentDeviceSnapshot();
+    final devices = deviceSnapshot.devices;
     if (!mounted) return;
     final next = _mobileSettingsController.startupSettings(
       stored: loadedSettings,
@@ -43,6 +45,7 @@ extension _HomePageBootstrap on HomeController {
     _applyState(() {
       _settings = next;
       _settingsNameController.text = next.localName;
+      _deviceSnapshotRevision = deviceSnapshot.revision;
       _devices = devices;
       _activeDevice = startupDevice.displayedDevice;
       _showTerminal = false;
@@ -97,16 +100,45 @@ extension _HomePageBootstrap on HomeController {
     }
   }
 
-  Future<void> _saveDevices(List<StoredDevice> devices) async {
+  void _publishDeviceSnapshot(
+    DeviceSnapshot snapshot, {
+    String? activateDeviceId,
+  }) {
+    if (!mounted || snapshot.revision < _deviceSnapshotRevision) return;
+    StoredDevice? preferred = _activeDevice;
+    if (activateDeviceId != null) {
+      for (final device in snapshot.devices) {
+        if (device.deviceId == activateDeviceId) {
+          preferred = device;
+          break;
+        }
+      }
+    }
     final nextState = _deviceController.preserveActive(
-      devices: devices,
-      activeDevice: _activeDevice,
+      devices: snapshot.devices,
+      activeDevice: preferred,
     );
     _applyState(() {
+      _deviceSnapshotRevision = snapshot.revision;
       _devices = nextState.devices;
       _activeDevice = nextState.activeDevice;
     });
-    await _storage.saveDevices(nextState.devices);
+  }
+
+  Future<DeviceSnapshot?> _applyBackgroundDeviceMutation(
+    DeviceMutation mutation, {
+    required String reason,
+  }) async {
+    try {
+      final snapshot = await _storage.applyBackgroundDeviceMutation(mutation);
+      if (snapshot != null) _publishDeviceSnapshot(snapshot);
+      return snapshot;
+    } catch (error) {
+      CoduxLog.warn(
+        '[codux-flutter-storage] background device mutation failed reason=$reason error=$error',
+      );
+      return null;
+    }
   }
 
   void _rememberActiveDevice(StoredDevice device) {
@@ -114,13 +146,12 @@ extension _HomePageBootstrap on HomeController {
   }
 
   Future<void> _saveDevice(StoredDevice device) async {
-    final nextState = _deviceController.upsertAndActivate(
-      devices: _devices,
-      device: device,
+    final snapshot = await _storage.applyRequiredDeviceMutation(
+      DeviceUpserted(device),
     );
-    await _saveDevices(nextState.devices);
+    if (snapshot == null) return;
+    _publishDeviceSnapshot(snapshot, activateDeviceId: device.deviceId);
     _applyState(() {
-      _activeDevice = nextState.activeDevice;
       _showTerminal = false;
       _status = _t('pair.success');
     });
@@ -277,5 +308,4 @@ extension _HomePageBootstrap on HomeController {
     });
     _sendDeviceInfo(force: true);
   }
-
 }

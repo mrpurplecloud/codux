@@ -98,6 +98,7 @@ bool _hasRequiredSymbols(DynamicLibrary library) {
           Pointer<Utf8>,
           Pointer<Utf8>,
           Pointer<Utf8>,
+          Pointer<Utf8>,
           Pointer<Uint8>,
           IntPtr,
         )
@@ -265,11 +266,13 @@ final _controllerTransportSendTerminalUpload = _dylib
         Pointer<Utf8>,
         Pointer<Utf8>,
         Pointer<Utf8>,
+        Pointer<Utf8>,
         Pointer<Uint8>,
         IntPtr,
       ),
       bool Function(
         Pointer<Void>,
+        Pointer<Utf8>,
         Pointer<Utf8>,
         Pointer<Utf8>,
         Pointer<Utf8>,
@@ -704,15 +707,17 @@ class ControllerTransportHandle {
   bool sendTerminalUpload({
     required String deviceId,
     required String sessionId,
+    required String requestId,
     required String name,
     required String mime,
     required String kind,
     required Uint8List bytes,
   }) {
-    if (bytes.isEmpty) return false;
+    if (requestId.trim().isEmpty || bytes.isEmpty) return false;
     final handle = _liveHandle();
     final devicePtr = deviceId.toNativeUtf8();
     final sessionPtr = sessionId.toNativeUtf8();
+    final requestPtr = requestId.toNativeUtf8();
     final namePtr = name.toNativeUtf8();
     final mimePtr = mime.toNativeUtf8();
     final kindPtr = kind.toNativeUtf8();
@@ -723,6 +728,7 @@ class ControllerTransportHandle {
         handle,
         devicePtr,
         sessionPtr,
+        requestPtr,
         namePtr,
         mimePtr,
         kindPtr,
@@ -732,6 +738,7 @@ class ControllerTransportHandle {
     } finally {
       malloc.free(devicePtr);
       malloc.free(sessionPtr);
+      malloc.free(requestPtr);
       malloc.free(namePtr);
       malloc.free(mimePtr);
       malloc.free(kindPtr);

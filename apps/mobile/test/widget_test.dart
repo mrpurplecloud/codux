@@ -2505,7 +2505,8 @@ Future<StoredDevice> _fakeDevice() async {
       RemoteTransportCandidate(
         kind: RemoteTransportKind.iroh,
         url: 'https://relay.example',
-        nodeId: 'node-1',
+        nodeId:
+            'd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a',
         relayUrl: 'https://relay.example',
       ),
     ],
@@ -2568,14 +2569,15 @@ final class _FakeRemoteTransport implements RemoteTransport {
   }
 
   @override
-  Future<bool> sendTerminalUpload({
+  bool sendTerminalUpload({
     required String deviceId,
     required String sessionId,
+    required String requestId,
     required String name,
     required String mime,
     required String kind,
     required Uint8List bytes,
-  }) async {
+  }) {
     return true;
   }
 

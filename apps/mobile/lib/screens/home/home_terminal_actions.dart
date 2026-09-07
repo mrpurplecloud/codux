@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import '../../models/remote_models.dart';
 import '../../models/workspace_mode.dart';
 import '../../services/remote_runtime_store.dart';
-import '../../services/terminal_input_batcher.dart';
 
 class HomeTerminalActions {
   const HomeTerminalActions({
@@ -24,7 +23,7 @@ class HomeTerminalActions {
     required this.currentProjectTerminals,
     required this.isAccessibleTerminal,
     required this.runtime,
-    required this.inputBatcher,
+    required this.flushTerminalInput,
     required this.applyRuntimePlan,
     required this.sendTerminalClose,
     required this.setTerminalReady,
@@ -47,15 +46,15 @@ class HomeTerminalActions {
   final List<TerminalInfo> Function() currentProjectTerminals;
   final bool Function(TerminalInfo? terminal) isAccessibleTerminal;
   final RemoteRuntimeStore runtime;
-  final TerminalInputBatcher inputBatcher;
+  final VoidCallback flushTerminalInput;
   final void Function(RemoteRuntimePlan plan, {required String reason})
-      applyRuntimePlan;
+  applyRuntimePlan;
   final void Function(TerminalInfo terminal) sendTerminalClose;
   final void Function(bool ready) setTerminalReady;
 
   void selectTerminal(TerminalInfo terminal) {
     if (!isAccessibleTerminal(terminal)) return;
-    inputBatcher.flush();
+    flushTerminalInput();
     showTerminalWorkspace();
     final plan = runtime.selectTerminal(terminal);
     applyRuntimePlan(plan, reason: 'select-terminal');
@@ -112,7 +111,9 @@ class HomeTerminalActions {
     });
   }
 
-  void closeTerminalSwitcher(Future<void> Function(VoidCallback mutate) popPage) {
+  void closeTerminalSwitcher(
+    Future<void> Function(VoidCallback mutate) popPage,
+  ) {
     popPage(hideTerminalSwitcher).then((_) {
       if (mounted) mountVisibleTerminal(reason: 'switcher-close');
     });
