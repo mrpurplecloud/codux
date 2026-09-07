@@ -49,9 +49,17 @@ impl RemoteService {
                 !settings.host_token.trim().is_empty()
             ),
         );
-        raw.insert(
-            "remote".to_string(),
-            serde_json::to_value(&settings).map_err(|error| error.to_string())?,
+        // Write only the keys this path owns. Serializing the whole typed view
+        // back over `remote` drops every key the type does not model, which is
+        // how the app-settings store came to delete paired devices' tokens.
+        let remote = remote_settings_mut(raw)?;
+        remote.insert(
+            "hostId".to_string(),
+            Value::String(settings.host_id.clone()),
+        );
+        remote.insert(
+            "hostToken".to_string(),
+            Value::String(settings.host_token.clone()),
         );
         runtime_trace_elapsed(
             "remote",

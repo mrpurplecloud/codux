@@ -63,6 +63,84 @@ fn revoke_remote_device_preserves_connected_host_snapshot() {
 }
 
 #[test]
+fn device_and_host_writes_preserve_unmodelled_remote_keys() {
+    // The relay paths write only the keys they change. These three did not, and
+    // rewrote the whole `remote` object from the typed view -- which is exactly
+    // how the app-settings store came to delete every paired device's token.
+    let support_dir =
+        std::env::temp_dir().join(format!("codux-remote-preserve-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&support_dir).expect("create support dir");
+    fs::write(
+        support_dir.join("settings.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "remote": {
+                "isEnabled": true,
+                "hostId": "host-1",
+                "hostToken": "host-token",
+                "futureRemoteField": "keep-remote",
+                "cachedDevices": [
+                    {
+                        "id": "device-1",
+                        "hostId": "host-1",
+                        "name": "Phone",
+                        "token": "device-token",
+                        "platform": "ios",
+                        "online": true,
+                        "futureField": "keep-device"
+                    },
+                    {
+                        "id": "device-2",
+                        "hostId": "host-1",
+                        "name": "Tablet",
+                        "token": "tablet-token",
+                        "platform": "android",
+                        "futureField": "keep-tablet"
+                    }
+                ]
+            }
+        }))
+        .expect("settings json"),
+    )
+    .expect("write settings");
+    let service = RuntimeService::new(support_dir.clone());
+    let config = crate::config::ConfigStore::for_file(crate::config::settings_file_path(
+        support_dir.clone(),
+    ));
+
+    service
+        .register_remote_host()
+        .expect("register an already-registered host");
+    let remote = config.get("remote").expect("remote settings");
+    assert_eq!(remote["futureRemoteField"], "keep-remote");
+    assert_eq!(remote["cachedDevices"][0]["futureField"], "keep-device");
+    assert_eq!(remote["cachedDevices"][1]["futureField"], "keep-tablet");
+
+    service
+        .refresh_remote_devices()
+        .expect("mark cached devices offline");
+    let remote = config.get("remote").expect("remote settings");
+    assert_eq!(remote["futureRemoteField"], "keep-remote");
+    assert_eq!(remote["cachedDevices"][0]["online"], false);
+    assert_eq!(remote["cachedDevices"][0]["futureField"], "keep-device");
+    assert_eq!(remote["cachedDevices"][1]["futureField"], "keep-tablet");
+
+    service
+        .revoke_remote_device("device-1")
+        .expect("revoke a paired device");
+    let remote = config.get("remote").expect("remote settings");
+    assert_eq!(remote["futureRemoteField"], "keep-remote");
+    assert_eq!(remote["cachedDevices"].as_array().unwrap().len(), 1);
+    assert_eq!(remote["cachedDevices"][0]["id"], "device-2");
+    assert_eq!(
+        remote["cachedDevices"][0]["futureField"], "keep-tablet",
+        "revoking one device must not rewrite the ones that remain"
+    );
+    assert_eq!(remote["cachedDevices"][0]["token"], "tablet-token");
+
+    let _ = fs::remove_dir_all(support_dir);
+}
+
+#[test]
 fn relay_reconfigure_paths_share_reset_and_refresh_contract() {
     let support_dir =
         std::env::temp_dir().join(format!("codux-relay-reconfigure-{}", uuid::Uuid::new_v4()));
