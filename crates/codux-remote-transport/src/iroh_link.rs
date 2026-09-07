@@ -682,7 +682,7 @@ impl RemoteIrohHostTransport {
     }
 
     fn handle_frame(
-        &self,
+        self: &Arc<Self>,
         peer_key: &str,
         senders: &PeerSenders,
         fallback_device_id: String,
@@ -815,15 +815,14 @@ impl RemoteIrohHostTransport {
                     .clone()
                     .filter(|request_id| !request_id.trim().is_empty()),
             };
-            let reply_sender = senders.control.clone();
             let upload = match upload_metadata_from_blob_envelope(&raw, &device_id) {
                 Ok(upload) => upload,
                 Err(error) => {
                     self.log(format!("iroh_host_blob_upload rejected error={error}"));
                     let on_log = self.on_log.clone();
+                    let transport = Arc::clone(self);
                     tokio::spawn(async move {
-                        publish_terminal_upload_reply(reply_sender, reply, Err(error), on_log)
-                            .await;
+                        publish_terminal_upload_reply(transport, reply, Err(error), on_log).await;
                     });
                     return;
                 }
@@ -832,13 +831,14 @@ impl RemoteIrohHostTransport {
             let blob_store = self.blob_store.clone();
             let on_upload = Arc::clone(&self.on_upload);
             let on_log = self.on_log.clone();
+            let transport = Arc::clone(self);
             tokio::spawn(async move {
                 let result =
                     match download_terminal_upload_blob(&blob_store, &endpoint, upload).await {
                         Ok(upload) => on_upload(upload),
                         Err(error) => Err(error),
                     };
-                publish_terminal_upload_reply(reply_sender, reply, result, on_log).await;
+                publish_terminal_upload_reply(transport, reply, result, on_log).await;
             });
             return;
         }
@@ -1019,22 +1019,36 @@ impl RemoteIrohHostTransport {
         }
     }
 
+    /// Resolve a device's sender at the moment of sending. A device alias is
+    /// rebound whenever the phone reconnects, so anything that captured a
+    /// sender earlier is addressing a connection that may already be retired.
+    fn peer_sender_for(
+        &self,
+        device_id: &str,
+        select: impl Fn(&PeerSenders) -> &IrohSender,
+    ) -> Option<IrohSender> {
+        let peers = self.peers.lock().ok()?;
+        peers
+            .get(device_id)
+            .filter(|peer| !peer.closed.load(Ordering::SeqCst))
+            .map(|peer| select(peer).clone())
+    }
+
     fn send_to_peers(
         &self,
         data: Vec<u8>,
         device_id: Option<&str>,
         select: impl Fn(&PeerSenders) -> &IrohSender,
     ) -> bool {
+        if let Some(device_id) = device_id.filter(|value| !value.trim().is_empty()) {
+            return self
+                .peer_sender_for(device_id, select)
+                .map(|tx| tx.try_send(data).is_ok())
+                .unwrap_or(false);
+        }
         let Ok(peers) = self.peers.lock() else {
             return false;
         };
-        if let Some(device_id) = device_id.filter(|value| !value.trim().is_empty()) {
-            return peers
-                .get(device_id)
-                .filter(|peer| !peer.closed.load(Ordering::SeqCst))
-                .map(|peer| select(peer).try_send(data).is_ok())
-                .unwrap_or(false);
-        }
         let mut sent = false;
         let unique = unique_senders(
             peers
@@ -1119,8 +1133,15 @@ fn terminal_upload_reply_data(
     serde_json::to_vec(&envelope).ok()
 }
 
+/// Publishes to whichever connection owns the device alias **now**, not to the
+/// one the upload arrived on. A phone that drops mid-transfer reconnects with
+/// fresh senders while the host is still writing the file, and the file write
+/// plus PTY injection are not idempotent: a reply lost to a retired connection
+/// makes the phone time out, retry, and get a second file and a second inserted
+/// path. Correlation is handled by `requestId`, which is what makes resolving
+/// the target late safe.
 async fn publish_terminal_upload_reply(
-    sender: IrohSender,
+    transport: Arc<RemoteIrohHostTransport>,
     reply: TerminalUploadReply,
     result: Result<RemoteTransportUploadOutcome, String>,
     on_log: Option<RemoteTransportLogHandler>,
@@ -1133,6 +1154,15 @@ async fn publish_terminal_upload_reply(
     let Some(data) = terminal_upload_reply_data(&reply, &result) else {
         if let Some(on_log) = on_log.as_ref() {
             on_log("iroh_host_blob_upload reply_encode_failed".to_string());
+        }
+        return;
+    };
+    let Some(sender) = transport.peer_sender_for(&reply.device_id, |peer| &peer.control) else {
+        if let Some(on_log) = on_log.as_ref() {
+            on_log(format!(
+                "iroh_host_blob_upload reply_no_peer device={} session={}",
+                reply.device_id, reply.session_id
+            ));
         }
         return;
     };
@@ -3103,11 +3133,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_result_is_published_only_to_captured_origin() {
-        let (origin, mut origin_rx) = mpsc::channel(1);
-        let (_replacement, mut replacement_rx) = mpsc::channel::<Vec<u8>>(1);
+    async fn upload_result_follows_the_device_to_its_current_connection() {
+        // A phone that loses its link mid-upload comes back on a fresh
+        // connection. The host still finishes the download, writes the file and
+        // injects the path into the PTY, so the reply has to reach whoever owns
+        // the device alias now — otherwise the phone times out, retries, and the
+        // host writes a second file and injects a second path.
+        let host = test_host().await;
+        let peer = test_peer(&host.transport).await;
+
+        let (origin, mut origin_rx) = mpsc::channel::<Vec<u8>>(1);
+        let (origin_terminal, _origin_terminal_rx) = mpsc::channel::<Vec<u8>>(1);
+        let origin_senders = PeerSenders {
+            id: HOST_PEER_ID.fetch_add(2, Ordering::Relaxed),
+            connection: peer.connection.clone(),
+            control: origin,
+            terminal: origin_terminal,
+            closed: Arc::new(AtomicBool::new(false)),
+        };
+        host.transport
+            .peers
+            .lock()
+            .unwrap()
+            .insert("device-1".to_string(), origin_senders.clone());
+
+        // The link drops and the phone reconnects: the alias is rebound while
+        // the upload is still being written.
+        origin_senders.closed.store(true, Ordering::SeqCst);
+        let (replacement, mut replacement_rx) = mpsc::channel::<Vec<u8>>(1);
+        let (replacement_terminal, _replacement_terminal_rx) = mpsc::channel::<Vec<u8>>(1);
+        host.transport.peers.lock().unwrap().insert(
+            "device-1".to_string(),
+            PeerSenders {
+                id: HOST_PEER_ID.fetch_add(2, Ordering::Relaxed),
+                connection: peer.connection.clone(),
+                control: replacement,
+                terminal: replacement_terminal,
+                closed: Arc::new(AtomicBool::new(false)),
+            },
+        );
+
         publish_terminal_upload_reply(
-            origin,
+            Arc::clone(&host.transport),
             TerminalUploadReply {
                 device_id: "device-1".to_string(),
                 session_id: "session-1".to_string(),
@@ -3122,12 +3189,22 @@ mod tests {
         )
         .await;
 
-        let response = origin_rx.recv().await.expect("origin response");
+        let response = tokio::time::timeout(Duration::from_secs(2), replacement_rx.recv())
+            .await
+            .expect(
+                "the reply never reached the connection that owns the device now, so the \
+                 reconnected phone waits out its timeout and retries an upload the host \
+                 has already written and injected",
+            )
+            .expect("upload reply");
         let response: serde_json::Value = serde_json::from_slice(&response).unwrap();
         assert_eq!(response["type"], codux_protocol::REMOTE_TERMINAL_UPLOADED);
         assert_eq!(response["requestId"], "upload-1");
         assert_eq!(response["payload"]["inserted"], true);
-        assert!(replacement_rx.try_recv().is_err());
+        assert!(
+            origin_rx.try_recv().is_err(),
+            "the retired connection must not receive the reply"
+        );
     }
 
     #[test]
