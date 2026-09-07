@@ -517,10 +517,6 @@ pub(super) fn remote_screen_scrollback_lines(scrollback_lines: Option<usize>) ->
         .min(REMOTE_SCREEN_SCROLLBACK_CAP)
 }
 
-pub(super) fn initial_remote_screen_scrollback_lines(active_scrollback: usize) -> usize {
-    REMOTE_SCREEN_IDLE_SCROLLBACK.min(active_scrollback)
-}
-
 pub(super) fn decode_utf8_output(bytes: &[u8], pending: &mut Vec<u8>) -> String {
     if pending.is_empty() {
         return decode_utf8_complete_prefix(bytes, pending);

@@ -271,13 +271,3 @@ fn remote_screen_scrollback_is_capped() {
     );
     assert_eq!(remote_screen_scrollback_lines(Some(1200)), 1200);
 }
-
-#[test]
-fn initial_remote_screen_scrollback_starts_idle() {
-    assert_eq!(
-        initial_remote_screen_scrollback_lines(REMOTE_SCREEN_SCROLLBACK_CAP),
-        REMOTE_SCREEN_IDLE_SCROLLBACK
-    );
-    assert_eq!(initial_remote_screen_scrollback_lines(1200), 500);
-    assert_eq!(initial_remote_screen_scrollback_lines(300), 300);
-}

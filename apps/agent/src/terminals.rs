@@ -717,7 +717,6 @@ struct AgentTerminalCtx<'a> {
 impl AgentTerminalCtx<'_> {
     fn add_viewer(&self, session_id: &str, device_id: &str) {
         self.fanout.add_viewer(session_id, device_id);
-        self.driver.restore_remote_screen_scrollback(session_id);
     }
 
     fn remove_viewer(&self, session_id: &str, device_id: &str) {

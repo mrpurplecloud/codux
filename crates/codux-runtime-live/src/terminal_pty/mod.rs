@@ -33,7 +33,6 @@ const OUTPUT_CAPTURE_LIMIT: usize = 16 * 1024;
 const MIN_HISTORY_BYTES: usize = 128 * 1024;
 const MAX_CONFIGURED_HISTORY_BYTES: usize = 8 * 1024 * 1024;
 const REMOTE_SCREEN_SCROLLBACK_CAP: usize = 2_000;
-const REMOTE_SCREEN_IDLE_SCROLLBACK: usize = 500;
 const TERMINAL_VIEWPORT_LEASE_TTL: Duration = Duration::from_secs(20);
 const REMOTE_TERMINAL_QUERY_COLORS: TerminalQueryColors = TerminalQueryColors {
     foreground: (0xe6, 0xed, 0xf3),

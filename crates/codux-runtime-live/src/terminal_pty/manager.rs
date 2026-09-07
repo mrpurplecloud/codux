@@ -284,18 +284,6 @@ impl TerminalManager {
         ))
     }
 
-    pub fn set_screen_scrollback(&self, session_id: &str, lines: usize) {
-        if let Ok(session) = self.session(session_id) {
-            session.set_screen_scrollback(lines);
-        }
-    }
-
-    pub fn restore_remote_screen_scrollback(&self, session_id: &str) {
-        if let Ok(session) = self.session(session_id) {
-            session.restore_remote_screen_scrollback();
-        }
-    }
-
     pub fn release_viewport(
         &self,
         session_id: &str,

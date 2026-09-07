@@ -62,7 +62,7 @@ impl RemoteHostRuntime {
                 if change.project_id.is_some() {
                     self.reply_terminal_list(envelope);
                 } else if let Some(session_id) = change.session_id.as_deref() {
-                    self.activate_terminal_viewer(session_id);
+                    self.ensure_terminal_event_subscription(session_id);
                     self.send_terminal_viewport_state(session_id, envelope.device_id.as_deref());
                     if change.baseline {
                         self.spawn_terminal_baseline(
@@ -566,7 +566,6 @@ impl RemoteHostRuntime {
                         Some(session_id),
                         device_id,
                     );
-                    self.terminals.restore_remote_screen_scrollback(session_id);
                 }
                 crate::runtime_trace::runtime_trace(
                     "remote",

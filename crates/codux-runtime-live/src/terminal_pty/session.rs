@@ -34,7 +34,6 @@ pub struct TerminalPtySession {
     pub(super) pty_control: LocalPtyProcessHandle,
     pub(super) viewport: Arc<parking_lot::Mutex<TerminalViewportLease>>,
     pub(super) remote_screen_scrollback: usize,
-    pub(super) remote_screen_current_scrollback: parking_lot::Mutex<usize>,
 }
 
 pub(super) struct TerminalExitSignal {
@@ -111,8 +110,6 @@ impl TerminalPtySession {
             terminal_history_bytes(config.scrollback_lines, cols),
         )));
         let remote_screen_scrollback = remote_screen_scrollback_lines(config.scrollback_lines);
-        let initial_remote_screen_scrollback =
-            initial_remote_screen_scrollback_lines(remote_screen_scrollback);
         let responder: TerminalPtyResponder = {
             let stdin_writer = Arc::clone(&stdin_writer);
             Arc::new(move |bytes: &[u8]| {
@@ -124,7 +121,7 @@ impl TerminalPtySession {
         let mut terminal_screen = HeadlessTerminalScreen::new_with_responder(
             cols as usize,
             rows as usize,
-            initial_remote_screen_scrollback,
+            remote_screen_scrollback,
             Some(responder),
         );
         let query_colors = Arc::new(parking_lot::Mutex::new(local_query_colors));
@@ -279,9 +276,6 @@ impl TerminalPtySession {
                 pty_control: process.control,
                 viewport,
                 remote_screen_scrollback,
-                remote_screen_current_scrollback: parking_lot::Mutex::new(
-                    initial_remote_screen_scrollback,
-                ),
             },
             Box::new(terminal_writer),
             Box::new(terminal_reader),
@@ -416,7 +410,11 @@ impl TerminalPtySession {
                 self.history.lock().snapshot_tail(max_chars);
             let screen = self.screen.lock();
             let request = match viewport_max_lines {
-                Some(max_lines) => screen.remote_viewport_snapshot_request(0, 0, max_lines),
+                // The baseline must describe the whole scrollable window the
+                // screen retains, not the rows the viewer currently shows.
+                Some(_) => {
+                    screen.remote_viewport_snapshot_request(0, 0, self.remote_screen_scrollback)
+                }
                 None => screen.snapshot_request(true),
             };
             (data, offset, buffer_length, buffer_end, request)
@@ -496,19 +494,6 @@ impl TerminalPtySession {
 
     pub fn buffer_characters(&self) -> usize {
         self.history.lock().retained_chars()
-    }
-
-    pub fn set_screen_scrollback(&self, lines: usize) {
-        let mut current = self.remote_screen_current_scrollback.lock();
-        if *current == lines {
-            return;
-        }
-        *current = lines;
-        self.screen.lock().set_scrollback(lines);
-    }
-
-    pub fn restore_remote_screen_scrollback(&self) {
-        self.set_screen_scrollback(self.remote_screen_scrollback);
     }
 
     pub fn clear_history(&self) {

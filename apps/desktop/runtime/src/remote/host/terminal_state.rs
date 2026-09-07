@@ -524,11 +524,6 @@ impl RemoteHostRuntime {
             Some(session_id),
             device_id,
         );
-        self.activate_terminal_viewer(session_id);
-    }
-
-    pub(super) fn activate_terminal_viewer(self: &Arc<Self>, session_id: &str) {
-        self.terminals.restore_remote_screen_scrollback(session_id);
         self.ensure_terminal_event_subscription(session_id);
     }
 

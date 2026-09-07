@@ -1,5 +1,70 @@
 use super::*;
 
+/// A phone is told how far back it may scroll, not how tall its screen is.
+///
+/// The baseline reply is sized to the observer's viewport so it stays small.
+/// That size used to be passed as the scrollable window too, so the reply
+/// reported a session with exactly one screen of history and the controller
+/// disabled scrolling. Because the number tracked the viewport, it also moved
+/// whenever the viewport did — a phone mid-layout briefly reports a handful of
+/// rows, and the history it could reach shrank to match.
+#[cfg(unix)]
+#[test]
+fn baseline_reports_the_scrollable_window_not_the_viewport_height() {
+    let manager = TerminalManager::new();
+    let terminal_id = format!("codux-baseline-scrollback-{}", Uuid::new_v4());
+    let root = std::env::temp_dir().join(&terminal_id);
+    fs::create_dir_all(&root).unwrap();
+
+    // Pin the screen size: with it left to default, the reported total is
+    // clamped by the default row count instead of the viewport under test, and
+    // the assertion below passes whether or not the bug is present.
+    const SCREEN_ROWS: u16 = 30;
+    const PHONE_ROWS: usize = 24;
+    const PRINTED_LINES: usize = 900;
+
+    let (session, output) = manager
+        .attach_or_create_with_context(
+            TerminalPtyConfig {
+                terminal_id: Some(terminal_id.clone()),
+                cwd: Some(root.display().to_string()),
+                shell: Some("/bin/sh".to_string()),
+                command: Some(
+                    "i=0; while [ $i -lt 900 ]; do echo line-$i; i=$((i+1)); done; \
+                     echo READY; sleep 30"
+                        .to_string(),
+                ),
+                cols: Some(100),
+                rows: Some(SCREEN_ROWS),
+                ..Default::default()
+            },
+            None,
+            Arc::new(|_| true),
+        )
+        .expect("spawn terminal");
+
+    assert!(
+        recv_until_contains(&output, "READY", Duration::from_secs(10)).contains("READY"),
+        "terminal never finished printing"
+    );
+
+    // A phone subscribes only now, long after the output was produced: the
+    // history it can reach must not depend on when it showed up.
+    let baseline = session.baseline_snapshot(200_000, Some(PHONE_ROWS));
+
+    assert!(
+        baseline.screen.total_lines >= PRINTED_LINES,
+        "a session that printed {PRINTED_LINES} lines reports only {} scrollable \
+         lines, so a phone cannot reach the history the host still holds",
+        baseline.screen.total_lines
+    );
+
+    manager
+        .kill_and_wait(&terminal_id, Duration::from_secs(2))
+        .expect("close terminal");
+    fs::remove_dir_all(root).ok();
+}
+
 #[cfg(unix)]
 #[test]
 fn runtime_screen_answers_colors_before_ui_attach_and_tracks_viewport_owner() {
