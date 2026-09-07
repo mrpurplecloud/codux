@@ -437,14 +437,15 @@ fn transport_entry_fields(candidate: &RemoteTransportCandidate) -> serde_json::M
 
 /// One transport entry for a pairing QR / `codux://pair?payload=` URL.
 ///
-/// Omits the dial `url` (the controller learns it on connect) and, when the
-/// host has a relay, the bulky endpoint `ticket` — it roughly doubles QR
-/// density and hurts scan reliability, and `nodeId` + `relayUrl` is enough to
-/// dial a host that has a relay home.
+/// Omits the dial `url` — the controller learns it on connect.
 ///
-/// A host WITHOUT a relay is the exception, and the ticket stays. Dropping it
-/// there leaves a QR encoding an identity and no route the transport can dial —
-/// an unusable QR is a worse outcome than a dense one.
+/// Keeps the endpoint `ticket` even when the host has a relay, at the cost of
+/// roughly doubling QR density. The ticket is the only field carrying the
+/// host's direct addresses, and a pairing that arrives with the relay as its
+/// sole route cannot recover from that relay becoming unreachable: learning a
+/// direct address requires connecting once, which needs a route to begin with.
+/// A dense QR is a worse scan; a relay-only QR is a device that cannot connect
+/// at all on the wrong network.
 ///
 /// THE single definition of the pairing-QR transport shape, shared by every Rust
 /// host so a format change happens in one place.
@@ -452,13 +453,6 @@ pub fn pairing_transport_entry(candidate: &RemoteTransportCandidate) -> Value {
     let mut item = transport_entry_fields(candidate);
     item.remove("role");
     item.remove("url");
-    let has_relay = candidate
-        .relay_url
-        .as_deref()
-        .is_some_and(|relay| !relay.trim().is_empty());
-    if has_relay {
-        item.remove("ticket");
-    }
     Value::Object(item)
 }
 
@@ -1370,7 +1364,13 @@ mod tests {
     }
 
     #[test]
-    fn a_live_relay_keeps_the_pairing_qr_slim() {
+    fn a_pairing_qr_carries_the_ticket_even_when_a_relay_is_live() {
+        // The ticket is the only field that encodes the host's direct
+        // addresses. Dropping it leaves a pairing whose sole route is the
+        // relay, and one that can never recover: learning a direct address
+        // requires connecting once, which needs a route to begin with. A phone
+        // on a network where the relay is unreachable is then stuck until it
+        // re-pairs from somewhere else.
         let entry =
             pairing_transport_entry(&iroh_transport_candidate_with_ticket_and_authentication(
                 "https://dial.example",
@@ -1386,6 +1386,7 @@ mod tests {
                 "kind": REMOTE_TRANSPORT_IROH,
                 "nodeId": "node-x",
                 "relayUrl": "https://relay.example",
+                "ticket": "endpoint-ticket-bytes",
                 "relayAuthentication": "relay-token",
             })
         );

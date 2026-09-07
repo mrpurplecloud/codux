@@ -176,10 +176,10 @@ fn remote_pairing_payload_contains_iroh_transport_candidates() {
     assert!(value.get("transport").is_none());
     assert!(value.get("iroh").is_none());
     assert_eq!(value["transports"][0]["kind"], "iroh");
-    // The QR omits the bulky iroh endpoint ticket (it ~doubles QR density and
-    // hurts scan reliability) and carries the minimum needed to dial — nodeId +
-    // relayUrl. The host re-sends the full transport set on `pairing.confirmed`.
-    assert!(value["transports"][0].get("ticket").is_none());
+    // The QR carries the ticket even though it ~doubles density: it is the only
+    // field holding the host's direct addresses, and a pairing whose sole route
+    // is the relay cannot recover when that relay is unreachable.
+    assert_eq!(value["transports"][0]["ticket"], "endpoint-ticket");
     assert_eq!(value["transports"][0]["nodeId"], "node-1");
     assert_eq!(value["transports"][0]["relayUrl"], "https://relay.example");
     assert_eq!(value["transports"][0]["relayAuthentication"], "relay-token");
