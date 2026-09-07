@@ -179,9 +179,20 @@ impl RemoteHostCallbackAdapter {
             .flatten()
     }
 
-    fn authorize(&self, device_id: &str, device_token: &str) -> bool {
-        self.run(|runtime| runtime.is_authorized_device_token(Some(device_id), Some(device_token)))
-            .unwrap_or(false)
+    /// Answered from persisted settings, deliberately outside the callback
+    /// permit. Whether this generation of the transport is published says
+    /// nothing about whether a device is paired, and the permit is unavailable
+    /// for the whole window between `published = false` and the router actually
+    /// closing — during which the router still accepts and the phone still
+    /// pings. Denying there would answer `device_unauthorized`, which the phone
+    /// reads as "stop and re-pair", for what is usually a reconnect that
+    /// succeeds seconds later. Liveness is reported by the paths that own it:
+    /// `handle_upload` and `authorize_web_tunnel` return a distinct
+    /// "no longer active" error rather than a denial.
+    pub(super) fn authorize(&self, device_id: &str, device_token: &str) -> bool {
+        self.runtime.upgrade().is_some_and(|runtime| {
+            runtime.is_authorized_device_token(Some(device_id), Some(device_token))
+        })
     }
 
     fn authorize_web_tunnel(&self, request: WebTunnelTcpConnectRequest) -> Result<(), String> {

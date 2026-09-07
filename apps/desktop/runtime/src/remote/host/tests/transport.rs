@@ -639,6 +639,39 @@ fn authorization_rejects_unknown_device_credentials() {
 }
 
 #[test]
+fn authorization_holds_while_the_transport_is_between_generations() {
+    let support_dir = temp_support_dir("codux-remote-authorize-unpublished");
+    write_paired_remote_settings(&support_dir);
+    let runtime = Arc::new(RemoteHostRuntime::new(support_dir.clone()));
+    // A start that has begun but not yet published — the same state the host is
+    // in while it drains callbacks on the way to a stop, and before it publishes
+    // on the way up. The iroh router accepts throughout both windows.
+    let start = runtime.begin_transport_start_for_test();
+    let callbacks = runtime.callback_adapter_for_test(start);
+
+    assert!(
+        runtime.is_authorized_device_token(Some("device-1"), Some("device-token-1")),
+        "settings still authorize the paired device"
+    );
+    assert!(
+        callbacks.authorize("device-1", "device-token-1"),
+        "a paired device must stay authorized while the transport is between \
+         generations: a denial reaches the phone as `device_unauthorized`, which \
+         stops the session and demands re-pairing with no automatic retry"
+    );
+    assert!(
+        !callbacks.authorize("device-1", "wrong-token"),
+        "an unknown credential must still be rejected"
+    );
+    assert!(
+        !callbacks.authorize("unknown-device", "device-token-1"),
+        "an unknown device must still be rejected"
+    );
+
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
 fn authorization_rejects_missing_device_credentials() {
     let support_dir = temp_support_dir("codux-remote-unauthorized-transport-device-repair");
     write_paired_remote_settings(&support_dir);
