@@ -262,20 +262,21 @@ impl ControllerInner {
             }
             let session_id = envelope.get("sessionId").and_then(Value::as_str);
             let data = payload.get("data").and_then(Value::as_str).unwrap_or("");
-            // Feed ONLY the live byte stream into the emulator — exactly like a
-            // local PTY relay. The host also emits full-screen `screenData`
-            // keyframes (on attach and on every resize), but our desktop emulator
-            // keeps its OWN scrollback built from this byte stream, so replaying a
-            // keyframe on top of it DUPLICATES the screen into scrollback — and a
-            // window drag fires many resize keyframes, so the content piled up
-            // many times over. Resize is handled by the shell's own repaint in the
-            // live stream, just as it is for a local terminal. (The keyframe stays
-            // in the protocol for grid-reconciling clients; this emulator isn't
-            // one — see the tmux-style notes in the remote terminal design.)
             let is_buffer = payload
                 .get("buffer")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            // A buffer with no raw history still needs its current screen seed.
+            // Never replay screenData for live frames or alongside history: that
+            // duplicates the emulator's screen into scrollback.
+            let data = if is_buffer && data.is_empty() {
+                payload
+                    .get("screenData")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+            } else {
+                data
+            };
             let mut delivered = false;
             if let Some(session_id) = session_id {
                 if !data.is_empty()
@@ -2159,6 +2160,33 @@ mod tests {
         );
 
         assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+    }
+
+    #[test]
+    fn terminal_output_uses_screen_data_when_buffer_data_is_empty() {
+        let inner = Arc::new(ControllerInner::default());
+        let controller = RemoteController {
+            transport: Arc::new(NoopTransport),
+            device_id: "device-1".to_string(),
+            inner: Arc::clone(&inner),
+            next_id: AtomicU64::new(1),
+        };
+        let (tx, rx) = mpsc::channel();
+        controller.register_terminal_output(
+            "session-1",
+            Box::new(move |bytes| {
+                let _ = tx.send(bytes);
+            }),
+        );
+
+        inner.route(
+            br#"{"type":"terminal.output","sessionId":"session-1","payload":{"buffer":true,"data":"","screenData":"\u001b[2J\u001b[Hready"}}"#,
+        );
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            b"\x1b[2J\x1b[Hready"
+        );
     }
 
     #[test]

@@ -93,13 +93,6 @@ impl TerminalFanout {
             .remove_project_subscriber(project_id, device_id);
     }
 
-    fn project_subscribers(&self, project_id: &str) -> Vec<String> {
-        self.subscriptions
-            .project_subscribers(project_id)
-            .into_iter()
-            .collect()
-    }
-
     fn set_session_project(&self, session_id: &str, project_id: &str) {
         let session_id = session_id.trim();
         let project_id = project_id.trim();
@@ -613,11 +606,6 @@ fn handle_agent_terminal_event(
             exit_code,
         } => {
             let viewers = fanout_state.viewers(&session_id);
-            let project_subscribers = fanout_state
-                .project_for_session(&session_id)
-                .as_deref()
-                .map(|project_id| fanout_state.project_subscribers(project_id))
-                .unwrap_or_default();
             send_to_viewers(
                 transport,
                 &viewers,
@@ -632,15 +620,7 @@ fn handle_agent_terminal_event(
                 false,
             );
             fanout_state.clear_session(&session_id);
-            send_to_viewers(
-                transport,
-                &project_subscribers,
-                json!({
-                    "type": REMOTE_TERMINAL_LIST,
-                    "payload": list_payload(driver, fanout_state),
-                }),
-                false,
-            );
+            broadcast_terminal_list(driver, transport, fanout_state);
         }
         TerminalEvent::Error {
             session_id,
@@ -983,31 +963,15 @@ impl RemoteTerminalDispatch for AgentTerminalCtx<'_> {
                     device_id,
                     |session_id, device_id| self.add_viewer(session_id, device_id),
                 );
-                let mut subscribers = project_id
-                    .as_deref()
-                    .map(|project_id| self.fanout.project_subscribers(project_id))
-                    .unwrap_or_default();
-                let created_payload = terminal_payload(created_terminal, self.fanout);
                 reply(
                     self.transport,
                     device_id,
                     Some(&session_id),
                     msg.request_id,
                     REMOTE_TERMINAL_CREATED,
-                    created_payload.clone(),
+                    terminal_payload(created_terminal, self.fanout),
                 );
-                if let Some(device_id) = device_id {
-                    subscribers.retain(|subscriber| subscriber != device_id);
-                }
-                send_to_viewers(
-                    self.transport,
-                    &subscribers,
-                    json!({
-                        "type": REMOTE_TERMINAL_LIST,
-                        "payload": list_payload(self.driver, self.fanout),
-                    }),
-                    false,
-                );
+                broadcast_terminal_list(self.driver, self.transport, self.fanout);
                 if lifecycle.reattaching
                     && let Some(device_id) =
                         device_id.map(str::trim).filter(|value| !value.is_empty())
@@ -1179,12 +1143,6 @@ impl RemoteTerminalDispatch for AgentTerminalCtx<'_> {
 
     fn handle_terminal_close_msg(&self, msg: &TerminalMessage) {
         if let Some(id) = msg.session_id {
-            let mut project_subscribers = self
-                .fanout
-                .project_for_session(id)
-                .as_deref()
-                .map(|project_id| self.fanout.project_subscribers(project_id))
-                .unwrap_or_default();
             let requesting_device = msg
                 .device_id
                 .filter(|device_id| !device_id.trim().is_empty());
@@ -1226,22 +1184,7 @@ impl RemoteTerminalDispatch for AgentTerminalCtx<'_> {
                 json!({ "sessionId": id }),
             );
             if !existed {
-                if let Some(device_id) = requesting_device
-                    && !project_subscribers
-                        .iter()
-                        .any(|subscriber| subscriber == device_id)
-                {
-                    project_subscribers.push(device_id.to_string());
-                }
-                send_to_viewers(
-                    self.transport,
-                    &project_subscribers,
-                    json!({
-                        "type": REMOTE_TERMINAL_LIST,
-                        "payload": list_payload(self.driver, self.fanout),
-                    }),
-                    false,
-                );
+                broadcast_terminal_list(self.driver, self.transport, self.fanout);
             }
         }
     }
@@ -1390,7 +1333,10 @@ pub fn handle_terminal(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codux_protocol::{REMOTE_TERMINAL_VIEWPORT_CLAIM, RemoteTransportKind};
+    use codux_protocol::{
+        REMOTE_TERMINAL_CLOSE, REMOTE_TERMINAL_CREATE, REMOTE_TERMINAL_VIEWPORT_CLAIM,
+        RemoteTransportKind,
+    };
     use codux_remote_transport::LocalMemoryTransportHub;
 
     type TestMessages = Arc<Mutex<HashMap<String, Vec<Value>>>>;
@@ -1440,6 +1386,69 @@ mod tests {
             .filter_map(|message| message.get("type").and_then(Value::as_str))
             .map(str::to_string)
             .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_create_reconciles_every_connected_device() {
+        let (transport, received) = test_transport(&["phone-a", "desktop-a"]);
+        let driver = Arc::new(TerminalManager::new());
+        let fanout = TerminalFanout::new();
+        fanout.add_project_subscriber("project-1", "phone-a");
+        let session_id = format!("agent-create-{}", uuid::Uuid::new_v4());
+        let payload = json!({
+            "projectId": "project-1",
+            "terminalId": session_id,
+            "command": "cat",
+        });
+
+        handle_terminal(
+            &driver,
+            &transport,
+            &fanout,
+            Some("phone-a"),
+            REMOTE_TERMINAL_CREATE,
+            &json!({ "requestId": "create-1" }),
+            &payload,
+        );
+
+        assert_eq!(
+            message_types(&received, "desktop-a"),
+            vec![REMOTE_TERMINAL_LIST]
+        );
+        assert_eq!(
+            received.lock().unwrap()["desktop-a"][0]
+                .pointer("/payload/terminals/0/id")
+                .and_then(Value::as_str),
+            Some(session_id.as_str())
+        );
+
+        let _ = driver.kill_and_wait(&session_id, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn closing_missing_terminal_reconciles_every_connected_device() {
+        let (transport, received) = test_transport(&["phone-a", "desktop-a"]);
+        let driver = Arc::new(TerminalManager::new());
+        let fanout = TerminalFanout::new();
+        fanout.set_session_project("session-1", "project-1");
+        fanout.add_project_subscriber("project-1", "phone-a");
+        let payload = json!({ "sessionId": "session-1" });
+
+        handle_terminal(
+            &driver,
+            &transport,
+            &fanout,
+            Some("phone-a"),
+            REMOTE_TERMINAL_CLOSE,
+            &json!({ "requestId": "close-1" }),
+            &payload,
+        );
+
+        assert_eq!(
+            message_types(&received, "desktop-a"),
+            vec![REMOTE_TERMINAL_LIST]
+        );
     }
 
     #[test]
@@ -1698,7 +1707,7 @@ mod tests {
 
     #[test]
     fn natural_exit_notifies_all_viewers_and_clears_session() {
-        let (transport, received) = test_transport(&["phone-a", "phone-b"]);
+        let (transport, received) = test_transport(&["phone-a", "phone-b", "desktop-a"]);
         let fanout = TerminalFanout::new();
         fanout.add_project_subscriber("project-1", "phone-a");
         fanout.add_viewer("session-1", "phone-b");
@@ -1720,7 +1729,11 @@ mod tests {
         );
         assert_eq!(
             message_types(&received, "phone-b"),
-            vec![REMOTE_TERMINAL_CLOSED]
+            vec![REMOTE_TERMINAL_CLOSED, REMOTE_TERMINAL_LIST]
+        );
+        assert_eq!(
+            message_types(&received, "desktop-a"),
+            vec![REMOTE_TERMINAL_LIST]
         );
         assert!(fanout.viewers("session-1").is_empty());
         assert_eq!(fanout.project_for_session("session-1"), None);

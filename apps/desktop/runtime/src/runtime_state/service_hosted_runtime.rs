@@ -53,7 +53,8 @@ impl RuntimeService {
                     .get("terminals")
                     .and_then(Value::as_array)
                     .ok_or_else(|| "Remote terminal list is missing terminals.".to_string())?;
-                let projects = ProjectStore::new(self.support_dir.clone()).projects_snapshot();
+                let project_store = ProjectStore::new(self.support_dir.clone());
+                let projects = project_store.projects_snapshot();
                 let mut updates = Vec::new();
                 for terminal in terminals {
                     if !terminal
@@ -98,19 +99,69 @@ impl RuntimeService {
                         .and_then(Value::as_str)
                         .unwrap_or("Terminal");
                     updates.push((
-                        project_id.to_string(),
-                        worktree_id.to_string(),
+                        crate::terminal_layout::terminal_layout_storage_key(
+                            project_id,
+                            worktree_id,
+                        ),
                         terminal_id.to_string(),
                         title.to_string(),
                     ));
                 }
                 let layout_service = TerminalLayoutService::new(self.support_dir.clone());
                 let mut changed = false;
-                for (project_id, worktree_id, terminal_id, title) in updates {
-                    let layout_key = crate::terminal_layout::terminal_layout_storage_key(
-                        &project_id,
-                        &worktree_id,
-                    );
+                let mut layout_keys = project_store
+                    .terminal_layouts_snapshot()
+                    .layouts
+                    .into_keys()
+                    .filter(|layout_key| {
+                        codux_terminal_core::runtime_scope_parts(layout_key)
+                            .and_then(|(project_id, _)| {
+                                projects.iter().find(|project| project.id == project_id)
+                            })
+                            .is_some_and(|project| {
+                                project.runtime_target.remote_device_id() == Some(device_id)
+                            })
+                    })
+                    .collect::<std::collections::HashSet<_>>();
+                layout_keys.extend(
+                    updates
+                        .iter()
+                        .map(|(layout_key, _, _)| layout_key.clone()),
+                );
+                for layout_key in layout_keys {
+                    let mut layout = layout_service.load(Some(&layout_key));
+                    let before_total =
+                        layout.top_panes.len() + layout.tabs.len() + layout.collapsed_panes.len();
+                    layout.top_panes.retain(|pane| {
+                        updates.iter().any(|(expected_layout_key, terminal_id, _)| {
+                            expected_layout_key == &layout_key
+                                && terminal_id == &pane.terminal_id
+                        })
+                    });
+                    layout.tabs.retain(|tab| {
+                        updates.iter().any(|(expected_layout_key, terminal_id, _)| {
+                            expected_layout_key == &layout_key && terminal_id == &tab.terminal_id
+                        })
+                    });
+                    layout.collapsed_panes.retain(|pane| {
+                        updates.iter().any(|(expected_layout_key, terminal_id, _)| {
+                            expected_layout_key == &layout_key
+                                && terminal_id == &pane.terminal_id
+                        })
+                    });
+                    let after_total =
+                        layout.top_panes.len() + layout.tabs.len() + layout.collapsed_panes.len();
+                    if after_total == before_total {
+                        continue;
+                    }
+                    if after_total == 0 {
+                        layout_service.delete(&layout_key)?;
+                    } else {
+                        layout_service.save_summary(&layout_key, layout)?;
+                    }
+                    changed = true;
+                }
+                for (layout_key, terminal_id, title) in updates {
                     let layout = layout_service.load(Some(&layout_key));
                     if layout
                         .top_panes
@@ -120,6 +171,10 @@ impl RuntimeService {
                             .tabs
                             .iter()
                             .any(|tab| tab.terminal_id == terminal_id)
+                        || layout
+                            .collapsed_panes
+                            .iter()
+                            .any(|pane| pane.terminal_id == terminal_id)
                     {
                         continue;
                     }
@@ -1437,6 +1492,119 @@ mod hosted_runtime_payload_tests {
         let layout = TerminalLayoutService::new(support_dir.clone()).load(Some(&layout_key));
         assert_eq!(layout.top_panes.len(), 1);
         assert_eq!(layout.top_panes[0].terminal_id, "agent-terminal-1");
+
+        drop(service);
+        std::fs::remove_dir_all(support_dir).ok();
+    }
+
+    #[test]
+    fn remote_terminal_list_removes_absent_terminals_for_only_its_device() {
+        let (service, support_dir) = remote_runtime_service();
+        let layout_service = TerminalLayoutService::new(support_dir.clone());
+        let layout_key = crate::terminal_layout::terminal_layout_storage_key(
+            "project-1",
+            "worktree-current",
+        );
+        let other_layout_key =
+            crate::terminal_layout::terminal_layout_storage_key("project-2", "project-2");
+        layout_service
+            .ensure_terminal(&layout_key, "agent-terminal-1", "One")
+            .expect("seed visible terminal");
+        layout_service
+            .ensure_terminal(&layout_key, "stale-terminal", "Stale")
+            .expect("seed stale visible terminal");
+        let mut layout = layout_service.load(Some(&layout_key));
+        layout
+            .collapsed_panes
+            .push(crate::terminal_layout::TerminalPaneSummary {
+                title: "Two".to_string(),
+                terminal_id: "agent-terminal-2".to_string(),
+            });
+        layout_service
+            .save_summary(&layout_key, layout)
+            .expect("seed collapsed terminal");
+        layout_service
+            .ensure_terminal(&other_layout_key, "other-terminal", "Other")
+            .expect("seed other device layout");
+
+        assert_eq!(
+            service
+                .apply_hosted_workspace_update(
+                    "device-1",
+                    codux_protocol::REMOTE_TERMINAL_LIST,
+                    &json!({
+                        "terminals": [
+                            {
+                                "id": "agent-terminal-1",
+                                "projectId": "project-1",
+                                "worktreeId": "worktree-current",
+                                "isRunning": true
+                            },
+                            {
+                                "id": "agent-terminal-2",
+                                "projectId": "project-1",
+                                "worktreeId": "worktree-current",
+                                "isRunning": true
+                            }
+                        ]
+                    }),
+                )
+                .expect("remove stale visible terminal")
+                .len(),
+            1
+        );
+        let layout = layout_service.load(Some(&layout_key));
+        assert_eq!(layout.top_panes.len(), 1);
+        assert_eq!(layout.top_panes[0].terminal_id, "agent-terminal-1");
+        assert_eq!(layout.collapsed_panes.len(), 1);
+        assert_eq!(
+            layout.collapsed_panes[0].terminal_id,
+            "agent-terminal-2"
+        );
+
+        assert_eq!(
+            service
+                .apply_hosted_workspace_update(
+                    "device-1",
+                    codux_protocol::REMOTE_TERMINAL_LIST,
+                    &json!({
+                        "terminals": [{
+                            "id": "agent-terminal-1",
+                            "projectId": "project-1",
+                            "worktreeId": "worktree-current",
+                            "isRunning": true
+                        }]
+                    }),
+                )
+                .expect("remove absent terminal")
+                .len(),
+            1
+        );
+        let layout = layout_service.load(Some(&layout_key));
+        assert_eq!(layout.top_panes.len(), 1);
+        assert_eq!(layout.top_panes[0].terminal_id, "agent-terminal-1");
+        assert!(layout.collapsed_panes.is_empty());
+
+        assert_eq!(
+            service
+                .apply_hosted_workspace_update(
+                    "device-1",
+                    codux_protocol::REMOTE_TERMINAL_LIST,
+                    &json!({ "terminals": [] }),
+                )
+                .expect("remove final terminal")
+                .len(),
+            1
+        );
+        assert!(layout_service.load(Some(&layout_key)).top_panes.is_empty());
+        assert_eq!(
+            layout_service
+                .load(Some(&other_layout_key))
+                .top_panes
+                .first()
+                .map(|pane| pane.terminal_id.as_str()),
+            Some("other-terminal")
+        );
 
         drop(service);
         std::fs::remove_dir_all(support_dir).ok();
