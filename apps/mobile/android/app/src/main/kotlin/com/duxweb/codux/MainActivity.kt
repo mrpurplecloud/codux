@@ -34,6 +34,10 @@ class MainActivity : FlutterActivity() {
                     stopKeepAlive()
                     result.success(null)
                 }
+                "requestBackgroundExecutionSettings" -> {
+                    requestBackgroundExecutionSettings()
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         }
@@ -61,6 +65,21 @@ class MainActivity : FlutterActivity() {
                 "keep-alive service refused=$refused error=${error.javaClass.simpleName}: ${error.message}",
             )
             false
+        }
+    }
+
+    private fun requestBackgroundExecutionSettings() {
+        if (!Build.MANUFACTURER.equals(HONOR_MANUFACTURER, ignoreCase = true)) return
+        val preferences = getPreferences(MODE_PRIVATE)
+        // ponytail: Honor exposes no public status API; replace this flag if one appears.
+        if (preferences.getBoolean(HONOR_STARTUP_SETTINGS_OPENED, false)) return
+        try {
+            startActivity(
+                Intent().setClassName(HONOR_SYSTEM_MANAGER, HONOR_STARTUP_MANAGER),
+            )
+            preferences.edit().putBoolean(HONOR_STARTUP_SETTINGS_OPENED, true).apply()
+        } catch (error: Exception) {
+            Log.w(TAG, "Honor startup settings unavailable: ${error.message}")
         }
     }
 
@@ -93,5 +112,10 @@ class MainActivity : FlutterActivity() {
     private companion object {
         const val KEEP_ALIVE_CHANNEL = "codux/background_keepalive"
         const val TAG = "CoduxKeepAlive"
+        const val HONOR_MANUFACTURER = "HONOR"
+        const val HONOR_SYSTEM_MANAGER = "com.hihonor.systemmanager"
+        const val HONOR_STARTUP_MANAGER =
+            "com.hihonor.systemmanager.startupmgr.ui.StartupNormalAppListActivity"
+        const val HONOR_STARTUP_SETTINGS_OPENED = "honorStartupSettingsOpened"
     }
 }

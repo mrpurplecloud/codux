@@ -356,6 +356,9 @@ extension _HomePageConnection on HomeController {
     _hostResponseSerial += 1;
     _cancelHostResponseProbe();
     _markTransportConnected(transport ?? _deviceTransportKind(_activeDevice));
+    if (!wasResponsive && _settings.keepConnectionAlive) {
+      unawaited(_backgroundKeepAlive.requestBackgroundExecutionSettings());
+    }
     if (!wasResponsive) {
       CoduxLog.info('[codux-flutter-remote] host responsive source=$source');
     }

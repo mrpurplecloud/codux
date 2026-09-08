@@ -92,6 +92,14 @@ void main() {
       expect(calls.first.arguments, {'title': 'Codux', 'body': 'holding'});
     });
 
+    test('requests background execution settings', () async {
+      final keepAlive = BackgroundKeepAlive(channel: channel, supported: true);
+
+      await keepAlive.requestBackgroundExecutionSettings();
+
+      expect(calls.single.method, 'requestBackgroundExecutionSettings');
+    });
+
     test(
       'a refused start leaves the caller unprotected, not crashed',
       () async {
@@ -114,6 +122,7 @@ void main() {
       final keepAlive = BackgroundKeepAlive(channel: channel, supported: false);
 
       expect(await keepAlive.start(title: 'Codux', body: 'holding'), isFalse);
+      await keepAlive.requestBackgroundExecutionSettings();
       await keepAlive.stop();
 
       expect(calls, isEmpty);

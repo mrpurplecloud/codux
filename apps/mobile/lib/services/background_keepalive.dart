@@ -51,6 +51,20 @@ class BackgroundKeepAlive {
 
   bool get isRunning => _running;
 
+  Future<void> requestBackgroundExecutionSettings() async {
+    if (!_supported) return;
+    try {
+      await _channel.invokeMethod<void>('requestBackgroundExecutionSettings');
+    } on PlatformException catch (error) {
+      CoduxLog.warn(
+        '[codux-flutter-keepalive] background settings request failed '
+        'code=${error.code} message=${error.message ?? ''}',
+      );
+    } on MissingPluginException {
+      return;
+    }
+  }
+
   /// Start (or refresh) the service. Returns whether it is running afterwards;
   /// a refused start leaves the pre-change behaviour — the link drops and the
   /// app reconnects on resume.
