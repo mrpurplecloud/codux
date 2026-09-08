@@ -4,6 +4,7 @@ use super::super::*;
 struct HostedTestController {
     actions: std::sync::Mutex<Vec<String>>,
     terminals: Vec<String>,
+    fail_open: bool,
 }
 
 impl HostedTestController {
@@ -11,6 +12,7 @@ impl HostedTestController {
         Self {
             actions: std::sync::Mutex::new(Vec::new()),
             terminals: terminals.iter().map(|value| value.to_string()).collect(),
+            fail_open: false,
         }
     }
 
@@ -21,6 +23,9 @@ impl HostedTestController {
 
 impl RuntimeTerminalController for HostedTestController {
     fn open_terminal(&self, config: &TerminalPtyConfig) -> Result<String, String> {
+        if self.fail_open {
+            return Err("open failed".to_string());
+        }
         let session_id = config
             .terminal_id
             .clone()
@@ -113,6 +118,43 @@ fn pending_terminal_binding_rejects_different_runtime_target() {
     };
 
     assert!(!binding.matches_pty_config(&wsl_config));
+}
+
+#[test]
+fn failed_hosted_attach_stops_pending_binding_from_matching() {
+    let config = TerminalPtyConfig {
+        terminal_id: Some("terminal-1".to_string()),
+        ..Default::default()
+    };
+    let terminal_config = terminal_config();
+    let matching_config = terminal_pty_config_with_view(config.clone(), &terminal_config);
+    let (binding, initial_layout_rx) = TerminalSessionBinding::pending(matching_config.clone());
+    binding.resize(80, 24).unwrap();
+    let (output_tx, _) = flume::unbounded();
+    let (session_event_tx, _) = flume::unbounded();
+    let (session_event_wake_tx, _) = flume::unbounded();
+    let pending = PendingTerminalAttach {
+        session: binding.clone(),
+        output_tx,
+        session_event_tx,
+        session_event_wake_tx,
+        terminal_id: config.terminal_id.clone(),
+        initial_layout_rx,
+    };
+
+    assert!(
+        TerminalPane::attach_pending_session_hosted(
+            Arc::new(HostedTestController {
+                fail_open: true,
+                ..Default::default()
+            }),
+            config,
+            terminal_config,
+            pending,
+        )
+        .is_err()
+    );
+    assert!(!binding.matches_pty_config(&matching_config));
 }
 
 #[test]

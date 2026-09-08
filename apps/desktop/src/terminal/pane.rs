@@ -237,7 +237,7 @@ impl TerminalPane {
                 ),
             ),
         }
-        let output_tx = pending.output_tx;
+        let output_tx = pending.output_tx.clone();
         let output_terminal_id = terminal_id.clone().unwrap_or_else(|| attached_id.clone());
         codux_runtime::async_runtime::spawn(async move {
             let mut first_output = true;
@@ -403,6 +403,12 @@ impl PendingTerminalAttach {
         self.initial_layout_rx
             .recv_timeout(TERMINAL_INITIAL_LAYOUT_WAIT)
             .ok()
+    }
+}
+
+impl Drop for PendingTerminalAttach {
+    fn drop(&mut self) {
+        self.session.inner.lock().pending_match_config = None;
     }
 }
 
