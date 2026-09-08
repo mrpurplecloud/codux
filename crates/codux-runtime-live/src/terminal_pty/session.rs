@@ -33,6 +33,17 @@ pub struct TerminalPtySession {
     pub(super) ai_runtime_binding: AIRuntimeTerminalBinding,
     pub(super) pty_control: LocalPtyProcessHandle,
     pub(super) viewport: Arc<parking_lot::Mutex<TerminalViewportLease>>,
+    /// Input ids already written to the pty, newest last.
+    ///
+    /// A controller retries an input when its ack does not arrive in time, and
+    /// on a slow link the ack is still in flight when the retry lands. Without
+    /// this the retry is written again, so one keypress reaches the shell
+    /// several times.
+    ///
+    /// ponytail: fixed 64-entry window, linear scan. The sender gives up after
+    /// 4 attempts over ~4s, so this holds far more than any retry can span;
+    /// revisit only if a client starts pipelining unacked input.
+    pub(super) recent_input_ids: parking_lot::Mutex<std::collections::VecDeque<String>>,
 }
 
 pub(super) struct TerminalExitSignal {
@@ -274,6 +285,7 @@ impl TerminalPtySession {
                 ai_runtime_binding,
                 pty_control: process.control,
                 viewport,
+                recent_input_ids: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             },
             Box::new(terminal_writer),
             Box::new(terminal_reader),
@@ -492,6 +504,19 @@ impl TerminalPtySession {
 
     pub fn buffer_characters(&self) -> usize {
         self.history.lock().retained_chars()
+    }
+
+    /// Record `input_id` and report whether this is the first time it is seen.
+    pub fn accept_input_id(&self, input_id: &str) -> bool {
+        let mut seen = self.recent_input_ids.lock();
+        if seen.iter().any(|seen_id| seen_id == input_id) {
+            return false;
+        }
+        if seen.len() >= 64 {
+            seen.pop_front();
+        }
+        seen.push_back(input_id.to_string());
+        true
     }
 
     pub fn clear_history(&self) {

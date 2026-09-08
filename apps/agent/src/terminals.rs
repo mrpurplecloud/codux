@@ -1088,7 +1088,14 @@ impl RemoteTerminalDispatch for AgentTerminalCtx<'_> {
                     return;
                 }
                 self.driver.touch_viewport_lease(id, &owner);
-                match self.driver.write(id, data.as_bytes()) {
+                // A retry of an input already applied must not reach the pty
+                // twice: the ack may still be in flight when the controller
+                // gives up waiting.
+                let write = match msg.payload.get("inputId").and_then(Value::as_str) {
+                    Some(input_id) => self.driver.write_once(id, input_id, data.as_bytes()),
+                    None => self.driver.write(id, data.as_bytes()),
+                };
+                match write {
                     Ok(()) => {
                         let mut payload = json!({ "sessionId": id });
                         if let Some(input_id) = msg.payload.get("inputId").and_then(Value::as_str) {

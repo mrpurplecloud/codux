@@ -654,3 +654,52 @@ fn terminal_manager_registers_ai_runtime_terminal_lifecycle() {
     assert!(bridge.registry().snapshot().is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[cfg(unix)]
+#[test]
+fn a_retried_input_is_written_once() {
+    // The phone retries an input up to four times when its ack does not come
+    // back in time, and on a slow link the first ack is still in flight when
+    // the retry arrives. Without dedup the host writes the keystroke again for
+    // every retry, so one keypress reaches the shell two, three or four times.
+    let manager = TerminalManager::new();
+    let terminal_id = format!("codux-input-dedup-{}", Uuid::new_v4());
+    let root = std::env::temp_dir().join(&terminal_id);
+    fs::create_dir_all(&root).unwrap();
+
+    let (_session, output) = manager
+        .attach_or_create_with_context(
+            TerminalPtyConfig {
+                terminal_id: Some(terminal_id.clone()),
+                cwd: Some(root.display().to_string()),
+                shell: Some("/bin/sh".to_string()),
+                command: Some("cat".to_string()),
+                ..Default::default()
+            },
+            None,
+            Arc::new(|_| true),
+        )
+        .expect("spawn terminal");
+
+    manager
+        .write_once(&terminal_id, "input-1", b"AA")
+        .expect("first write");
+    manager
+        .write_once(&terminal_id, "input-1", b"AA")
+        .expect("retry of the same input");
+    manager
+        .write_once(&terminal_id, "input-2", b"ZZ\n")
+        .expect("a different input still writes");
+
+    let text = recv_until_contains(&output, "ZZ", Duration::from_secs(5));
+    assert_eq!(
+        text.matches("AA").count(),
+        1,
+        "a retried input must reach the shell once, got: {text:?}"
+    );
+
+    manager
+        .kill_and_wait(&terminal_id, Duration::from_secs(2))
+        .expect("close terminal");
+    fs::remove_dir_all(root).ok();
+}

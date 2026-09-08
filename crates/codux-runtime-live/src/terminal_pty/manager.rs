@@ -236,6 +236,15 @@ impl TerminalManager {
         self.session(session_id)?.write(data)
     }
 
+    /// Write remote input, ignoring a repeat of an input id already applied.
+    pub fn write_once(&self, session_id: &str, input_id: &str, data: &[u8]) -> Result<()> {
+        let session = self.session(session_id)?;
+        if !session.accept_input_id(input_id) {
+            return Ok(());
+        }
+        session.write(data)
+    }
+
     pub fn resize(&self, session_id: &str, cols: u16, rows: u16) -> Result<()> {
         self.session(session_id)?.resize(cols, rows)
     }

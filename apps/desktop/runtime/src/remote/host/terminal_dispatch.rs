@@ -355,7 +355,15 @@ impl RemoteHostRuntime {
             self.send_error(envelope, &error);
             return;
         }
-        if let Err(error) = self.terminals.write(session_id, data.as_bytes()) {
+        // A retry of an input already applied must not reach the pty twice: the
+        // ack may still be in flight when the controller gives up waiting.
+        let write = match envelope.payload.get("inputId").and_then(Value::as_str) {
+            Some(input_id) => self
+                .terminals
+                .write_once(session_id, input_id, data.as_bytes()),
+            None => self.terminals.write(session_id, data.as_bytes()),
+        };
+        if let Err(error) = write {
             self.send_error(envelope, &error.to_string());
         }
     }
