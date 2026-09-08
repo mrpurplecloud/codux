@@ -1347,10 +1347,8 @@ mod tests {
 
     #[test]
     fn a_relay_less_pairing_qr_carries_the_ticket() {
-        // Omitting the ticket keeps the QR sparse, and a host with a relay can
-        // be dialled from node id + relay alone. A host WITHOUT one cannot: drop
-        // its ticket and the QR encodes an identity with no way to reach it.
-        // Density is worth less than a QR that works.
+        // The relay-less field shape: no relayUrl key at all, and the ticket
+        // carrying the only route to the host.
         let entry = pairing_transport_entry(&iroh_candidate("", "endpoint-ticket-bytes"));
 
         assert_eq!(

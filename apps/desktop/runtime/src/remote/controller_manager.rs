@@ -2406,6 +2406,15 @@ mod tests {
         // forgotten and re-paired.
         let manager = manager("codux-controller-worker-disown");
         save_test_host(&manager, "device-1");
+        // A published connection keeps the slot alive past the disown. Without
+        // one the slot is empty and gets evicted whole, so the assertion below
+        // holds whether or not the worker was released.
+        let epoch = manager.shared.next_connection_epoch("device-1");
+        assert!(
+            manager
+                .shared
+                .publish_connection("device-1", epoch, test_controller("device-1"))
+        );
         let worker = install_reconnect_worker(&manager, "device-1");
         assert!(reconnect_worker_is_claimed(&manager, "device-1"));
 
