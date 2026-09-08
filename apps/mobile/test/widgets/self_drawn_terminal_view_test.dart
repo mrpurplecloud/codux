@@ -176,7 +176,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('a scroll the viewport owner refuses stays local', (
+  testWidgets('switching back keeps full painted history and reaches input', (
     tester,
   ) async {
     final controller = RemoteTerminalOutputController();
@@ -199,11 +199,13 @@ void main() {
       ),
       activeSessionId: 'session-1',
     );
+    controller.bindSession('session-2', requireBaseline: true);
 
     final signal = ValueNotifier<int>(0);
     addTearDown(signal.dispose);
     final forwarded = <String>[];
     var owned = false;
+    var sessionId = 'session-1';
 
     Widget buildView() => MaterialApp(
       home: Scaffold(
@@ -211,7 +213,7 @@ void main() {
           width: 320,
           height: 480,
           child: SelfDrawnTerminalView(
-            sessionId: 'session-1',
+            sessionId: sessionId,
             controller: controller,
             repaintSignal: signal,
             fontSize: 14,
@@ -227,30 +229,83 @@ void main() {
     await tester.pump();
     await tester.pump();
 
+    final painterFinder = find.byWidgetPredicate(
+      (widget) =>
+          widget is CustomPaint &&
+          widget.painter.runtimeType.toString() == '_TerminalGridPainter',
+    );
+    dynamic painter = tester.widget<CustomPaint>(painterFinder).painter;
+    final totalLines = painter.snapshot.totalLines;
+
     // Not the viewport owner: the gesture must not reach the app (taking the
     // session to deliver it reflows the host grid) and must scroll locally
     // instead of being swallowed.
-    await tester.drag(find.byType(SelfDrawnTerminalView), const Offset(0, 120));
-    await tester.pump();
+    var previousOffset = -1;
+    while (controller.screenSnapshot('session-1')!.displayOffset !=
+        previousOffset) {
+      previousOffset = controller.screenSnapshot('session-1')!.displayOffset;
+      await tester.drag(
+        find.byType(SelfDrawnTerminalView),
+        const Offset(0, 360),
+      );
+      await tester.pump();
+    }
     expect(forwarded, isEmpty);
+    painter = tester.widget<CustomPaint>(painterFinder).painter;
+    expect(painter.snapshot.totalLines, totalLines);
+    expect(
+      (painter.snapshot.cells as List)
+          .map((cell) => (cell as dynamic).text)
+          .join(),
+      contains('line-0000'),
+      reason: 'oldest retained line must reach the terminal painter',
+    );
+
+    sessionId = 'session-2';
+    await tester.pumpWidget(buildView());
+    await tester.pump();
+    sessionId = 'session-1';
+    owned = true;
+    await tester.pumpWidget(buildView());
+    await tester.pump();
+
     expect(
       controller.screenSnapshot('session-1')!.displayOffset,
       greaterThan(0),
     );
 
-    // Ownership is regained without a rebuild: the view must ask the sender,
-    // not a bool captured when it was last built.
-    owned = true;
-    final localOffset = controller.screenSnapshot('session-1')!.displayOffset;
-    await tester.drag(find.byType(SelfDrawnTerminalView), const Offset(0, 120));
+    while (controller.screenSnapshot('session-1')!.displayOffset > 0) {
+      final localOffset = controller.screenSnapshot('session-1')!.displayOffset;
+      await tester.drag(
+        find.byType(SelfDrawnTerminalView),
+        const Offset(0, -360),
+      );
+      await tester.pump();
+      expect(forwarded, isEmpty);
+      expect(
+        controller.screenSnapshot('session-1')!.displayOffset,
+        lessThan(localOffset),
+        reason: 'local history must remain reachable after switching back',
+      );
+    }
+
+    // At the live bottom, scrolling belongs to the interactive app again.
+    await tester.drag(
+      find.byType(SelfDrawnTerminalView),
+      const Offset(0, -360),
+    );
     await tester.pump();
+    painter = tester.widget<CustomPaint>(painterFinder).painter;
+    expect(painter.snapshot.totalLines, totalLines);
+    expect(
+      (painter.snapshot.cells as List)
+          .map((cell) => (cell as dynamic).text)
+          .join(),
+      contains('line-0119'),
+      reason: 'live input row must reach the terminal painter',
+    );
     expect(forwarded, isNotEmpty);
     expect(forwarded.every((entry) => entry.startsWith('scroll:')), isTrue);
-    expect(
-      controller.screenSnapshot('session-1')!.displayOffset,
-      localOffset,
-      reason: 'a forwarded scroll belongs to the app, not the local buffer',
-    );
     expect(tester.takeException(), isNull);
   });
 
@@ -280,6 +335,7 @@ void main() {
     final signal = ValueNotifier<int>(0);
     addTearDown(signal.dispose);
     final forwarded = <String>[];
+    var owned = false;
     controller.resizeScreen('session-1', cols: 80, rows: 4);
 
     await tester.pumpWidget(
@@ -293,7 +349,7 @@ void main() {
               controller: controller,
               repaintSignal: signal,
               fontSize: 40,
-              canForwardScroll: () => false,
+              canForwardScroll: () => owned,
               onSendScroll: forwarded.add,
             ),
           ),
@@ -311,9 +367,18 @@ void main() {
     await tester.pump();
 
     expect(forwarded, isEmpty);
+    final localPixelOffset = controller
+        .screenSnapshot('session-1')!
+        .scrollPixelOffset;
+    expect(localPixelOffset, greaterThan(0));
+
+    owned = true;
+    await gesture.moveBy(const Offset(0, -10));
+    await tester.pump();
+    expect(forwarded, isEmpty);
     expect(
       controller.screenSnapshot('session-1')!.scrollPixelOffset,
-      greaterThan(0),
+      lessThan(localPixelOffset),
     );
     await gesture.up();
   });

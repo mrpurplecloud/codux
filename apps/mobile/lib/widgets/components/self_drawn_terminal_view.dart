@@ -543,8 +543,8 @@ class _SelfDrawnTerminalViewState extends State<SelfDrawnTerminalView>
   }
 
   /// Returns whether the gesture belongs to the app; `false` (no session
-  /// snapshot, no sink, or a device that does not own the viewport) leaves it
-  /// for the local buffer. Ownership is asked before any movement is swallowed,
+  /// snapshot, no sink, active local scrollback, or no viewport ownership)
+  /// leaves it for the local buffer. Ownership is asked before any movement is swallowed,
   /// because sub-cell movement belongs to the app too — it stays accumulated
   /// until it makes a full tick. Losing ownership drops what was accumulated:
   /// that drag was handed to the local buffer, and replaying it at the app
@@ -558,7 +558,9 @@ class _SelfDrawnTerminalViewState extends State<SelfDrawnTerminalView>
     final send = widget.onSendScroll;
     final ownsViewport = widget.canForwardScroll;
     if (snapshot == null || send == null || ownsViewport == null) return false;
-    if (!ownsViewport()) {
+    if (snapshot.displayOffset != 0 ||
+        snapshot.scrollPixelOffset != 0 ||
+        !ownsViewport()) {
       _wheelAccum = 0;
       return false;
     }
