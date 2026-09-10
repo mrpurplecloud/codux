@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:codux_protocol_ffi/codux_protocol_ffi.dart';
 import 'package:codux_flutter/main.dart';
 import 'package:codux_flutter/i18n.dart';
 import 'package:codux_flutter/models/remote_models.dart';
@@ -14,6 +15,7 @@ import 'package:codux_flutter/services/remote_protocol_service.dart';
 import 'package:codux_flutter/services/remote_transport.dart';
 import 'package:codux_flutter/theme/app_theme.dart';
 import 'package:codux_flutter/widgets/components/device_home_screen.dart';
+import 'package:codux_flutter/widgets/components/remote_terminal_pane.dart';
 import 'package:codux_flutter/widgets/components/self_drawn_terminal_view.dart';
 import 'package:uuid/uuid.dart';
 
@@ -521,6 +523,131 @@ void main() {
         ),
         isNotEmpty,
       );
+    },
+  );
+
+  testWidgets(
+    'a handed-away terminal keeps the host grid so TUI frames keep their input row',
+    (WidgetTester tester) async {
+      // The local cell screen must mirror the grid the host's frames are drawn
+      // for, even while another device owns the viewport: a screen that stayed
+      // at the phone's shorter row count clamps the TUI's bottom rows onto the
+      // last one, so its input row is replaced by the status line below it and
+      // no local scroll can bring it back.
+      final device = await _fakeDevice();
+      final fake = _FakeRemoteTransport(
+        device: device,
+        onSent: (transport, envelope) {
+          final type = '${envelope['type'] ?? ''}';
+          if (type == 'terminal.buffer' || _isTerminalSubscribe(envelope)) {
+            // Cold baseline: the raw history is drawn at the host grid, exactly
+            // like the host's own screen keyframe.
+            transport.emitEncrypted(
+              RelayEnvelope(
+                type: 'terminal.output',
+                sessionId: 'session-1',
+                payload: {
+                  'data': _tuiFrames(_hostGridRows),
+                  'screenData': _tuiFrames(_hostGridRows),
+                  'buffer': true,
+                  'tail': true,
+                  'offset': 0,
+                  'bufferLength': 5,
+                  'outputSeq': 1,
+                },
+              ),
+            );
+            return;
+          }
+          if (type != 'host.info') return;
+          transport.emitEncrypted(
+            const RelayEnvelope(
+              type: 'project.list',
+              payload: {
+                'selectedProjectId': 'project-1',
+                'projects': [
+                  {'id': 'project-1', 'name': 'Project 1', 'path': '/tmp/p1'},
+                ],
+              },
+            ),
+          );
+          transport.emitEncrypted(
+            const RelayEnvelope(
+              type: 'terminal.list',
+              payload: {
+                'terminals': [
+                  {
+                    'id': 'session-1',
+                    'title': 'Terminal',
+                    'projectId': 'project-1',
+                  },
+                ],
+              },
+            ),
+          );
+          transport.emitEncrypted(
+            RelayEnvelope(type: 'host.info', payload: _hostInfoPayload()),
+          );
+        },
+      );
+
+      await tester.pumpWidget(
+        CoduxFlutterApp(
+          initialDevices: [device],
+          transportFactory: (_) => fake,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Mac'));
+      await tester.pumpAndSettle(const Duration(milliseconds: 300));
+      await tester.pump(const Duration(milliseconds: 300));
+      if (find
+          .byKey(const ValueKey('remote-terminal-body'))
+          .evaluate()
+          .isEmpty) {
+        await tester.tap(find.text('Mac').first);
+        await tester.pumpAndSettle(const Duration(milliseconds: 300));
+        await tester.pump(const Duration(milliseconds: 300));
+      }
+
+      // The host grid is taller than the phone's own viewport, and the desktop
+      // holds the viewport: this phone is only a viewer here.
+      fake.emitEncrypted(
+        const RelayEnvelope(
+          type: 'terminal.viewport.state',
+          sessionId: 'session-1',
+          payload: {
+            'owner': 'desktop',
+            'cols': 100,
+            'rows': _hostGridRows,
+            'generation': 2,
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // A full redraw at that grid, with the TUI's input box on its last rows.
+      fake.emitEncrypted(
+        RelayEnvelope(
+          type: 'terminal.output',
+          sessionId: 'session-1',
+          payload: {'data': _tuiFrames(_hostGridRows), 'outputSeq': 3},
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final pane = tester.widget<RemoteTerminalPane>(
+        find.byType(RemoteTerminalPane),
+      );
+      final snapshot = pane.outputController.screenSnapshot(pane.sessionId!);
+      expect(snapshot, isNotNull);
+      expect(
+        _snapshotGridText(snapshot!),
+        contains('> input box'),
+        reason:
+            'frames drawn for the host grid must survive in the local screen',
+      );
+      expect(snapshot.rows, _hostGridRows);
     },
   );
 
@@ -2723,6 +2850,55 @@ Future<void> _tapProjectTab(WidgetTester tester, String label) async {
     }
   }
   await tester.tap(finder);
+}
+
+/// Host grid rows for the handed-away grid test: taller than the phone's own
+/// measured viewport in the test surface, so a local screen that stayed at the
+/// phone's rows must clamp the TUI's bottom rows away.
+const _hostGridRows = 32;
+
+/// A full-screen TUI redraw for a [rows]-row grid: alternate screen, mouse
+/// tracking, a transcript, and the input box + status line on the last rows --
+/// the shape whose bottom rows a shorter local screen clamps away.
+String _tuiFrames(int rows) {
+  final buffer = StringBuffer('\x1b[?1049h\x1b[?1000h\x1b[H\x1b[2J');
+  for (var line = 1; line <= rows - 3; line++) {
+    buffer.write('transcript line $line\r\n');
+  }
+  buffer.write('\x1b[${rows - 1};1H> input box');
+  buffer.write('\x1b[$rows;1Hstatus: model-x  42%');
+  return buffer.toString();
+}
+
+/// Visible text of a cell snapshot, rebuilt row by row the way the renderer
+/// does (blank default cells are omitted from the snapshot on purpose).
+String _snapshotGridText(TerminalScreenSnapshot snapshot) {
+  final rows = <int, Map<int, (String, int)>>{};
+  for (final cell in snapshot.cells) {
+    rows
+        .putIfAbsent(cell.row, () => {})[cell.col] = (
+      cell.text,
+      cell.width < 1 ? 1 : cell.width,
+    );
+  }
+  final keys = rows.keys.toList()..sort();
+  return keys
+      .map((row) {
+        final line = StringBuffer();
+        var next = 0;
+        final columns = rows[row]!.keys.toList()..sort();
+        for (final column in columns) {
+          final (text, width) = rows[row]![column]!;
+          while (next < column) {
+            line.write(' ');
+            next++;
+          }
+          line.write(text);
+          next += width;
+        }
+        return line.toString().trimRight();
+      })
+      .join('\n');
 }
 
 Map<String, Object?> _hostInfoPayload({

@@ -37,6 +37,32 @@ extension _HomePageTerminal on HomeController {
     if (staleOutput) {
       _terminalBindingCoordinator.markSessionBaselineStale(sessionId);
     }
+    final size = _terminalViewportController.reportedSize(sessionId);
+    if (size != null && size.cols > 0 && size.rows > 0) {
+      // Size the local cell screen to the host's ROW count but the phone's
+      // COLUMN count -- BEFORE any handed-away return. Rows: the host keeps its
+      // own (taller) row count for remote viewers, so a TUI anchors its input
+      // box near the host's last row; feeding that into a screen clamped to the
+      // phone's shorter viewport collapsed those rows onto each other
+      // (overlapping text, a cursor stranded on the status line, the input box
+      // clipped off-screen). A screen left at the phone's rows also clamps the
+      // host's own frames and keyframes the same way while another device owns
+      // the viewport, which is what strands a TUI's input row off-screen with no
+      // local scroll able to reach it. Adopt the host rows and let the renderer
+      // show the bottom window + scroll; the handoff placeholder covers the pane
+      // until this device takes the viewport back. Cols: the phone DRIVES the
+      // width (the host reflows to it), so keep our measured cols -- adopting
+      // the host's transient desktop width (e.g. 111 while the desktop briefly
+      // owns the viewport) would clip the grid horizontally. resizeScreen bumps
+      // the render generation, so a static (non-generating) session repaints too.
+      final cols = _terminalViewportController.pendingCols ?? size.cols;
+      _terminalOutputController.resizeScreen(
+        sessionId,
+        cols: cols,
+        rows: size.rows,
+      );
+      _terminalRepaint.tick();
+    }
     if (sessionId == _sessionId) {
       final interactive = localOwner.isNotEmpty && owner == localOwner;
       final becameInteractive = interactive && !_terminalViewportInteractive;
@@ -47,33 +73,14 @@ extension _HomePageTerminal on HomeController {
           _terminalViewportInteractive = interactive;
         });
       }
-      // Don't adopt the new owner's (wider) grid into our screen — it would
-      // garble; the placeholder covers it until we take over.
+      // The local screen already mirrors the host's grid rows above, so the
+      // placeholder only has to hide the pane until we take the viewport back.
       if (handedAway) return;
       if (becameInteractive) {
         _flushPendingTerminalResize(force: true);
       }
     }
-    final size = _terminalViewportController.reportedSize(sessionId);
     if (size == null || size.cols <= 0 || size.rows <= 0) return;
-    // Size the local cell screen to the host's ROW count but the phone's COLUMN
-    // count. Rows: the host keeps its own (taller) row count for remote viewers,
-    // so a TUI anchors its input box near the host's last row; feeding that into
-    // a screen clamped to the phone's shorter viewport collapsed those rows onto
-    // each other (overlapping text, a cursor stranded on the status line, the
-    // input box clipped off-screen). Adopt the host rows and let the renderer
-    // show the bottom window + scroll. Cols: the phone DRIVES the width (the
-    // host reflows to it), so keep our measured cols -- adopting the host's
-    // transient desktop width (e.g. 111 while the desktop briefly owns the
-    // viewport) would clip the grid horizontally. resizeScreen bumps the render
-    // generation, so a static (non-generating) session repaints too.
-    final cols = _terminalViewportController.pendingCols ?? size.cols;
-    _terminalOutputController.resizeScreen(
-      sessionId,
-      cols: cols,
-      rows: size.rows,
-    );
-    _terminalRepaint.tick();
     if (becameLocalOwner && sessionId == _sessionId) {
       _requestTerminalViewportOwnerBaseline(sessionId);
     }
