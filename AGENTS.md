@@ -4,8 +4,11 @@ These rules supplement global agent instructions for this repository.
 
 ## State-Machine Convergence
 
-Apply this section when one invariant spans asynchronous, concurrent, UI/event,
-or multi-file work.
+Apply this section only when reproduced evidence or an accepted contract shows
+that the authorized invariant spans asynchronous, concurrent, UI/event, or
+multi-file work. Mere presence of asynchronous code or a hypothetical race does
+not activate it. This section constrains authorized work; it never authorizes
+new behavior, files, mechanisms, or verification.
 
 - Give each invariant one semantic owner. That owner reconciles actual state
   toward current intent.
@@ -31,7 +34,9 @@ or multi-file work.
 - Preserve rejection and failure signals across abstraction boundaries. Do not
   erase a boolean or error and then let the caller assume success.
 
-Required regression coverage where relevant:
+Regression candidates, not default requirements. Run only cases tied to the
+reproduced failure or changed contract. Establish baseline first; a pre-existing
+failure does not authorize another fix.
 
 - `A -> B -> A` command reversal while `A` remains in flight.
 - Completion after stop, cancellation, replacement, or ownership loss.
@@ -41,5 +46,5 @@ Required regression coverage where relevant:
 - Failure between two persistent writes, followed by retry.
 - Duplicate delivery, restart, and stale completion for durable work.
 
-Review test: if two fields or layers can answer the same state question
-differently, design is not complete.
+Review test within authorized invariant: if two fields or layers can answer the
+same state question differently, design is not complete.
