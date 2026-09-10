@@ -1,0 +1,184 @@
+# 任务
+
+ID: mobile-scroll-truncation
+类型：bug
+状态：active
+创建：2026-09-10
+更新：2026-09-11
+
+## 一句话描述
+
+移动端会话失去焦点后，终端底部输入行不再绘制、本地滚动失效；任何 TUI 重绘（新输出）或真实 resize（开合屏）才恢复。
+
+## 阶段
+
+release_pending（修复已提交并完成 beta10 构建；等待安装及真机复验）
+
+## 自动分级
+
+综合等级：L2
+
+维度：
+- 复杂度：中（改动点单一但在会话同步状态机路径上）
+- 风险：中（前台恢复同步是承重路径，改错会让后台期间丢帧不被修复）
+- 确定性：中（根因链 A 级，但"重载破坏"与"去重抑制 resize"两个机制并存，修复取向不同）
+- 可逆性：易
+- 影响面：移动端会话恢复 / 基线重同步
+
+判定依据：
+- 触及会话同步状态机（承重路径），虽最终改动为一处重排 + 一个红测。
+- 两个候选取向（A/B）已由探针排除并收敛为单一机制，不再需要用户裁决。
+
+是否可升级：是
+升级触发条件：
+- 需要修改 crates/codux-terminal-core 的基线恢复语义
+- 需要新增机制（如按会话类型区分重载策略）
+
+## 能力挂载
+
+- 当前阻塞点：无（已修复并验证；发布环节待用户确认）
+- active：无
+
+## 任务内容
+
+# 诊断（已完成）
+
+## 现象
+
+描述：移动端某终端会话"失去焦点"后：底部输入行（TUI 的输入条）不再出现，向上/向下拖动既不滚动本地历史也不转发给应用；滚动历史看起来被截断。任一"刷新"（折叠屏开合一次，或该会话产生新输出）后恢复；再次失去焦点又复现。
+频率：deterministic（本机 2/2 复现）
+环境：Honor Magic V3（FCP-AN10）外屏 1060x2376，Android 16/API36；app 2.0.3-beta.9.sideload（release，不可 debuggable）；宿主 = 本机 Codux 桌面 app（不是 headless host）。
+
+## 复现（本机实测）
+
+方法：app 前台显示某终端 → HOME（或切走）→ 回到 app。
+观测：
+- 屏幕底部条带（y1600-2180）在健康态为 `» Ask Codex to do anything` + 状态行；复现后输入行消失，只剩旧转录行 + 状态行。
+- 底部工具栏（esc/tab/ctrl/shft/alt）两态都在 ⇒ 用户说的"输入条"是 TUI 的输入行，不是 app 工具栏。
+- 触摸有效（点终端能弹出键盘），但拖动 3 次（上/下各方向）画面逐像素不变；宿主日志无 `kind=terminal.input` ⇒ 拖动既未本地滚动也未转发。
+- 恢复：`adb shell wm size 1060x2100` → `wm size reset`（等价开合屏）后输入行回来。
+证据等级：A（真机像素 + 两侧日志）
+
+## 边界
+
+last-known-good：失焦前的渲染（约 2 分钟内，历史尚短）
+first-wrong：`_recoverForegroundState()` → `_mountVisibleTerminal(reason: 'foreground')` 强制发起 baseline 重载
+方法：宿主日志 `terminal_baseline_send … tail=true screen=true` 与 app 日志 `mount session=… reason=foreground cached=true` 同时刻对齐
+
+## 根因（A 级因果链）
+
+1. 失焦：app 释放视口（`terminal.viewport.release`，两侧日志 22:37:09/14）；宿主改由桌面持有，宿主栅格按持有者尺寸。
+2. `terminal.dart::_handleTerminalViewportState` 中同步本地屏栅格的动作**位于 handed-away 早退之后**；
+   旧注释明确写着"不采用新持有者的（更宽）栅格——会画乱" ⇒ 被接管期间本地屏停在手机行数。
+3. 宿主按自己栅格推来的帧进不了更矮的本地屏：底部行被钳到末行并被其下方行覆盖
+   ⇒ 只剩转录行、输入行消失，且本地滚动无法找回（行从未被存下）。
+4. 恢复前台时 app 确实重拉了 baseline，但 keyframe 同样按宿主栅格绘制、同样被钳
+   ⇒ "自动刷新无效"；屏幕停在旧内容直到 TUI 重绘（新输出）或真实 resize（开合屏 → SIGWINCH）。
+
+探针证据（先于改码的两个一次性 example，已删除）：
+- 同栅格下重放 + keyframe **能**正确修复画面（否定"重放 clobber"）；
+- 热重连的 baseline **被应用**并生效（否定"去重守卫丢帧"）；
+- 帧按更高栅格绘制、本地屏更矮时，底部行丢失，签名与真机逐字一致（确认机制）。
+
+first-wrong condition：
+`handedAway == true` 时 `resizeScreen(...)` 未执行（早退），本地屏行数 < 宿主栅格行数。
+
+## 交叉验证（决定性）
+
+用户目视：**桌面 Codux 窗口里该会话底部有输入行，只有手机没有**。
+⇒ 宿主屏幕与其 keyframe 是好的；丢失发生在手机本地屏幕（行数落后于宿主栅格，帧与 keyframe 都被钳）。
+
+## 已排除
+
+- host 侧屏幕陈旧/被裁剪：桌面渲染有输入行，排除。
+- "重放被裁剪历史 clobber 屏幕"：同栅格下 keyframe 能修复，探针否定。
+- "恢复时的 baseline 被去重守卫丢弃"：探针显示 baseline 被应用且生效，否定。
+- app 工具栏（esc/tab/ctrl…）消失：两态均在，排除。
+- 拖动未被接收：点击可弹键盘，排除手势链路。
+- 全局 pan/滚动位置错位：像素测量两态同一栅格布局，排除。
+- 8 秒 `terminal.viewport.claim` 风暴：`home_controller.dart` 的 20s 租约 keepalive（设计如此），非缺陷。
+- 宿主只改 screen 不改 PTY 的 resize 路径：`crates/codux-runtime-live/src/terminal_pty/session.rs:810` 是唯一
+  `screen.resize`，与 `pty_control.resize` 同处 `resize_viewport`，排除。
+
+## 并存机制（历史证据，现已不是待裁决项）
+
+`git show fa50ce3b`：同一路径上曾记录"`_sentBySession` 去重缓存仍记着手机上次发出的尺寸，桌面趁我们是非活动
+viewer 时重新加宽宿主后，纠正性 rebind resize 被抑制，导致 baseline 在桌面栅格上抓取"，该修复 `236b3e8b`
+6 分钟后被 revert（无理由）。本次探针未复现"baseline 被抑制/丢弃"，但同属"宿主与手机栅格不一致"一族，
+本次修复（被接管期间就镜像宿主栅格）同时覆盖该取向。
+
+## Gate 状态
+
+复现成功：true
+基础设施问题已排除：true（TCC 限制导致桌面窗口截图不可得，已用像素+两侧日志替代；不影响结论）
+根因 A 级确认：true（代码 + 两侧日志 + 历史提交三源一致）
+因果链非空：true
+first-wrong condition 非空：true
+自动分级已写入：true（L2）
+诊断 Gate：passed
+
+## 停止条件
+
+- 根因被反驳
+- 原复现未改善
+- 需要新增未授权或无当前证据支持的行为、文件或机制
+- 需要超出 allowed_files
+- 需要触及 Gate 未声明的共享契约、持久化、并发、安全、构建、发布
+- 生产代码 churn 达到已声明的 scope_fuse
+- 自动分级升级
+
+目标检查通过后冻结生产代码，只完成已授权验证。
+
+## 修复（已完成）
+
+取向 B（重载改为只对齐可见栅格）经探针**否定**；最终取向：被接管期间也镜像宿主栅格。
+
+allowed_files（实际改动 2 文件）：
+- apps/mobile/lib/screens/home/state/terminal.dart（把本地屏栅格同步提到 handed-away 早退之前）
+- apps/mobile/test/widget_test.dart（红测 + 两个 helper）
+
+scope_fuse：≤3 文件；未改 host 协议、未改 viewport 语义。
+
+defect_check（新测试，红→绿）：
+`a handed-away terminal keeps the host grid so TUI frames keep their input row`
+- 修前：本地屏 21 行 vs 宿主栅格 32 行，栅格只剩转录行（无输入行）→ 失败
+- 修后：通过
+
+nearest_regression_check：
+- `cd apps/mobile && flutter test` → 383 passed（含新测试）
+- `cargo test -p codux-terminal-core` → 137 passed
+- `flutter analyze`（改动两文件）→ No issues found
+
+验证素材：/tmp/shots/{e0,e2,h0,f0,f1,f2}.png、/tmp/codux-logcat.txt、宿主 runtime-rust.log
+
+## 发布 Gate（涉及移动端产物）
+
+修改仅在 allowed_files 内：true
+未新增未声明文件或机制：true（两个探针 example 已删除）
+验证通过：true（新测试 + 全量测试）
+diff 自审完成：true
+无证据变化导致停止：true
+构建通过（如涉及）：true（版本 2.0.3-beta.10）
+  - 升版提交：`e6cd4305 chore(release): bump to 2.0.3-beta.10`（6 文件，同上次 bump 文件集）
+  - 桌面：`cargo build --release` + `RELEASE_BUILD_ID=downloads-macos-aarch64 node apps/desktop/scripts/release/package-gpui.mjs`
+    → `codux-2.0.3-beta.10-macos-aarch64.dmg`（sha256 8b1396eeaf5b9a03fea9de60be1242495eb7cd08c5dc6044580819715530dce8，与打包日志一致；
+    挂载后 Info.plist CFBundleShortVersionString = 2.0.3-beta.10）
+  - 移动：`flutter build apk --release -Pcodux.appIdSuffix=.sideload` → versionName `2.0.3-beta.10.sideload`
+  - headless：`cargo build --release -p codux-agent`（需 touch 强制重编，见下）→ `codux 2.0.3-beta.10`
+  - 交付形式（用户指定）：`~/Downloads` 只放 **Codux.app 本体** 与 **APK**，不放 dmg：
+    `~/Downloads/Codux.app`（2.0.3-beta.10，arm64，adhoc 签名，233M，含 Contents/Resources/runtime-root）、
+    `~/Downloads/codux-2.0.3-beta.10+58-sideload.apk`、`~/Downloads/codux-2.0.3-beta.10-macos-aarch64`（headless 二进制，755）。
+    dmg 仅保留在仓库 `release-artifacts/downloads-macos-aarch64/` 暂存目录（打包脚本打完 dmg/updater 会删除 app 目录，故 app 从 dmg 中 ditto 取出）。
+  - 未安装到手机、未替换运行中的 `/Users/mac/.local/bin/codux`（等用户确认）。
+  - 坑：cargo 不会因 manifest 只改 version 而重编该 crate（`env!("CARGO_PKG_VERSION")`），
+    headless 必须强制重编（`touch apps/agent/src/main.rs`）才能反映新版本号。
+依赖、配置、迁移已确认（如涉及）：not_applicable
+回滚方案明确（如涉及）：true（两文件回退）
+发布范围明确（如涉及）：true
+发布 Gate：passed（未做装机/发布验证，仅构建 + 交付产物）
+
+## 下一步
+
+1. 用户确认后 `adb install -r ~/Downloads/codux-2.0.3-beta.10+58-sideload.apk`（包名 com.duxweb.codux.sideload，版本号已升到 +58，可覆盖安装）。
+2. 如要更新 headless 服务：`cp ~/Downloads/codux-2.0.3-beta.10-macos-aarch64 ~/.local/bin/codux && codux stop && codux start`（本机现装二进制仍为 beta.8）。
+3. 真机复验配方：会话失焦（HOME/切走）→ 回到 app → 看 TUI 输入行是否仍在、拖动是否有响应；再开合屏幕/等新输出确认无回归。
