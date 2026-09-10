@@ -1,0 +1,269 @@
+# 任务
+
+ID: headless-terminal-owner
+类型：bug
+状态：done
+创建：2026-09-09
+更新：2026-09-10
+
+## 一句话描述
+
+Desktop hosted headless terminal 未遵守 host 权威 viewport owner，可能与 mobile 同时渲染并发送 input/resize。
+
+## 阶段
+
+done
+
+## 自动分级
+
+综合等级：L2
+
+维度：
+- 复杂度：高
+- 风险：高
+- 确定性：高
+- 可逆性：易
+- 影响面：跨模块
+
+判定依据：
+- 需修改共享 protocol lane、runtime trait、remote controller 与 desktop UI binding。
+- 涉及 per-session 消息顺序、重连旧 callback、generation 与设备交互行为。
+- current HEAD 隔离副本已有 A 级失败复现，竞争根因已排除。
+
+是否可升级：是
+升级触发条件：
+- 需要新增文件或机制
+- 需要超出 allowed_files
+- 触及 Gate 未声明的共享契约、持久化、并发、安全
+- 触及构建、发布
+- 需求变模糊
+- 根因证据降级
+- 出现多个竞争解释
+
+## 能力挂载
+
+- 当前阻塞点：无。
+- Ponytail：complete
+- 结果：已丢弃 616 行 `pane.rs` 候选；只保留一个 hosted authority 记录，Error 复用 `TerminalUiEvent::Error`，reconnect 复用现有流程并只加入 epoch 校验。
+- 同一时刻最多一个 active
+
+## 诊断
+
+### 现象
+
+描述：managed hosted attach 未获 host owner state 时仍渲染为本机 owner，并把 input/resize 发往 host。
+频率：always
+环境：current HEAD `658017534f4138d86fb110952f6c7850c411d911`；隔离 `git archive HEAD` 副本。
+
+### 复现
+
+状态：succeeded
+步骤：在隔离 HEAD 副本使用既有 `HostedTestController`，经真实 `TerminalSessionBinding::attach_hosted` 后读取 `local_viewport_owns()`，再调用生产 `write()` 与 `resize()`。
+实际：`local_viewport_owns()` 返回 `true`；controller 收到 `input:terminal-1:x` 与 `resize:terminal-1:80x24`。
+期望：初始 Awaiting 非 owner；不发送 input/resize。
+命令：`CARGO_TARGET_DIR=/Users/mac/Documents/development/github_ref/codux/target cargo test -p codux hosted_binding_ -- --nocapture`
+结果：2 failed；断言分别显示 owner 为 true、input/resize 已发送。
+证据等级：A
+基础设施问题：false
+
+### 边界
+
+last-known-good：current HEAD 的 host/mobile 契约以 `terminal.viewport.state` 为权威；mobile 仅在 owner 为 `remote:<device_id>` 时交互；本地 PTY binding 从真实 session viewport state 判权。
+first-wrong：desktop managed hosted attach 只保存 controller/session；没有 owner identity/authority state。随后 `local_viewport_owns()` 因 local session 为空走 `unwrap_or(true)`，`write()`/`resize()` 无条件调用 controller。
+方法：current source 调用链复验 + 隔离 HEAD 运行失败测试。
+
+### 假设
+
+1. 陈述：desktop hosted adapter 未接入既有 owner 契约。
+   预测：viewport state 未进入 binding；hosted owner 默认 true；input/resize/Force/visibility 生命周期无门禁。
+   判别实验：追踪 protocol -> RemoteController -> RuntimeTerminalController -> TerminalSessionBinding -> render/input/resize；运行隔离 binding 测试。
+   结果：全部命中；两条 production seam 测试失败。
+   状态：confirmed
+2. 陈述：host/mobile owner 契约本身缺失或错误。
+   预测：mobile 不按 `remote:<device_id>` 与 host state 门禁，或缺 Auto/Force/Renew/Release。
+   判别实验：读取 current mobile/host 实现及现有 viewport tests。
+   结果：current 实现具有权威 state、identity、generation 与四种生命周期命令；反驳。
+   状态：rejected
+
+### 根因
+
+因果链：`terminal.viewport.state` 不在 terminal stream -> `RemoteController` 只把 output 交给 per-session forwarder -> remote runtime trait 未暴露 owner identity/commands -> hosted binding 无权威 owner state且默认 owned -> render/input/resize/lifecycle沿错误状态继续。
+first-wrong condition：managed hosted binding 创建后，在任何 host state 到达前即回答本机拥有 viewport。
+证据等级：A
+已确认：true
+
+### 已排除
+
+- current HEAD 相对 handoff 基线仅修改 `crates/codux-remote-transport/src/iroh_link.rs` 的 Android VPN DNS 行为；terminal 路径未漂移。
+- host/mobile owner 契约缺失。
+- 新 UI、workspace、host、mobile、router 或 cache 才能修复。
+
+### 待解问题
+
+- 无。
+
+### Gate 状态
+
+复现成功：true
+基础设施问题已排除：true
+根因 A 级确认：true
+因果链非空：true
+first-wrong condition 非空：true
+自动分级已写入：true
+诊断 Gate：complete
+
+## 修复
+
+### 修复 Gate（L2）
+
+#### 根因
+
+因果链：desktop hosted adapter 丢失 host viewport state 与 identity，导致 binding 在未知/其他 owner/Error 时仍授权 render/input/resize。
+first-wrong condition：managed attach 初始状态被 `unwrap_or(true)` 解释为 owned。
+证据等级：A
+
+#### 授权修复
+
+因果单元：让 desktop hosted adapter 通过同一 per-session terminal stream 接收 host authority，并由 `TerminalSessionBinding` 统一门禁 render/input/resize 与 owner 生命周期。
+owner：host state 是实际权威；`TerminalSessionBinding` 是 desktop “当前能否交互”问题唯一语义 owner；generation/connection epoch 仅协调。
+生产机制：扩充既有 terminal lane；统一 runtime terminal stream callback；binding 保存最小 managed state并拒绝陈旧事件；view 连接 Auto/Release/8 秒 Renew，输入不再隐式 Force。
+当前失败证据绑定：隔离 HEAD 两条失败测试直接覆盖 managed attach 初始 owner 与 input/resize 泄漏。
+为何最小充分：复用现有 `TerminalEvent::Viewport`、`TerminalUiEvent`、handoff placeholder、`set_render_visible()` 与 runtime controller；不新建模块或第二状态源。
+
+#### 允许修改文件
+
+- `crates/codux-protocol/src/lib.rs`
+- `apps/desktop/runtime/src/remote/controller.rs`
+- `apps/desktop/runtime/src/runtime_terminal.rs`
+- `apps/desktop/src/terminal/pane.rs`
+- `apps/desktop/src/terminal/view.rs`
+- `apps/desktop/src/terminal/tests/pty_binding.rs`
+
+首次修改后 allowed_files：frozen
+
+scope_fuse：
+- 生产代码 churn 暂停值（新增 + 删除）：650 行
+- 阈值依据：第三次最小完整候选实测接 `view.rs` 前为 592 行、完成预计约 644 行；650 仅覆盖同一冻结范围内既定 binding/view 契约，不授权新增文件、行为或机制。
+
+#### 非授权项
+
+verification_only_risks：WSL 保持 unmanaged；协议 predicate 的 host/mobile/FFI caller；output/state FIFO；相等/更小 generation；旧 connection callback；command false；双设备 smoke。
+out_of_scope：mobile、host、workspace、router、model、element、新 UI、preview、cache、配置、重试、通用状态框架、当前 Android VPN transport 改动。
+
+#### 验证
+
+defect_check：
+- 修复前基线：failed；隔离 HEAD 2 tests failed。
+- 命令或步骤：`cargo test -p codux managed_hosted_viewport -- --nocapture`
+- 通过标准：Awaiting/other/Error 隐藏并拒绝 input/resize；Force 等待 state；local owner state 才恢复；generation、failure、reconnect 与 visibility 动作按 handoff 契约收敛。
+
+nearest_regression_check：
+- 修复前基线：passed；`cargo test -p codux terminal::tests::pty_binding -- --nocapture` 为 7 passed。
+- 命令或步骤：`cargo test -p codux terminal::tests::pty_binding -- --nocapture`
+- 通过标准：全部 pty binding tests 通过，既有 attach/restore/reconnect 行为不退化。
+
+broader_checks：`cargo test -p codux-protocol terminal_stream -- --nocapture`；`cargo test -p codux-runtime terminal_stream -- --nocapture`；caller scan；可用设备上的 mobile/desktop 同 session smoke。
+broader_check_reason：修改共享 protocol lane/runtime trait；涉及并发顺序、重连、generation、timer 与跨设备交互。
+
+验证项只授权验证，不授权生产修改。
+既存失败记录为 out_of_scope，不自动纳入当前任务。
+
+#### 停止条件
+
+- 根因被反驳或原复现未改善
+- 需要新假设、新行为
+- 需要未声明文件或无当前证据支持的机制
+- 需要超出 allowed_files
+- 生产代码 churn 达到 650 行
+- 自动分级升级
+
+defect_check 通过后冻结生产代码，只完成已声明验证和 diff 自审。
+
+#### Gate 状态
+
+根因 A 级：true
+因果单元非空且绑定当前失败证据：true
+allowed_files 非空：true
+scope_fuse 已声明：true
+defect_check 基线、命令、标准非空：true
+nearest_regression_check 基线、命令、标准非空：true
+修复 Gate：complete
+
+### 方案审查
+
+结果：通过
+依据：因果单元位于现有 adapter/binding owner 层；所有机制对应已复现缺口；allowed_files 不含 mobile/host/workspace/model/element；复用现有类型与 UI；650 行生产 scope fuse 已披露；风险只进入验证。
+
+### Scope fuse stop 与重新 Gate
+
+- stop：首个 binding 候选使 `pane.rs` production churn 达到 616，命中 500 行 fuse；未跑 defect_check。
+- 回退点：`pane.rs`、`view.rs`、`pty_binding.rs` 已恢复为 HEAD blob；保留已验证 protocol/controller seam。
+- 假设 1（采用）：一个 `Option<HostedViewportAuthority>` 保存 identity、last generation、current owner、connection epoch、visible；Awaiting/other/Error 都由 `current_owner = false` 门禁。单 stream callback 更新它，现有 UI event 表达 Error。
+- 假设 2（拒绝）：复用 `TerminalModel::remote_viewer`。该值位于 UI queue 后，不能同步门禁 writer/resize，也不能拒绝旧 callback。
+- allowed_files：保持冻结，不增文件。
+- 方案复审：通过；删除独立状态 enum、重连状态机改写、额外 channel 抽象；原 acceptance 与验证不变。
+- 第二次 stop：压缩后候选仍为 693 行 production churn；再次恢复 3 个 candidate files 至 HEAD blob，未跑 defect_check。
+- 假设 1（采用）：复用 `TerminalViewportState` 保存 generation/owner；一个共享 viewport-command helper 负责 Auto/Force/Renew/Release 与失败发布，避免六处重复 plumbing。pane 预算 240 行，任务总 production 预算仍为 500。
+- 假设 2（仅在假设 1 无法满足验收时）：把 scope_fuse 提高到可观测最小值。当前无证据支持，拒绝。
+- 方案复审：通过；若第三候选达到 500，停止任务并请求重新授权，不再写第四候选。
+- 第三次 stop：共享 command helper 候选在接 `view.rs` 前已达 592 行任务总 production churn，完成预计约 644；`pane.rs` 再次恢复为 HEAD blob。
+- 当前保留：已验证 protocol/controller/runtime seam，production churn 204；未修改 pane/view/test。
+- 阻塞：是否允许 scope_fuse 从 500 调整为 650。allowed_files、根因、验收、out_of_scope 均不变。
+- 重新 Gate：用户批准 650；状态恢复 active。仅校正已观测最小完整候选预算；allowed_files、根因、验收、out_of_scope 不变。
+- 第四次 stop：候选把 stream channel、authority、lifecycle 全塞入 binding，production churn 超 650；未跑 defect_check，已恢复 `pane.rs`、`view.rs`、`pty_binding.rs` 至 HEAD blob。
+- 假设 1（采用）：authority 只保存 identity、viewport、epoch、visible；现有 hosted backend 继续保存 channel/controller。共享 callback 直接更新 authority并复用现有 UI sink，避免复制 event plumbing。
+- 假设 2（拒绝）：继续压缩第四候选。违反“不得叠补丁”；已整体回退。
+- 方案复审：通过；不新增 event/channel store，不复制 UI event 映射，renew task 复用 `TerminalView` 现有 task 生命周期。650 fuse、allowed_files 与验收不变。
+- 第五次 stop：减法候选仍在接 `view.rs` 前达到约 654；未跑 defect_check，已恢复 3 个 candidate files 至 HEAD blob。
+- 假设 1（采用）：pre-open 与 live callback 共享一个 `Arc<Mutex<HostedViewportAuthority>>`，直接放进现有 `HostedTerminalBackend`；无需 binding 级 channel/store 或转发方法。
+- 假设 2（拒绝）：binding 独立保存 authority。它重复 hosted backend 生命周期并增加约 70 行 plumbing。
+- 最终结果：采用假设 1；production churn 645，未达到 650 fuse。defect_check 通过后生产代码冻结。
+
+### 验证结果
+
+- defect_check：passed；4 passed。
+- nearest_regression_check：passed；11 passed（修复前 7 passed）。
+- protocol terminal stream：passed；1 passed。
+- runtime terminal stream：passed；2 passed。
+- caller scan：complete；RemoteController 使用单 stream map；WSL 走 trait 默认 legacy adapter、identity 为 `None`；IME 未使用返回值但最终 writer 仍由同一 binding owner gate 拒绝，且不发送 Force。
+- diff check：passed；`git diff --check` 无输出。
+- format：changed code 手工匹配现有文件风格；未运行写入式 package fmt。当前 `rustfmt 1.9.0` check 同时要求重排未修改旧代码，未采纳该扩散。
+- device smoke：skipped；当前环境无已连接 mobile/headless 双设备 session。
+
+### 对抗性审查
+
+- 疑点：binding callback 最终分别投递 output/UI channel。结论：非阻断；authority 在统一 callback 内同步更新并完成 generation/epoch gate 后才投递 UI，render/input/resize 不读取 UI queue；output 缓存与 authority 无第二判权。
+- 疑点：重连期间旧 callback 与新 callback 并发。结论：非阻断；旧共享 authority 先递增 epoch，旧 callback 持同一 mutex 校验并丢弃，完成回调还校验 session id + epoch。
+- 疑点：unmanaged WSL 行为变化。结论：非阻断；无 identity 即无 authority，input/resize 与 legacy output/events adapter 保持原路径；回归测试覆盖。
+- allowed_files：未扩展。
+- 未新增依赖、配置、迁移、发布路径、UI 或通用框架。
+- 对抗性审查：complete；无阻断项。
+
+## 停止条件
+
+- 根因被反驳
+- 原复现未改善
+- 需要新增未授权或无当前证据支持的行为、文件或机制
+- 需要超出 allowed_files
+- 需要触及 Gate 未声明的共享契约、持久化、并发、安全、构建、发布
+- 生产代码 churn 达到 650 行
+- 自动分级升级
+
+目标检查通过后冻结生产代码，只完成已授权验证。
+
+## 发布 Gate（仅涉及发布的 L2）
+
+修改仅在 allowed_files 内：true
+未新增未声明文件或机制：true
+验证通过：true
+diff 自审完成：true
+无证据变化导致停止：true
+构建通过（如涉及）：not_applicable
+依赖、配置、迁移已确认（如涉及）：not_applicable
+回滚方案明确（如涉及）：not_applicable
+发布范围明确（如涉及）：not_applicable
+发布 Gate：not_applicable
+
+## 下一步
+
+任务完成。代码已进入 beta10 本地 desktop 产物；device smoke 仍因无可用双设备 session 跳过。当前已授权按任务提交并 push 到 `lan`；release 不在本次范围。

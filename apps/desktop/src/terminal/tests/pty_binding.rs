@@ -5,19 +5,48 @@ struct HostedTestController {
     actions: std::sync::Mutex<Vec<String>>,
     terminals: Vec<String>,
     fail_open: bool,
+    fail_list: bool,
+    identity: Option<String>,
+    failures: std::sync::Mutex<HashSet<&'static str>>,
+    streams: std::sync::Mutex<
+        Vec<codux_runtime::runtime_terminal::RuntimeTerminalStreamForwarder>,
+    >,
 }
 
 impl HostedTestController {
     fn with_terminals(terminals: &[&str]) -> Self {
         Self {
-            actions: std::sync::Mutex::new(Vec::new()),
             terminals: terminals.iter().map(|value| value.to_string()).collect(),
-            fail_open: false,
+            ..Default::default()
+        }
+    }
+
+    fn managed() -> Self {
+        Self {
+            identity: Some("remote:desktop".to_string()),
+            ..Default::default()
         }
     }
 
     fn record(&self, action: impl Into<String>) {
         self.actions.lock().unwrap().push(action.into());
+    }
+
+    fn succeeds(&self, action: &'static str) -> bool {
+        self.record(action);
+        !self.failures.lock().unwrap().contains(action)
+    }
+
+    fn fail(&self, action: &'static str) {
+        self.failures.lock().unwrap().insert(action);
+    }
+
+    fn emit(
+        &self,
+        index: usize,
+        event: codux_runtime::runtime_terminal::RuntimeTerminalStreamEvent,
+    ) {
+        self.streams.lock().unwrap()[index](event);
     }
 }
 
@@ -36,6 +65,9 @@ impl RuntimeTerminalController for HostedTestController {
 
     fn list_terminals(&self) -> Result<serde_json::Value, String> {
         self.record("list");
+        if self.fail_list {
+            return Err("list failed".to_string());
+        }
         Ok(serde_json::json!({
             "terminals": self
                 .terminals
@@ -45,12 +77,14 @@ impl RuntimeTerminalController for HostedTestController {
         }))
     }
 
-    fn terminal_input(&self, _session_id: &str, _bytes: &[u8]) -> bool {
-        true
+    fn terminal_input(&self, session_id: &str, bytes: &[u8]) -> bool {
+        self.record(format!("input:{session_id}:{}", String::from_utf8_lossy(bytes)));
+        !self.failures.lock().unwrap().contains("input")
     }
 
-    fn terminal_resize(&self, _session_id: &str, _cols: u16, _rows: u16) -> bool {
-        true
+    fn terminal_resize(&self, session_id: &str, cols: u16, rows: u16) -> bool {
+        self.record(format!("resize:{session_id}:{cols}x{rows}"));
+        !self.failures.lock().unwrap().contains("resize")
     }
 
     fn close_terminal(&self, _session_id: &str) -> Result<(), String> {
@@ -77,6 +111,95 @@ impl RuntimeTerminalController for HostedTestController {
         _forwarder: codux_runtime::runtime_terminal::RuntimeTerminalEventForwarder,
     ) {
         self.record(format!("events:{session_id}"));
+    }
+
+    fn register_terminal_stream(
+        &self,
+        session_id: &str,
+        forwarder: codux_runtime::runtime_terminal::RuntimeTerminalStreamForwarder,
+    ) {
+        self.record(format!("stream:{session_id}"));
+        self.streams.lock().unwrap().push(forwarder);
+    }
+
+    fn terminal_viewport_identity(&self) -> Option<String> {
+        self.identity.clone()
+    }
+
+    fn terminal_viewport_auto(&self, _session_id: &str) -> bool {
+        self.succeeds("auto")
+    }
+
+    fn terminal_viewport_force(&self, _session_id: &str) -> bool {
+        self.succeeds("force")
+    }
+
+    fn terminal_viewport_renew(&self, _session_id: &str) -> bool {
+        self.succeeds("renew")
+    }
+
+    fn terminal_viewport_release(&self, _session_id: &str) -> bool {
+        self.succeeds("release")
+    }
+}
+
+fn managed_binding(
+    controller: Arc<HostedTestController>,
+) -> (
+    TerminalSessionBinding,
+    flume::Receiver<Vec<u8>>,
+    flume::Receiver<TerminalUiEvent>,
+) {
+    let config = TerminalPtyConfig {
+        terminal_id: Some("terminal-1".to_string()),
+        ..Default::default()
+    };
+    let (binding, _) = TerminalSessionBinding::pending(config.clone());
+    let (output_tx, output_rx) = flume::unbounded();
+    let (event_tx, event_rx) = flume::unbounded();
+    let viewport = Arc::new(Mutex::new(awaiting_hosted_viewport(
+        "remote:desktop".to_string(),
+        1,
+        false,
+    )));
+    binding.attach_hosted(
+        controller,
+        "terminal-1".to_string(),
+        output_tx,
+        event_tx,
+        flume::unbounded().0,
+        config,
+        Some(viewport),
+    );
+    (binding, output_rx, event_rx)
+}
+
+fn viewport_event(owner: &str, generation: u64) -> codux_runtime::runtime_terminal::RuntimeTerminalStreamEvent {
+    codux_runtime::runtime_terminal::RuntimeTerminalStreamEvent::Event(TerminalEvent::Viewport {
+        session_id: "terminal-1".to_string(),
+        owner: owner.to_string(),
+        cols: 80,
+        rows: 24,
+        generation,
+    })
+}
+
+fn wait_for_stream(controller: &HostedTestController) {
+    for _ in 0..100 {
+        if !controller.streams.lock().unwrap().is_empty() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("terminal stream was not registered");
+}
+
+fn recv_error(events: &flume::Receiver<TerminalUiEvent>) -> String {
+    loop {
+        match events.recv_timeout(Duration::from_secs(1)).unwrap() {
+            TerminalUiEvent::Error(error) => return error,
+            _ => {}
+        }
     }
 }
 
@@ -131,7 +254,7 @@ fn failed_hosted_attach_stops_pending_binding_from_matching() {
     let (binding, initial_layout_rx) = TerminalSessionBinding::pending(matching_config.clone());
     binding.resize(80, 24).unwrap();
     let (output_tx, _) = flume::unbounded();
-    let (session_event_tx, _) = flume::unbounded();
+    let (session_event_tx, session_event_rx) = flume::unbounded();
     let (session_event_wake_tx, _) = flume::unbounded();
     let pending = PendingTerminalAttach {
         session: binding.clone(),
@@ -155,6 +278,7 @@ fn failed_hosted_attach_stops_pending_binding_from_matching() {
         .is_err()
     );
     assert!(!binding.matches_pty_config(&matching_config));
+    assert!(recv_error(&session_event_rx).contains("open failed"));
 }
 
 #[test]
@@ -167,13 +291,15 @@ fn hosted_terminal_binding_rejects_different_distribution() {
         ..Default::default()
     };
     let (binding, _initial_layout_rx) = TerminalSessionBinding::pending(config.clone());
+    let controller = Arc::new(HostedTestController::default());
     binding.attach_hosted(
-        Arc::new(HostedTestController::default()),
+        controller.clone(),
         "terminal-1".to_string(),
         flume::unbounded().0,
         flume::unbounded().0,
         flume::unbounded().0,
         config.clone(),
+        None,
     );
     let mut other_distribution = config;
     other_distribution.runtime_target = ProjectRuntimeTarget::Wsl {
@@ -181,6 +307,12 @@ fn hosted_terminal_binding_rejects_different_distribution() {
     };
 
     assert!(!binding.matches_pty_config(&other_distribution));
+    assert!(binding.local_viewport_owns());
+    binding.write(b"x").unwrap();
+    binding.resize(80, 24).unwrap();
+    let actions = controller.actions.lock().unwrap();
+    assert!(actions.iter().any(|action| action.starts_with("input:")));
+    assert!(actions.iter().any(|action| action.starts_with("resize:")));
 }
 
 #[test]
@@ -198,6 +330,8 @@ fn hosted_restore_recreates_missing_session_after_registering_forwarders() {
         &controller,
         "terminal-1",
         &config,
+        None,
+        0,
         &output_tx,
         &event_tx,
         &wake_tx,
@@ -207,12 +341,7 @@ fn hosted_restore_recreates_missing_session_after_registering_forwarders() {
     assert_eq!(session_id, "terminal-1");
     assert_eq!(
         *controller.actions.lock().unwrap(),
-        [
-            "list",
-            "output:terminal-1",
-            "events:terminal-1",
-            "open:terminal-1"
-        ]
+        ["list", "stream:terminal-1", "open:terminal-1"]
     );
 }
 
@@ -231,6 +360,8 @@ fn hosted_restore_reuses_existing_session_without_reopening() {
         &controller,
         "terminal-1",
         &config,
+        None,
+        0,
         &output_tx,
         &event_tx,
         &wake_tx,
@@ -239,6 +370,147 @@ fn hosted_restore_reuses_existing_session_without_reopening() {
 
     assert_eq!(session_id, "terminal-1");
     assert_eq!(*controller.actions.lock().unwrap(), ["list"]);
+}
+
+#[test]
+fn managed_hosted_viewport_gates_io_and_obeys_host_generation() {
+    let controller = Arc::new(HostedTestController::managed());
+    let (binding, _, events) = managed_binding(controller.clone());
+    controller.actions.lock().unwrap().clear();
+
+    assert!(!binding.local_viewport_owns());
+    binding.write(b"x").unwrap();
+    binding.resize(100, 30).unwrap();
+    assert!(controller.actions.lock().unwrap().is_empty());
+
+    controller.emit(0, viewport_event("remote:phone", 2));
+    assert!(!binding.local_viewport_owns());
+    controller.emit(0, viewport_event("remote:desktop", 2));
+    assert!(binding.local_viewport_owns());
+    controller.emit(
+        0,
+        codux_runtime::runtime_terminal::RuntimeTerminalStreamEvent::Event(TerminalEvent::Error {
+            session_id: "terminal-1".to_string(),
+            message: "lost owner".to_string(),
+        }),
+    );
+    assert!(!binding.local_viewport_owns());
+    controller.emit(0, viewport_event("remote:desktop", 2));
+    assert!(binding.local_viewport_owns());
+    controller.emit(0, viewport_event("remote:phone", 1));
+    assert!(binding.local_viewport_owns());
+
+    binding.write(b"x").unwrap();
+    binding.resize(100, 30).unwrap();
+    assert_eq!(
+        *controller.actions.lock().unwrap(),
+        ["input:terminal-1:x", "resize:terminal-1:100x30"]
+    );
+    binding.restore_local_viewport().unwrap();
+    assert!(!binding.local_viewport_owns());
+    assert_eq!(controller.actions.lock().unwrap().last().unwrap(), "force");
+    assert!(events.try_iter().any(|event| matches!(
+        event,
+        TerminalUiEvent::Viewport { remote_owner: false, generation: 2, .. }
+    )));
+}
+
+#[test]
+fn managed_hosted_viewport_lifecycle_and_failures_are_visible() {
+    let controller = Arc::new(HostedTestController::managed());
+    let (binding, _, events) = managed_binding(controller.clone());
+
+    controller.fail("auto");
+    assert!(binding.set_hosted_render_visible(true));
+    controller.failures.lock().unwrap().clear();
+    controller.emit(0, viewport_event("remote:desktop", 1));
+    controller.fail("renew");
+    assert!(binding.renew_hosted_viewport());
+    controller.failures.lock().unwrap().clear();
+    controller.fail("release");
+    assert!(binding.set_hosted_render_visible(false));
+    controller.failures.lock().unwrap().clear();
+    controller.emit(0, viewport_event("remote:desktop", 2));
+    controller.fail("force");
+    binding.restore_local_viewport().unwrap();
+    controller.failures.lock().unwrap().clear();
+    controller.emit(0, viewport_event("remote:desktop", 3));
+    controller.fail("input");
+    binding.write(b"x").unwrap();
+    controller.failures.lock().unwrap().clear();
+    controller.emit(0, viewport_event("remote:desktop", 4));
+    controller.fail("resize");
+    binding.resize(90, 25).unwrap();
+
+    assert_eq!(
+        events
+            .try_iter()
+            .filter(|event| matches!(event, TerminalUiEvent::Error(_)))
+            .count(),
+        6
+    );
+    assert!(!binding.local_viewport_owns());
+    let actions = controller.actions.lock().unwrap();
+    for action in ["auto", "renew", "release", "force"] {
+        assert!(actions.iter().any(|recorded| recorded == action));
+    }
+}
+
+#[test]
+fn managed_hosted_viewport_reconnect_drops_old_epoch_and_respects_visibility() {
+    let first = Arc::new(HostedTestController::managed());
+    let (binding, output, _) = managed_binding(first.clone());
+    let mut next_controller = HostedTestController::with_terminals(&["terminal-1"]);
+    next_controller.identity = Some("remote:desktop".to_string());
+    let next = Arc::new(next_controller);
+
+    assert!(binding.rebind_hosted(next.clone()));
+    first.emit(
+        0,
+        codux_runtime::runtime_terminal::RuntimeTerminalStreamEvent::Output(b"old".to_vec()),
+    );
+    first.emit(0, viewport_event("remote:desktop", 99));
+    wait_for_stream(&next);
+    next.emit(0, viewport_event("remote:desktop", 0));
+    next.emit(
+        0,
+        codux_runtime::runtime_terminal::RuntimeTerminalStreamEvent::Output(b"new".to_vec()),
+    );
+    assert_eq!(output.recv_timeout(Duration::from_secs(1)).unwrap(), b"new");
+    assert!(output.try_recv().is_err());
+    assert!(binding.local_viewport_owns());
+    assert!(!next.actions.lock().unwrap().iter().any(|action| action == "auto"));
+
+    assert!(binding.set_hosted_render_visible(true));
+    let mut third_controller = HostedTestController::with_terminals(&["terminal-1"]);
+    third_controller.identity = Some("remote:desktop".to_string());
+    let third = Arc::new(third_controller);
+    assert!(binding.rebind_hosted(third.clone()));
+    wait_for_stream(&third);
+    assert!(third.actions.lock().unwrap().iter().any(|action| action == "auto"));
+    assert!(!binding.local_viewport_owns());
+}
+
+#[test]
+fn managed_hosted_viewport_reconnect_surfaces_list_and_open_failures() {
+    let first = Arc::new(HostedTestController::managed());
+    let (binding, _, events) = managed_binding(first);
+    let list_failure = Arc::new(HostedTestController {
+        fail_list: true,
+        identity: Some("remote:desktop".to_string()),
+        ..Default::default()
+    });
+    assert!(binding.rebind_hosted(list_failure));
+    assert!(recv_error(&events).contains("list failed"));
+
+    let open_failure = Arc::new(HostedTestController {
+        fail_open: true,
+        identity: Some("remote:desktop".to_string()),
+        ..Default::default()
+    });
+    assert!(binding.rebind_hosted(open_failure));
+    assert!(recv_error(&events).contains("open failed"));
+    assert!(!binding.local_viewport_owns());
 }
 
 #[test]

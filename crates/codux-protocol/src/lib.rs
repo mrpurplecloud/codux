@@ -705,6 +705,12 @@ pub fn is_terminal_stream_message(kind: &str) -> bool {
             | REMOTE_TERMINAL_INPUT_ACK
             | REMOTE_TERMINAL_SIGNAL
             | REMOTE_TERMINAL_BUFFER
+            | REMOTE_TERMINAL_VIEWPORT_CLAIM
+            | REMOTE_TERMINAL_VIEWPORT_RESIZE
+            | REMOTE_TERMINAL_VIEWPORT_RELEASE
+            | REMOTE_TERMINAL_VIEWPORT_STATE
+            | REMOTE_TERMINAL_VIEWPORT_SCROLL
+            | REMOTE_TERMINAL_VIEWPORT_SCROLLED
     )
 }
 
@@ -1537,6 +1543,21 @@ mod tests {
         assert_eq!(payload["outputSeq"], 9);
         assert!(payload.get("screenData").is_none());
         assert!(payload.get("buffer").is_none());
+    }
+
+    #[test]
+    fn terminal_viewport_messages_share_terminal_stream() {
+        for kind in [
+            REMOTE_TERMINAL_VIEWPORT_CLAIM,
+            REMOTE_TERMINAL_VIEWPORT_RESIZE,
+            REMOTE_TERMINAL_VIEWPORT_RELEASE,
+            REMOTE_TERMINAL_VIEWPORT_STATE,
+            REMOTE_TERMINAL_VIEWPORT_SCROLL,
+            REMOTE_TERMINAL_VIEWPORT_SCROLLED,
+        ] {
+            assert!(is_terminal_stream_message(kind), "{kind}");
+        }
+        assert!(!is_terminal_stream_message(REMOTE_TERMINAL_LIST));
     }
 
     #[test]

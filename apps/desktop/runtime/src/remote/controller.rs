@@ -7,6 +7,7 @@
 //! then block on a channel that the transport callback feeds) so it composes
 //! with the synchronous `RuntimeService` domain methods that route through it.
 
+use crate::runtime_terminal::{RuntimeTerminalStreamEvent, RuntimeTerminalStreamForwarder};
 use base64::Engine;
 use codux_protocol::{
     REMOTE_AI_SESSION, REMOTE_AI_SESSION_RESULT, REMOTE_AI_STATE, REMOTE_AI_STATS, REMOTE_ERROR,
@@ -22,14 +23,16 @@ use codux_protocol::{
     REMOTE_RESOURCE_SUBSCRIBE, REMOTE_TERMINAL_BUFFER, REMOTE_TERMINAL_BUFFER_MAX_CHARS,
     REMOTE_TERMINAL_CLOSE, REMOTE_TERMINAL_CLOSED, REMOTE_TERMINAL_CREATE, REMOTE_TERMINAL_CREATED,
     REMOTE_TERMINAL_INPUT, REMOTE_TERMINAL_LIST, REMOTE_TERMINAL_OUTPUT, REMOTE_TERMINAL_STATUS,
-    REMOTE_TERMINAL_VIEWPORT_RESIZE, REMOTE_TRANSPORT_IROH, REMOTE_WORKTREE_CREATE,
-    REMOTE_WORKTREE_LIST, REMOTE_WORKTREE_MERGE, REMOTE_WORKTREE_REMOVE, REMOTE_WORKTREE_UPDATED,
-    RemoteHostMetrics,
+    REMOTE_TERMINAL_VIEWPORT_CLAIM, REMOTE_TERMINAL_VIEWPORT_RELEASE,
+    REMOTE_TERMINAL_VIEWPORT_RESIZE, REMOTE_TERMINAL_VIEWPORT_STATE, REMOTE_TRANSPORT_IROH,
+    REMOTE_WORKTREE_CREATE, REMOTE_WORKTREE_LIST, REMOTE_WORKTREE_MERGE, REMOTE_WORKTREE_REMOVE,
+    REMOTE_WORKTREE_UPDATED, RemoteHostMetrics,
 };
 use codux_remote_transport::{
     RemoteControllerTransportConfig, RemoteTransport, RemoteTransportCandidate,
     RemoteTransportStateHandler, WebTunnelIoStream, WebTunnelTcpConnectRequest,
 };
+use codux_terminal_core::TerminalEvent;
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -231,12 +234,22 @@ struct ControllerInner {
     project_ids: ProjectIdBridge,
     // Raw full-envelope sink (used by tests that drive a RemoteOutputRouter).
     terminal_sink: Mutex<Option<TerminalSink>>,
-    // Per-session byte forwarders for terminal.output — the desktop terminal UI
-    // registers one per remote session and the model parses the bytes itself.
-    terminal_outputs: Mutex<HashMap<String, TerminalOutputForwarder>>,
+    // One callback per session keeps viewport authority ordered with PTY bytes.
+    terminal_streams: Mutex<HashMap<String, RuntimeTerminalStreamForwarder>>,
 }
 
 impl ControllerInner {
+    fn forward_terminal_stream(&self, session_id: &str, event: RuntimeTerminalStreamEvent) -> bool {
+        let Ok(forwarders) = self.terminal_streams.lock() else {
+            return false;
+        };
+        let Some(forwarder) = forwarders.get(session_id) else {
+            return false;
+        };
+        forwarder(event);
+        true
+    }
+
     /// Route one inbound envelope by request id. Replies from older hosts that
     /// omit it fall back to reply-type matching.
     fn route(&self, data: &[u8]) {
@@ -250,9 +263,8 @@ impl ControllerInner {
             .to_string();
         let mut payload = envelope.get("payload").cloned().unwrap_or(Value::Null);
         let request_id = envelope.get("requestId").and_then(Value::as_str);
-        // Terminal output never goes through the waiter/event path. A raw sink
-        // (tests) gets the full envelope; otherwise demux by sessionId to the
-        // per-session byte forwarder (the desktop terminal UI).
+        // Output and viewport authority share one per-session callback and one
+        // transport lane, so `output/state/output` cannot reorder at this seam.
         if kind == REMOTE_TERMINAL_OUTPUT {
             if let Ok(sink) = self.terminal_sink.lock()
                 && let Some(sink) = sink.as_ref()
@@ -279,12 +291,11 @@ impl ControllerInner {
             };
             let mut delivered = false;
             if let Some(session_id) = session_id {
-                if !data.is_empty()
-                    && let Ok(forwarders) = self.terminal_outputs.lock()
-                    && let Some(forwarder) = forwarders.get(session_id)
-                {
-                    forwarder(data.as_bytes().to_vec());
-                    delivered = true;
+                if !data.is_empty() {
+                    delivered = self.forward_terminal_stream(
+                        session_id,
+                        RuntimeTerminalStreamEvent::Output(data.as_bytes().to_vec()),
+                    );
                 }
                 // Baseline chunks and dropped output are rare; live output with a
                 // forwarder stays untraced.
@@ -298,6 +309,31 @@ impl ControllerInner {
                     );
                 }
             }
+            return;
+        }
+        if kind == REMOTE_TERMINAL_VIEWPORT_STATE
+            && let Some(session_id) = envelope.get("sessionId").and_then(Value::as_str)
+            && let Some(owner) = payload.get("owner").and_then(Value::as_str)
+            && let Some(generation) = payload.get("generation").and_then(Value::as_u64)
+            && let Some(cols) = payload
+                .get("cols")
+                .and_then(Value::as_u64)
+                .and_then(|value| u16::try_from(value).ok())
+            && let Some(rows) = payload
+                .get("rows")
+                .and_then(Value::as_u64)
+                .and_then(|value| u16::try_from(value).ok())
+            && self.forward_terminal_stream(
+                session_id,
+                RuntimeTerminalStreamEvent::Event(TerminalEvent::Viewport {
+                    session_id: session_id.to_string(),
+                    owner: owner.to_string(),
+                    cols,
+                    rows,
+                    generation,
+                }),
+            )
+        {
             return;
         }
         // Hand every domain the desktop's own project id. Catalog messages are
@@ -1107,13 +1143,32 @@ impl RemoteController {
     /// Forward this session's `terminal.output` bytes to `forwarder` (the desktop
     /// terminal model's byte channel).
     pub fn register_terminal_output(&self, session_id: &str, forwarder: TerminalOutputForwarder) {
-        if let Ok(mut guard) = self.inner.terminal_outputs.lock() {
+        self.register_terminal_stream(
+            session_id,
+            Arc::new(move |event| {
+                if let RuntimeTerminalStreamEvent::Output(bytes) = event {
+                    forwarder(bytes);
+                }
+            }),
+        );
+    }
+
+    pub fn unregister_terminal_output(&self, session_id: &str) {
+        self.unregister_terminal_stream(session_id);
+    }
+
+    pub fn register_terminal_stream(
+        &self,
+        session_id: &str,
+        forwarder: RuntimeTerminalStreamForwarder,
+    ) {
+        if let Ok(mut guard) = self.inner.terminal_streams.lock() {
             guard.insert(session_id.to_string(), forwarder);
         }
     }
 
-    pub fn unregister_terminal_output(&self, session_id: &str) {
-        if let Ok(mut guard) = self.inner.terminal_outputs.lock() {
+    pub fn unregister_terminal_stream(&self, session_id: &str) {
+        if let Ok(mut guard) = self.inner.terminal_streams.lock() {
             guard.remove(session_id);
         }
     }
@@ -1184,6 +1239,35 @@ impl RemoteController {
         )
     }
 
+    pub fn terminal_viewport_identity(&self) -> String {
+        format!("remote:{}", self.device_id)
+    }
+
+    pub fn terminal_viewport_auto(&self, session_id: &str) -> bool {
+        self.terminal_viewport_claim(session_id, json!({ "intent": "auto" }))
+    }
+
+    pub fn terminal_viewport_force(&self, session_id: &str) -> bool {
+        self.terminal_viewport_claim(session_id, json!({ "intent": "force" }))
+    }
+
+    pub fn terminal_viewport_renew(&self, session_id: &str) -> bool {
+        self.terminal_viewport_claim(session_id, json!({ "renewOnly": true }))
+    }
+
+    fn terminal_viewport_claim(&self, session_id: &str, claim: Value) -> bool {
+        let mut payload = claim;
+        payload["sessionId"] = json!(session_id);
+        self.fire(REMOTE_TERMINAL_VIEWPORT_CLAIM, payload)
+    }
+
+    pub fn terminal_viewport_release(&self, session_id: &str) -> bool {
+        self.fire(
+            REMOTE_TERMINAL_VIEWPORT_RELEASE,
+            json!({ "sessionId": session_id }),
+        )
+    }
+
     pub fn terminal_buffer_tail(&self, session_id: &str) -> bool {
         self.fire(
             REMOTE_TERMINAL_BUFFER,
@@ -1215,6 +1299,9 @@ impl RemoteController {
     fn fire(&self, kind: &str, payload: Value) -> bool {
         let envelope = self.envelope_with_request_id(kind, payload, None);
         match serde_json::to_vec(&envelope) {
+            Ok(bytes) if codux_protocol::is_terminal_stream_message(kind) => {
+                self.transport.send_terminal(bytes, None)
+            }
             Ok(bytes) => self.transport.send(bytes, None),
             Err(_) => false,
         }
@@ -1908,6 +1995,7 @@ mod tests {
     struct CapturingReplyTransport {
         inner: Arc<ControllerInner>,
         sent: Mutex<Vec<Value>>,
+        terminal_sent: Mutex<Vec<Value>>,
     }
 
     impl CapturingReplyTransport {
@@ -1915,11 +2003,16 @@ mod tests {
             Self {
                 inner,
                 sent: Mutex::new(Vec::new()),
+                terminal_sent: Mutex::new(Vec::new()),
             }
         }
 
         fn sent(&self) -> Vec<Value> {
             self.sent.lock().unwrap().clone()
+        }
+
+        fn terminal_sent(&self) -> Vec<Value> {
+            self.terminal_sent.lock().unwrap().clone()
         }
     }
 
@@ -1986,6 +2079,14 @@ mod tests {
                 _ => {}
             }
             true
+        }
+
+        fn send_terminal(&self, data: Vec<u8>, device_id: Option<&str>) -> bool {
+            let Ok(envelope) = serde_json::from_slice::<Value>(&data) else {
+                return false;
+            };
+            self.terminal_sent.lock().unwrap().push(envelope);
+            self.send(data, device_id)
         }
 
         async fn shutdown(&self) {}
@@ -2109,6 +2210,89 @@ mod tests {
         // No sink, no matching forwarder: the frame is dropped, never queued.
         inner.route(br#"{"type":"terminal.output","payload":{"data":"x"}}"#);
         assert!(inner.events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn terminal_stream_preserves_output_viewport_order() {
+        let inner = Arc::new(ControllerInner::default());
+        let controller = RemoteController {
+            transport: Arc::new(NoopTransport),
+            device_id: "device-1".to_string(),
+            inner: Arc::clone(&inner),
+            next_id: AtomicU64::new(1),
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let forwarded = Arc::clone(&seen);
+        controller.register_terminal_stream(
+            "session-1",
+            Arc::new(move |event| {
+                let value = match event {
+                    crate::runtime_terminal::RuntimeTerminalStreamEvent::Output(bytes) => {
+                        format!("output:{}", String::from_utf8_lossy(&bytes))
+                    }
+                    crate::runtime_terminal::RuntimeTerminalStreamEvent::Event(
+                        TerminalEvent::Viewport {
+                            owner,
+                            generation,
+                            cols,
+                            rows,
+                            ..
+                        },
+                    ) => format!("state:{owner}:{generation}:{cols}x{rows}"),
+                    crate::runtime_terminal::RuntimeTerminalStreamEvent::Event(_) => {
+                        "event".to_string()
+                    }
+                };
+                forwarded.lock().unwrap().push(value);
+            }),
+        );
+
+        inner
+            .route(br#"{"type":"terminal.output","sessionId":"session-1","payload":{"data":"a"}}"#);
+        inner.route(
+            br#"{"type":"terminal.viewport.state","sessionId":"session-1","payload":{"owner":"remote:device-1","generation":7,"cols":80,"rows":24}}"#,
+        );
+        inner
+            .route(br#"{"type":"terminal.output","sessionId":"session-1","payload":{"data":"b"}}"#);
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            ["output:a", "state:remote:device-1:7:80x24", "output:b"]
+        );
+    }
+
+    #[test]
+    fn terminal_viewport_commands_use_terminal_stream() {
+        let inner = Arc::new(ControllerInner::default());
+        let transport = Arc::new(CapturingReplyTransport::new(Arc::clone(&inner)));
+        let controller = RemoteController {
+            transport: transport.clone(),
+            device_id: "device-1".to_string(),
+            inner,
+            next_id: AtomicU64::new(1),
+        };
+
+        assert_eq!(controller.terminal_viewport_identity(), "remote:device-1");
+        assert!(controller.terminal_viewport_auto("session-1"));
+        assert!(controller.terminal_viewport_force("session-1"));
+        assert!(controller.terminal_viewport_renew("session-1"));
+        assert!(controller.terminal_viewport_release("session-1"));
+
+        let sent = transport.terminal_sent();
+        assert_eq!(
+            sent.iter()
+                .map(|value| value["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                REMOTE_TERMINAL_VIEWPORT_CLAIM,
+                REMOTE_TERMINAL_VIEWPORT_CLAIM,
+                REMOTE_TERMINAL_VIEWPORT_CLAIM,
+                REMOTE_TERMINAL_VIEWPORT_RELEASE,
+            ]
+        );
+        assert_eq!(sent[0]["payload"]["intent"], "auto");
+        assert_eq!(sent[1]["payload"]["intent"], "force");
+        assert_eq!(sent[2]["payload"]["renewOnly"], true);
     }
 
     #[test]

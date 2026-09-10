@@ -21,6 +21,7 @@ pub struct TerminalView {
     pending_pty_resize: Option<(u16, u16)>,
     pty_resize_flush_pending: bool,
     last_pty_resize_at: Option<Instant>,
+    hosted_viewport_renew: Option<Task<()>>,
     focus_in_subscription: Option<Subscription>,
     focus_out_subscription: Option<Subscription>,
     focus_observer: Option<TerminalFocusObserver>,
@@ -234,6 +235,7 @@ impl TerminalView {
             pending_pty_resize: None,
             pty_resize_flush_pending: false,
             last_pty_resize_at: None,
+            hosted_viewport_renew: None,
             focus_in_subscription: None,
             focus_out_subscription: None,
             focus_observer: None,
@@ -304,6 +306,23 @@ impl TerminalView {
     }
 
     pub fn set_render_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.session.set_hosted_render_visible(visible) {
+            self.hosted_viewport_renew = None;
+            if visible {
+                let timer = cx.background_executor().clone();
+                self.hosted_viewport_renew = Some(cx.spawn(
+                    async move |view: WeakEntity<Self>, cx| loop {
+                        timer.timer(Duration::from_secs(8)).await;
+                        if !view
+                            .update(cx, |view, _| view.session.renew_hosted_viewport())
+                            .unwrap_or(false)
+                        {
+                            break;
+                        }
+                    },
+                ));
+            }
+        }
         let changed = self
             .model
             .update(cx, |model, cx| model.set_render_visible(visible, cx));
@@ -666,7 +685,9 @@ impl TerminalView {
         let Some(bytes) = keystroke_to_bytes(keystroke, mode) else {
             return false;
         };
-        self.prepare_local_viewport_for_input(cx);
+        if !self.prepare_local_viewport_for_input(cx) {
+            return false;
+        }
         self.blink_manager
             .update(cx, TerminalBlinkManager::pause_blinking);
         self.clear_pending_view_scroll();
@@ -1051,9 +1072,9 @@ impl TerminalView {
     }
 
     fn process_events(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let previous_generation = {
+        let (previous_remote, previous_generation) = {
             let model = self.model.read(cx);
-            model.viewport_generation()
+            (model.remote_viewer(), model.viewport_generation())
         };
         self.model
             .update(cx, |model, cx| model.process_pending_events(cx));
@@ -1061,24 +1082,31 @@ impl TerminalView {
             let model = self.model.read(cx);
             (model.remote_viewer(), model.viewport_generation())
         };
-        if !is_remote && generation != previous_generation
+        if !is_remote && (previous_remote || generation != previous_generation)
             && let Err(error) = self.session.refresh_local_viewport_if_current_owner() {
                 eprintln!("failed to restore desktop terminal viewport: {error}");
             }
     }
 
     fn write_bytes(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
-        self.prepare_local_viewport_for_input(cx);
-        self.model.update(cx, |model, _| model.write_bytes(bytes));
+        if self.prepare_local_viewport_for_input(cx) {
+            self.model.update(cx, |model, _| model.write_bytes(bytes));
+        }
     }
 
-    fn prepare_local_viewport_for_input(&mut self, cx: &mut Context<Self>) {
+    fn prepare_local_viewport_for_input(&mut self, cx: &mut Context<Self>) -> bool {
         let reclaimed = !self.session.local_viewport_owns();
-        if let Err(error) = self.session.restore_local_viewport() {
-            eprintln!("failed to reclaim terminal viewport on input: {error}");
-        }
-        if reclaimed {
-            cx.notify();
+        match self.session.prepare_local_viewport_for_input() {
+            Ok(allowed) => {
+                if allowed && reclaimed {
+                    cx.notify();
+                }
+                allowed
+            }
+            Err(error) => {
+                eprintln!("failed to reclaim terminal viewport on input: {error}");
+                false
+            }
         }
     }
 
@@ -1116,7 +1144,9 @@ impl TerminalView {
     }
 
     fn paste_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.prepare_local_viewport_for_input(cx);
+        if !self.prepare_local_viewport_for_input(cx) {
+            return;
+        }
         self.blink_manager
             .update(cx, TerminalBlinkManager::pause_blinking);
         self.clear_pending_view_scroll();

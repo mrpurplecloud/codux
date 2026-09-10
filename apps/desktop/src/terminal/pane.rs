@@ -13,8 +13,7 @@ pub struct HostedTerminalCloseTarget {
 impl HostedTerminalCloseTarget {
     pub fn close(self) -> Result<(), String> {
         self.controller.close_terminal(&self.session_id)?;
-        self.controller.unregister_terminal_output(&self.session_id);
-        self.controller.unregister_terminal_events(&self.session_id);
+        self.controller.unregister_terminal_stream(&self.session_id);
         Ok(())
     }
 }
@@ -278,6 +277,9 @@ impl TerminalPane {
             remote_config.cols = Some(cols);
             remote_config.rows = Some(rows);
         }
+        let viewport = controller.terminal_viewport_identity().map(|identity| {
+            Arc::new(Mutex::new(awaiting_hosted_viewport(identity, 1, false)))
+        });
         // Wire the output forwarder under our stable terminal id (== the host's
         // session id) BEFORE creating. The host sends the seed buffer (history +
         // current screen, so a re-attached terminal repaints its last content)
@@ -288,6 +290,8 @@ impl TerminalPane {
             register_hosted_terminal(
                 controller.as_ref(),
                 terminal_id,
+                viewport.as_ref(),
+                1,
                 &pending.output_tx,
                 &pending.session_event_tx,
                 &pending.session_event_wake_tx,
@@ -299,6 +303,10 @@ impl TerminalPane {
                 if let Some(terminal_id) = pre_registered_terminal_id.as_deref() {
                     unregister_hosted_terminal(controller.as_ref(), terminal_id);
                 }
+                let _ = pending
+                    .session_event_tx
+                    .send(TerminalUiEvent::Error(error.clone()));
+                let _ = pending.session_event_wake_tx.try_send(());
                 return Err(anyhow::Error::msg(error));
             }
         };
@@ -314,6 +322,7 @@ impl TerminalPane {
             pending.session_event_tx.clone(),
             pending.session_event_wake_tx.clone(),
             remote_config,
+            viewport,
         );
         if let Some(terminal_id) = pre_registered_terminal_id
             .as_deref()
@@ -478,43 +487,110 @@ struct HostedTerminalBackend {
     session_event_wake_tx: flume::Sender<()>,
     config: TerminalPtyConfig,
     reconnecting: bool,
+    viewport: Option<Arc<Mutex<HostedViewportAuthority>>>,
+}
+
+struct HostedViewportAuthority {
+    identity: String,
+    state: codux_terminal_core::TerminalViewportState,
+    epoch: u64,
+    visible: bool,
+}
+
+#[derive(Clone, Copy)]
+enum HostedViewportCommand {
+    Auto,
+    Force,
+    Renew,
+    Release,
+}
+
+fn awaiting_hosted_viewport(
+    identity: String,
+    epoch: u64,
+    visible: bool,
+) -> HostedViewportAuthority {
+    HostedViewportAuthority {
+        identity,
+        state: codux_terminal_core::TerminalViewportState {
+            owner: String::new(),
+            cols: 0,
+            rows: 0,
+            generation: 0,
+            owner_label: None,
+        },
+        epoch,
+        visible,
+    }
 }
 
 /// Register per-session output and lifecycle event forwarding.
 fn register_hosted_terminal(
     controller: &dyn RuntimeTerminalController,
     session_id: &str,
+    viewport: Option<&Arc<Mutex<HostedViewportAuthority>>>,
+    epoch: u64,
     output_tx: &flume::Sender<Vec<u8>>,
     session_event_tx: &flume::Sender<TerminalUiEvent>,
     session_event_wake_tx: &flume::Sender<()>,
 ) {
     let output_tx = output_tx.clone();
-    controller.register_terminal_output(
-        session_id,
-        Box::new(move |bytes| {
-            // A send error means the pane's model channel is closed (stale/dead
-            // model); just drop the bytes — the forwarder will be unregistered.
-            let _ = output_tx.send(bytes);
-        }),
-    );
     let emit = terminal_ui_event_sink(session_event_tx.clone(), session_event_wake_tx.clone());
-    controller.register_terminal_events(
+    let viewport = viewport.cloned();
+    controller.register_terminal_stream(
         session_id,
-        Box::new(move |event| {
-            emit(event);
+        Arc::new(move |event| {
+            let mut authority = viewport.as_ref().map(|state| state.lock());
+            if authority.as_ref().is_some_and(|state| state.epoch != epoch) {
+                return;
+            }
+            match event {
+                codux_runtime::runtime_terminal::RuntimeTerminalStreamEvent::Output(bytes) => {
+                    let _ = output_tx.send(bytes);
+                }
+                codux_runtime::runtime_terminal::RuntimeTerminalStreamEvent::Event(mut event) => {
+                    if let Some(authority) = authority.as_mut() {
+                        match &event {
+                            TerminalEvent::Viewport { generation, .. }
+                                if *generation < authority.state.generation => return,
+                            TerminalEvent::Viewport {
+                                owner,
+                                cols,
+                                rows,
+                                generation,
+                                ..
+                            } => {
+                                authority.state.owner = owner.clone();
+                                authority.state.cols = *cols;
+                                authority.state.rows = *rows;
+                                authority.state.generation = *generation;
+                            }
+                            TerminalEvent::Error { .. } => authority.state.owner.clear(),
+                            _ => {}
+                        }
+                        if let TerminalEvent::Viewport { owner, .. } = &mut event
+                            && *owner == authority.identity
+                        {
+                            *owner = terminal_viewport_local_owner().to_string();
+                        }
+                    }
+                    emit(event);
+                }
+            }
         }),
     );
 }
 
 fn unregister_hosted_terminal(controller: &dyn RuntimeTerminalController, session_id: &str) {
-    controller.unregister_terminal_output(session_id);
-    controller.unregister_terminal_events(session_id);
+    controller.unregister_terminal_stream(session_id);
 }
 
 fn restore_hosted_session(
     controller: &dyn RuntimeTerminalController,
     current_session_id: &str,
     config: &TerminalPtyConfig,
+    viewport: Option<&Arc<Mutex<HostedViewportAuthority>>>,
+    epoch: u64,
     output_tx: &flume::Sender<Vec<u8>>,
     session_event_tx: &flume::Sender<TerminalUiEvent>,
     session_event_wake_tx: &flume::Sender<()>,
@@ -527,6 +603,8 @@ fn restore_hosted_session(
         register_hosted_terminal(
             controller,
             terminal_id,
+            viewport,
+            epoch,
             output_tx,
             session_event_tx,
             session_event_wake_tx,
@@ -657,7 +735,13 @@ impl TerminalSessionBinding {
         session_event_tx: flume::Sender<TerminalUiEvent>,
         session_event_wake_tx: flume::Sender<()>,
         config: TerminalPtyConfig,
+        viewport: Option<Arc<Mutex<HostedViewportAuthority>>>,
     ) {
+        let epoch = viewport.as_ref().map_or(0, |state| state.lock().epoch);
+        let may_send = viewport.as_ref().is_none_or(|state| {
+            let state = state.lock();
+            state.state.owner == state.identity
+        });
         let (pending_writes, last_resize) = {
             let mut inner = self.inner.lock();
             if let Some(hosted) = &inner.hosted {
@@ -668,6 +752,8 @@ impl TerminalSessionBinding {
                     register_hosted_terminal(
                         controller.as_ref(),
                         &session_id,
+                        viewport.as_ref(),
+                        epoch,
                         &output_tx,
                         &session_event_tx,
                         &session_event_wake_tx,
@@ -677,6 +763,8 @@ impl TerminalSessionBinding {
                 register_hosted_terminal(
                     controller.as_ref(),
                     &session_id,
+                    viewport.as_ref(),
+                    epoch,
                     &output_tx,
                     &session_event_tx,
                     &session_event_wake_tx,
@@ -690,16 +778,24 @@ impl TerminalSessionBinding {
                 session_event_wake_tx,
                 config,
                 reconnecting: false,
+                viewport,
             });
             inner.pending_match_config = None;
             inner.pending_write_bytes = 0;
             (std::mem::take(&mut inner.pending_writes), inner.last_resize)
         };
-        if let Some((cols, rows)) = last_resize {
-            controller.terminal_resize(&session_id, cols, rows);
-        }
-        for bytes in pending_writes {
-            controller.terminal_input(&session_id, &bytes);
+        if may_send {
+            if let Some((cols, rows)) = last_resize {
+                if !controller.terminal_resize(&session_id, cols, rows) {
+                    self.fail_hosted(epoch, "failed to resize hosted terminal");
+                }
+            }
+            for bytes in pending_writes {
+                if !controller.terminal_input(&session_id, &bytes) {
+                    self.fail_hosted(epoch, "failed to write hosted terminal");
+                    break;
+                }
+            }
         }
     }
 
@@ -713,7 +809,8 @@ impl TerminalSessionBinding {
             session_event_tx,
             session_event_wake_tx,
             config,
-            last_resize,
+            viewport,
+            epoch,
         ) = {
             let mut inner = self.inner.lock();
             let Some(hosted) = inner.hosted.as_mut() else {
@@ -726,6 +823,23 @@ impl TerminalSessionBinding {
                 return false;
             }
             hosted.reconnecting = true;
+            let visible = hosted
+                .viewport
+                .as_ref()
+                .is_some_and(|state| state.lock().visible);
+            if let Some(state) = hosted.viewport.as_ref() {
+                let mut state = state.lock();
+                state.epoch = state.epoch.wrapping_add(1);
+            }
+            let viewport = controller.terminal_viewport_identity().map(|identity| {
+                let epoch = hosted
+                    .viewport
+                    .as_ref()
+                    .map_or(1, |state| state.lock().epoch);
+                Arc::new(Mutex::new(awaiting_hosted_viewport(identity, epoch, visible)))
+            });
+            let epoch = viewport.as_ref().map_or(0, |state| state.lock().epoch);
+            hosted.viewport = viewport.clone();
             (
                 hosted.controller.clone(),
                 hosted.session_id.clone(),
@@ -733,9 +847,19 @@ impl TerminalSessionBinding {
                 hosted.session_event_tx.clone(),
                 hosted.session_event_wake_tx.clone(),
                 hosted.config.clone(),
-                inner.last_resize,
+                viewport,
+                epoch,
             )
         };
+        if viewport.is_some() {
+            let _ = session_event_tx.send(TerminalUiEvent::Viewport {
+                remote_owner: true,
+                generation: 0,
+                cols: 0,
+                rows: 0,
+            });
+            let _ = session_event_wake_tx.try_send(());
+        }
 
         let binding = self.clone();
         codux_runtime::async_runtime::spawn_blocking(move || {
@@ -744,16 +868,23 @@ impl TerminalSessionBinding {
                     controller.as_ref(),
                     &old_session_id,
                     &config,
+                    viewport.as_ref(),
+                    epoch,
                     &output_tx,
                     &session_event_tx,
                     &session_event_wake_tx,
                 );
-            let Ok(session_id) = next_session_id else {
-                binding.finish_hosted_rebind(&old_session_id, None, None, None, None, None);
-                return;
+            let session_id = match next_session_id {
+                Ok(session_id) => session_id,
+                Err(error) => {
+                    binding.fail_hosted(epoch, &format!("failed to restore hosted terminal: {error}"));
+                    binding.finish_hosted_rebind(&old_session_id, epoch, None, None, None, None, None);
+                    return;
+                }
             };
             binding.finish_hosted_rebind(
                 &old_session_id,
+                epoch,
                 Some(controller.clone()),
                 Some(session_id.clone()),
                 Some(output_tx),
@@ -764,9 +895,6 @@ impl TerminalSessionBinding {
             if old_session_id != session_id {
                 unregister_hosted_terminal(controller.as_ref(), &old_session_id);
             }
-            if let Some((cols, rows)) = last_resize {
-                controller.terminal_resize(&session_id, cols, rows);
-            }
         });
         true
     }
@@ -774,6 +902,7 @@ impl TerminalSessionBinding {
     fn finish_hosted_rebind(
         &self,
         expected_session_id: &str,
+        expected_epoch: u64,
         controller: Option<Arc<dyn RuntimeTerminalController>>,
         session_id: Option<String>,
         output_tx: Option<flume::Sender<Vec<u8>>>,
@@ -784,8 +913,13 @@ impl TerminalSessionBinding {
         let Some(hosted) = inner.hosted.as_mut() else {
             return;
         };
-        if hosted.session_id != expected_session_id {
-            hosted.reconnecting = false;
+        if hosted.session_id != expected_session_id
+            || hosted
+                .viewport
+                .as_ref()
+                .map_or(0, |state| state.lock().epoch)
+                != expected_epoch
+        {
             return;
         }
         let mut reconnected = None;
@@ -806,6 +940,8 @@ impl TerminalSessionBinding {
             register_hosted_terminal(
                 controller.as_ref(),
                 &session_id,
+                hosted.viewport.as_ref(),
+                expected_epoch,
                 &output_tx,
                 &session_event_tx,
                 &session_event_wake_tx,
@@ -825,6 +961,16 @@ impl TerminalSessionBinding {
         if let Some((event_tx, wake_tx)) = reconnected {
             let _ = event_tx.send(TerminalUiEvent::Reconnected);
             let _ = wake_tx.try_send(());
+            if self
+                .inner
+                .lock()
+                .hosted
+                .as_ref()
+                .and_then(|hosted| hosted.viewport.as_ref())
+                .is_some_and(|viewport| viewport.lock().visible)
+            {
+                self.hosted_viewport_command(HostedViewportCommand::Auto);
+            }
         }
     }
 
@@ -863,9 +1009,13 @@ impl TerminalSessionBinding {
             inner.hosted.clone()
         };
         if let Some(hosted) = hosted {
-            hosted
-                .controller
-                .terminal_input(&hosted.session_id, bytes);
+            let (allowed, epoch) = hosted.viewport.as_ref().map_or((true, 0), |state| {
+                let state = state.lock();
+                (state.state.owner == state.identity, state.epoch)
+            });
+            if allowed && !hosted.controller.terminal_input(&hosted.session_id, bytes) {
+                self.fail_hosted(epoch, "failed to write hosted terminal");
+            }
             return Ok(());
         }
         if let Some(session) = self.inner.lock().session.clone() {
@@ -895,9 +1045,15 @@ impl TerminalSessionBinding {
             let _ = tx.send((cols, rows));
         }
         if let Some(hosted) = hosted {
-            hosted
-                .controller
-                .terminal_resize(&hosted.session_id, cols, rows);
+            let (allowed, epoch) = hosted.viewport.as_ref().map_or((true, 0), |state| {
+                let state = state.lock();
+                (state.state.owner == state.identity, state.epoch)
+            });
+            if allowed {
+                if !hosted.controller.terminal_resize(&hosted.session_id, cols, rows) {
+                    self.fail_hosted(epoch, "failed to resize hosted terminal");
+                }
+            }
             return Ok(());
         }
         if let Some(session) = session {
@@ -911,6 +1067,13 @@ impl TerminalSessionBinding {
     fn claim_local_viewport(&self) -> Result<()> {
         let (session, last_resize) = {
             let inner = self.inner.lock();
+            if inner
+                .hosted
+                .as_ref()
+                .is_some_and(|hosted| hosted.viewport.is_some())
+            {
+                return Ok(());
+            }
             (inner.session.clone(), inner.last_resize)
         };
         if let Some(session) = session {
@@ -927,6 +1090,16 @@ impl TerminalSessionBinding {
     }
 
     fn restore_local_viewport(&self) -> Result<()> {
+        if self
+            .inner
+            .lock()
+            .hosted
+            .as_ref()
+            .is_some_and(|hosted| hosted.viewport.is_some())
+        {
+            self.hosted_viewport_command(HostedViewportCommand::Force);
+            return Ok(());
+        }
         let (session, last_resize) = {
             let inner = self.inner.lock();
             (inner.session.clone(), inner.last_resize)
@@ -944,16 +1117,145 @@ impl TerminalSessionBinding {
     }
 
     fn refresh_local_viewport_if_current_owner(&self) -> Result<()> {
+        let (hosted, last_resize) = {
+            let inner = self.inner.lock();
+            (inner.hosted.clone(), inner.last_resize)
+        };
+        if let Some(hosted) = hosted
+            && hosted.viewport.is_some()
+        {
+            if self.local_viewport_owns()
+                && let Some((cols, rows)) = last_resize
+            {
+                self.resize(cols, rows)?;
+            }
+            return Ok(());
+        }
         if self.local_viewport_owns() {
             self.claim_local_viewport()?;
         }
         Ok(())
     }
 
-    fn local_viewport_owns(&self) -> bool {
-        self.inner
+    fn prepare_local_viewport_for_input(&self) -> Result<bool> {
+        if self
+            .inner
             .lock()
-            .session
+            .hosted
+            .as_ref()
+            .is_some_and(|hosted| hosted.viewport.is_some())
+        {
+            return Ok(self.local_viewport_owns());
+        }
+        self.restore_local_viewport()?;
+        Ok(true)
+    }
+
+    fn fail_hosted(&self, epoch: u64, message: &str) {
+        let Some(hosted) = self.inner.lock().hosted.clone() else {
+            return;
+        };
+        let Some(viewport) = hosted.viewport.as_ref() else {
+            return;
+        };
+        let mut viewport = viewport.lock();
+        if viewport.epoch != epoch {
+            return;
+        }
+        viewport.state.owner.clear();
+        let _ = hosted.session_event_tx.send(TerminalUiEvent::Viewport {
+            remote_owner: true,
+            generation: viewport.state.generation,
+            cols: 0,
+            rows: 0,
+        });
+        let _ = hosted
+            .session_event_tx
+            .send(TerminalUiEvent::Error(message.to_string()));
+        let _ = hosted.session_event_wake_tx.try_send(());
+    }
+
+    fn hosted_viewport_command(&self, command: HostedViewportCommand) -> bool {
+        let Some(hosted) = self.inner.lock().hosted.clone() else {
+            return false;
+        };
+        let Some(viewport) = hosted.viewport.as_ref() else {
+            return false;
+        };
+        let epoch = {
+            let mut viewport = viewport.lock();
+            if !matches!(command, HostedViewportCommand::Renew) {
+                viewport.state.owner.clear();
+                let _ = hosted.session_event_tx.send(TerminalUiEvent::Viewport {
+                    remote_owner: true,
+                    generation: viewport.state.generation,
+                    cols: 0,
+                    rows: 0,
+                });
+                let _ = hosted.session_event_wake_tx.try_send(());
+            }
+            viewport.epoch
+        };
+        let sent = match command {
+            HostedViewportCommand::Auto => hosted.controller.terminal_viewport_auto(&hosted.session_id),
+            HostedViewportCommand::Force => hosted.controller.terminal_viewport_force(&hosted.session_id),
+            HostedViewportCommand::Renew => hosted.controller.terminal_viewport_renew(&hosted.session_id),
+            HostedViewportCommand::Release => hosted.controller.terminal_viewport_release(&hosted.session_id),
+        };
+        if !sent {
+            self.fail_hosted(epoch, "hosted terminal viewport command failed");
+        }
+        true
+    }
+
+    fn set_hosted_render_visible(&self, visible: bool) -> bool {
+        let Some(hosted) = self.inner.lock().hosted.clone() else {
+            return false;
+        };
+        let Some(viewport) = hosted.viewport.as_ref() else {
+            return false;
+        };
+        {
+            let mut viewport = viewport.lock();
+            if viewport.visible == visible {
+                return false;
+            }
+            viewport.visible = visible;
+        }
+        self.hosted_viewport_command(if visible {
+            HostedViewportCommand::Auto
+        } else {
+            HostedViewportCommand::Release
+        });
+        true
+    }
+
+    fn renew_hosted_viewport(&self) -> bool {
+        let Some(hosted) = self.inner.lock().hosted.clone() else {
+            return false;
+        };
+        let Some(viewport) = hosted.viewport.as_ref() else {
+            return false;
+        };
+        let viewport = viewport.lock();
+        let (visible, owns) = (
+            viewport.visible,
+            viewport.state.owner == viewport.identity,
+        );
+        drop(viewport);
+        if visible && owns {
+            self.hosted_viewport_command(HostedViewportCommand::Renew);
+        }
+        visible
+    }
+
+    fn local_viewport_owns(&self) -> bool {
+        let inner = self.inner.lock();
+        if let Some(viewport) = inner.hosted.as_ref().and_then(|hosted| hosted.viewport.as_ref()) {
+            let viewport = viewport.lock();
+            return viewport.state.owner == viewport.identity;
+        }
+        inner.session
             .as_ref()
             .map(|session| session.viewport_state().owner == terminal_viewport_local_owner())
             .unwrap_or(true)
@@ -962,9 +1264,11 @@ impl TerminalSessionBinding {
     /// Friendly name of the remote device that currently owns the viewport (for
     /// the "handed off" placeholder); None when locally owned / unknown.
     fn viewport_owner_label(&self) -> Option<String> {
-        self.inner
-            .lock()
-            .session
+        let inner = self.inner.lock();
+        if let Some(viewport) = inner.hosted.as_ref().and_then(|hosted| hosted.viewport.as_ref()) {
+            return viewport.lock().state.owner_label.clone();
+        }
+        inner.session
             .as_ref()
             .and_then(|session| session.viewport_state().owner_label)
     }
