@@ -416,6 +416,29 @@ fn managed_hosted_viewport_gates_io_and_obeys_host_generation() {
 }
 
 #[test]
+fn hosted_local_viewport_refresh_does_not_deadlock() {
+    let controller = Arc::new(HostedTestController::managed());
+    let (binding, _, _) = managed_binding(controller.clone());
+    binding.resize(100, 30).unwrap();
+    controller.emit(0, viewport_event("remote:desktop", 1));
+    controller.actions.lock().unwrap().clear();
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done_tx.send(binding.refresh_local_viewport_if_current_owner());
+    });
+
+    done_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("local viewport refresh deadlocked")
+        .unwrap();
+    assert_eq!(
+        *controller.actions.lock().unwrap(),
+        ["resize:terminal-1:100x30"]
+    );
+}
+
+#[test]
 fn managed_hosted_viewport_lifecycle_and_failures_are_visible() {
     let controller = Arc::new(HostedTestController::managed());
     let (binding, _, events) = managed_binding(controller.clone());

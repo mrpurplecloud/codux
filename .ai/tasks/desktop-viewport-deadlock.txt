@@ -1,0 +1,158 @@
+# 任务
+
+ID: desktop-viewport-deadlock
+类型：bug
+状态：done
+创建：2026-09-10
+更新：2026-09-10
+
+## 一句话描述
+
+desktop hosted terminal 收到本地 viewport 状态后，UI 主线程递归锁定 `TerminalSessionBinding.inner`，导致 Codux 永久卡死且 CPU 很低。
+
+## 阶段
+
+done
+
+## 自动分级
+
+综合等级：L1
+
+维度：
+- 复杂度：低
+- 风险：低
+- 确定性：高
+- 可逆性：易
+- 影响面：模块
+
+判定依据：
+- 现场线程栈与安装二进制反汇编共同确认同线程递归锁；修复限一个 guard 生命周期，回归测试限同模块现有测试文件。
+
+是否可升级：是
+升级触发条件：
+- 需要新增文件或机制
+- 需要超出 allowed_files
+- 触及共享契约、持久化、额外并发语义、安全、构建或发布
+- 根因证据降级或出现竞争解释
+
+## 能力挂载
+
+- 当前阻塞点：无
+- 默认填写：无
+
+## 诊断
+
+### 现象
+
+描述：`Codux.app` UI 永久卡死，CPU 约 1%。
+频率：always（进入已确认触发路径后）
+环境：macOS 15.7.5，Codux 2.0.3-beta.9，PID 33446。
+
+### 复现
+
+状态：succeeded
+步骤：对卡死进程分别执行 5 秒和 2 秒 `sample`；反汇编现场 PC 邻近代码；对比 `HEAD`、dirty tree 与安装二进制。
+实际：两次采样间隔约 16 分钟，主线程始终停在 `TerminalView::render -> TerminalSessionBinding::resize -> parking_lot::RawMutex::lock_slow`。
+期望：viewport 状态刷新完成，UI render 返回。
+证据等级：A
+基础设施问题：false
+
+### 边界
+
+last-known-good：`HEAD 758cedcf`，不含 `refresh_local_viewport_if_current_owner` 新 hosted 分支。
+first-wrong：dirty tree 新增 hosted 本地 viewport refresh 分支。
+方法：`git diff` 确认新增代码；安装二进制 symbols 与反汇编确认运行构建含该路径。
+
+### 假设
+
+1. 陈述：`if let` scrutinee 创建的 `MutexGuard` 覆盖 `if` 主体，主体调用 `resize()` 时递归锁定同一 mutex。
+   预测：二进制先锁 `self.inner`，锁未释放时调用 `resize()`，返回后才尝试解锁。
+   判别实验：反汇编 `TerminalView::render` 中内联 refresh 路径。
+   结果：锁指令位于 `resize` 调用前，解锁指令位于调用后；现场停在 `resize` 首次锁获取。
+   状态：confirmed
+2. 陈述：其他后台线程长期持有 `self.inner`。
+   预测：采样中存在另一个 binding mutex 等待或持锁调用栈。
+   判别实验：检查两次全线程采样。
+   结果：未发现；运行线程均处正常等待，仅主线程出现该 binding mutex 等待。反汇编证明自锁即可解释全部现象。
+   状态：rejected
+
+### 根因
+
+因果链：viewport event 改变 generation/owner -> render 调用 refresh -> `self.inner.lock().last_resize` guard 保持到 `if` 主体结束 -> 主体调用 `resize()` -> 同线程再次锁 `self.inner` -> 永久等待。
+first-wrong condition：managed hosted terminal 已有 `last_resize`，当前 owner 为本地，且 viewport event 使 generation 改变或从 remote 切回 local。
+证据等级：A
+已确认：true
+
+### 已排除
+
+- CPU 忙循环。
+- 后台线程长期持锁。
+- `HEAD 758cedcf` 最新已提交 relay 改动直接引入。
+
+### 待解问题
+
+- 无。
+
+### Gate 状态
+
+复现成功：true
+基础设施问题已排除：true
+根因 A 级确认：true
+因果链非空：true
+first-wrong condition 非空：true
+自动分级已写入：true
+诊断 Gate：complete
+
+## 修复
+
+### 直接修改声明
+
+自动分级：L1
+根因：`if let` 条件临时 guard 覆盖主体，`resize()` 递归锁定 `self.inner`。
+授权因果单元：在调用 `resize()` 前复制 `last_resize` 并释放 `self.inner` guard；增加该状态转换的最小回归测试。
+当前失败证据绑定：PID 33446 两次稳定现场采样及安装二进制反汇编。
+allowed_files：
+- apps/desktop/src/terminal/pane.rs
+- apps/desktop/src/terminal/tests/pty_binding.rs
+defect_check：`cargo test -p codux terminal::tests::pty_binding::hosted_local_viewport_refresh_does_not_deadlock -- --exact --nocapture`；修复前于 1.01 秒失败，错误为 `local viewport refresh deadlocked: Timeout`；修复后 `1 passed`。
+nearest_regression_check：运行 desktop `terminal::tests::pty_binding` 测试模块。
+是否满足直接修改条件：true
+
+scope_fuse：生产代码新增与删除合计不超过 8 行；超过即停止并重新分级。
+
+### 实施
+
+- 在一个显式锁作用域内同时复制 `hosted` 与 `last_resize`；调用 `local_viewport_owns()`、`resize()` 前 guard 已释放。
+- 新增 `hosted_local_viewport_refresh_does_not_deadlock`，覆盖已记录布局后收到本地 owner event 的状态转换。
+- 生产代码 churn：新增 5 行、删除 2 行，共 7 行，未触发 scope_fuse。
+- 提交拆分：生产锁作用域修复随其依赖的 headless owner 实现提交，避免制造已知死锁的中间 commit；本任务提交保留回归测试与任务记录。
+
+### 验证
+
+- defect_check 修复前：failed，`local viewport refresh deadlocked: Timeout`。
+- defect_check 修复后：passed，`1 passed, 252 filtered out`。
+- nearest_regression_check：passed，`12 passed, 241 filtered out`。
+- `git diff --check`：passed。
+- caller 枚举：一个生产 caller（`terminal/view.rs`）及新增回归测试，无公共契约变化。
+- 同形递归锁扫描：无残留匹配。
+- `cargo fmt -p codux -- --check`：failed；仅命中本任务开始前已存在的 `pty_binding.rs` dirty-tree 格式差异，未命中本次新增测试或生产修复。按范围规则未修改。
+- diff 自审：完成；无新增机制、依赖、持久化或 API 变化。
+
+## 停止条件
+
+- 根因被反驳或原复现未改善
+- 需要新假设、新行为、未声明文件或机制
+- 需要超出 allowed_files
+- 需要触及共享契约、持久化、额外并发语义、安全、构建或发布
+- 生产代码 churn 超过 8 行
+- 自动分级升级
+
+defect_check 通过后冻结生产代码，只完成已声明验证和 diff 自审。
+
+## 发布 Gate（仅涉及发布的 L2）
+
+发布 Gate：not_applicable
+
+## 下一步
+
+任务完成。修复已随 beta10 desktop dirty-tree build 进入本地产物；当前已授权按任务提交并 push 到 `lan`。未单独装机或发布。
