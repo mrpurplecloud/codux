@@ -1501,6 +1501,18 @@ async fn evict_controller_endpoint(generation: u64) {
     }
 }
 
+/// Whether exhausting the dial schedule should retire the pooled endpoint.
+///
+/// Only an endpoint with no live relay home is retired. With one, that endpoint
+/// is still the handle that can reach the peer — iroh keeps retrying the relay
+/// on it in the background — and timed-out dials then report the peer's
+/// reachability, not a wedged path: the rebuilt endpoint fails the same dials.
+/// Retiring it also re-pays relay registration, which on the slow relay that
+/// made the dials time out costs seconds on every reconnect cycle.
+fn retire_endpoint_after_failed_dials(relay_online: bool) -> bool {
+    !relay_online
+}
+
 pub struct RemoteIrohControllerTransport {
     endpoint: Endpoint,
     blob_store: MemStore,
@@ -1620,11 +1632,22 @@ impl RemoteIrohControllerTransport {
             );
         }
         let Some(connection) = connection else {
-            // Every dial on the pooled endpoint failed — retire it so the next
-            // attempt rebuilds a fresh one rather than re-dialling a wedged path.
+            // Retire the endpoint only when it has no live relay home, so a path
+            // that merely made the dials time out is not re-built from scratch
+            // (which re-pays relay registration) only to time out the same way.
+            // See `retire_endpoint_after_failed_dials`.
             // Generation-guarded + no-close so this late evict can't pull the rug
             // out from a newer reconnect that already reused this endpoint.
-            evict_controller_endpoint(endpoint_generation).await;
+            let retired = retire_endpoint_after_failed_dials(relay_online);
+            if retired {
+                evict_controller_endpoint(endpoint_generation).await;
+            }
+            log_transport(
+                &on_log,
+                format!(
+                    "iroh_controller dials_exhausted relay_live={relay_online} retired={retired}"
+                ),
+            );
             return Err(dial_exhausted_error(
                 relay_online,
                 last_dial_cause.as_deref(),

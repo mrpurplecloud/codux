@@ -19,7 +19,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(60);
+/// How long the reconnect loop may wait between attempts while a saved host is
+/// unreachable.
+///
+/// An unreachable host comes back on the scale of tens of seconds — over a
+/// relay-only path it flaps on exactly that scale (measured: 4s/6s/8s dial
+/// timeouts through a whole window, then sub-second successes once the path is
+/// usable). A minute-long ceiling outlives the outage it backs off from, so the
+/// link stays down long after the host is reachable again.
+const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(10);
 
 /// Liveness of the client→host iroh link for a paired device.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1799,6 +1807,21 @@ mod tests {
             delay = next_reconnect_delay(delay);
         }
         assert_eq!(delay, RECONNECT_MAX_DELAY);
+    }
+
+    #[test]
+    fn reconnect_retry_stays_prompt_while_the_host_is_away() {
+        let mut delay = Duration::from_secs(1);
+        for _ in 0..10 {
+            delay = next_reconnect_delay(delay);
+        }
+        // The cap bounds how long recovery may lag behind a host that came back:
+        // a host on a relay-only path flaps on the scale of tens of seconds, so a
+        // delay beyond that keeps the link down after the path is usable again.
+        assert!(
+            delay <= Duration::from_secs(10),
+            "reconnect delay {delay:?} outlives the outage it is backing off from"
+        );
     }
 
     #[test]
