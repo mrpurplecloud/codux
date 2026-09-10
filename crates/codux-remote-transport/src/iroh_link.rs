@@ -53,6 +53,23 @@ const IROH_RELAY_URL_ENV: &str = "CODUX_IROH_RELAY_URL";
 /// same-network direct connections — useful on networks that block multicast.
 const IROH_DISABLE_LAN_MDNS_ENV: &str = "CODUX_IROH_DISABLE_LAN_MDNS";
 const IROH_ONLINE_TIMEOUT: Duration = Duration::from_secs(12);
+/// Public resolvers attached to the transport's DNS resolver on Android.
+///
+/// A VPN that does not configure DNS servers of its own (WireGuard tunnels and
+/// Peplink-style SD-WAN clients commonly leave them unset) registers a network
+/// whose `LinkProperties` carries an *empty* DNS server list. `iroh-dns` seeds
+/// its resolver from exactly that list — it reads the active network's
+/// `getDnsServers()` through JNI — so while such a VPN is up the endpoint is
+/// left with zero nameservers. Relay hostnames then never resolve, relay
+/// registration times out, and only dials to literal direct addresses can
+/// succeed: a peer on the VPN's own network still connects directly, while a
+/// peer that can only be reached through the relay looks permanently offline.
+///
+/// Appending these keeps the resolver usable in that configuration without
+/// removing what the system provided: they carry public names such as the
+/// relay hostname, and a normal configuration keeps using its own servers.
+#[cfg(any(target_os = "android", test))]
+const ANDROID_FALLBACK_DNS_SERVERS: [&str; 2] = ["223.5.5.5:53", "119.29.29.29:53"];
 const BLOB_GC_INTERVAL: Duration = Duration::from_secs(30);
 const BLOB_TICKET_LEASE: Duration = Duration::from_secs(5 * 60);
 const CONTROL_QUEUE_CAPACITY: usize = 64;
@@ -2470,7 +2487,29 @@ fn endpoint_builder(
         }
         builder = builder.relay_mode(RelayMode::Custom(relay_map));
     }
+    #[cfg(target_os = "android")]
+    {
+        builder = builder.dns_resolver(transport_dns_resolver());
+    }
     builder
+}
+
+/// The DNS resolver used by the transport's iroh endpoints.
+///
+/// Android is the one platform where the system configuration can be a dead
+/// end: a VPN without its own DNS servers leaves the active network with no
+/// nameservers at all, see [`ANDROID_FALLBACK_DNS_SERVERS`]. Building the
+/// resolver explicitly there attaches the fallbacks; every other platform keeps
+/// whatever iroh constructs by default.
+#[cfg(target_os = "android")]
+fn transport_dns_resolver() -> iroh::dns::DnsResolver {
+    let mut builder = iroh::dns::DnsResolver::builder().with_system_defaults();
+    for server in ANDROID_FALLBACK_DNS_SERVERS {
+        if let Ok(addr) = server.parse::<SocketAddr>() {
+            builder = builder.with_nameserver(addr, iroh::dns::DnsProtocol::Udp);
+        }
+    }
+    builder.build()
 }
 
 pub(crate) fn host_secret_key(config: &RemoteHostTransportConfig) -> Option<SecretKey> {
@@ -3863,5 +3902,17 @@ mod tests {
         })
         .await
         .expect("leased blob should be collected");
+    }
+
+    #[test]
+    fn android_fallback_dns_servers_are_valid() {
+        assert!(
+            ANDROID_FALLBACK_DNS_SERVERS.len() >= 2,
+            "one fallback would leave the resolver dead whenever that server is blocked"
+        );
+        for server in ANDROID_FALLBACK_DNS_SERVERS {
+            let addr: SocketAddr = server.parse().expect("fallback server parses");
+            assert_eq!(addr.port(), 53, "{server}");
+        }
     }
 }
