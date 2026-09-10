@@ -1,0 +1,255 @@
+# 任务
+
+ID: headless-remote-connectivity
+类型：bug
+状态：paused（2026-09-10 用户暂停，随时可按下一节继续）
+创建：2026-09-10
+更新：2026-09-10
+
+## 一句话描述
+
+Peplink（SDWAN）关闭后，desktop 连接 headless host（Mac Studio / codux-748376f45f5b）绝大多数时间拨号超时、连上后数十秒即断，表现为终端「无法输入」。
+
+## 暂停接手须知（2026-09-10 暂停）
+
+**名字 / 位置**：任务 ID `headless-remote-connectivity`，文件 `.ai/tasks/headless-remote-connectivity.txt`。
+**找回方式**：新会话执行 `/bugfix headless-remote-connectivity`（不带参数则列出 `.ai/tasks/` 下所有任务）。
+
+当前状态一句话：**A（拨号/重连策略）已修完并验证、已装进客户端；剩下的抖动在生产环境那条腿（host 侧 / relay），需要 host 侧证据才能继续。**
+
+已完成：
+- 根因诊断（A 级证据）与 L2 修复 Gate；A 方案已改并验证（D1 端点复用 A/B、D2 退避上限红绿、既有测试 61+31 全绿）。
+- 修复已**提交**：commit `758cedcf`（`fix(remote): keep the controller endpoint warm on a slow relay`，仅动 2 文件：`crates/codux-remote-transport/src/iroh_link.rs`、`apps/desktop/runtime/src/remote/controller_manager.rs`）。要回退用 `git revert 758cedcf`；同一内容的补丁另存于 `.scratch/headless-remote-connectivity/fix.patch`。用户的 WIP 仍全部未提交、未被触碰。
+- 客户端已由用户替换为含修复的本地构建（`/Applications/Codux.app`，版本号仍 2.0.3-beta.9，二进制含 `dials_exhausted`）。实测断连后 **1.2 s** 重连（旧版需数分钟）。
+- 环境侧：`dns_config.yaml` 的 `fake-ip-filter` 加了 `+.dux.plus`、`+.jujiang.me`（已生效）；`Merge.yaml` 的 tun 块试过并已回退（被 GUI 基础配置压掉，同 dns 那次）；静态路由看门狗脚本已写好待安装。
+
+未完成 / 下次接着做：
+1. **host 腿抖动**：需要在 Mac Studio 上跑三条命令（见下文「host 腿待验证」）；若它也被自身代理绕行 → 同招再做一遍。
+2. **直连旁路的长期落地**（用户删掉了临时静态路由，现在链路又走代理 ~0.9 s）：三选一 —— 装 `.scratch/relay-direct/` 的 LaunchDaemon 看门狗 / 把 Clash 模式改 rule / 在 Verge 界面里那个存 `10.10.0.0/16` 的字段追加两个 IP。
+3. **多 relay 冗余**（产品侧）：两端各注册 ≥2 台 relay，任一条活着就能连 —— 用户未定，需要时按 L2 流程开新任务或回本任务继续。
+
+后台还在跑的东西：
+- 观察窗口：`.scratch/observe/watch.sh`（暂停时**已停**），日志 `.scratch/observe/{availability,events}.log`。
+  停：`pkill -f '.scratch/observe/watch.sh'`；重开：`cd <repo> && INTERVAL=60 nohup .scratch/observe/watch.sh >/dev/null 2>&1 &`
+- 探针（临时，未提交，勿删）：`crates/codux-remote-transport/examples/dial_probe.rs`（dial/loop/product/tunnel/readfile/hostlog/watch/relaywatch 模式）。
+- 构建工作树：`/tmp/codux-fix-build`（HEAD 65801753 + 补丁；/tmp 可能被清，补丁已在 `.scratch/` 留底）。
+
+host 腿待验证（在 Mac Studio 上跑）：
+```bash
+route -n get 140.143.238.80 | grep -E "gateway|interface"      # utun* → 它也被自身代理绕行
+curl -sS -o /dev/null -m 10 -w 'relay_ping=%{time_total}s\n' https://iroh-service.dux.plus/ping
+ps aux | grep -cE '[v]erge-mihomo|[c]lash|[s]ing-box|[s]urge'
+```
+自建 relay 侧备查：nginx 反代 WebSocket 需 `proxy_http_version 1.1` + `Upgrade/Connection` 头 + `proxy_read_timeout 3600s`、`proxy_buffering off`（默认 60 s 空闲会掐长连接）。目前我们侧 relay 会话 6 分钟零重连，所以更像 host 腿。
+
+
+## 阶段
+
+paused（A 方案已提交、验证并进入 beta10 本地产物；host/relay 残留等待新证据）
+
+## 自动分级
+
+综合等级：L2
+维度：
+- 复杂度：中（传输层拨号/重连策略，跨 crate + host 配置）
+- 风险：中（触及连接建立与恢复契约）
+- 确定性：中（根因链有 A 级证据；host 侧最后一跳未观测）
+- 可逆性：高（策略参数可回滚）
+- 影响面：模块（desktop 控制器 ↔ host 传输）
+判定依据：命中「需触及共享契约」「多解释未判别（host 腿 vs relay 转发）」
+是否可升级：是
+
+## 能力挂载
+
+- 当前阻塞点：无
+- 默认填写：无
+- 同一时刻最多一个 active
+
+## 任务内容
+
+# 诊断 Gate
+
+## 现象
+
+描述：desktop codux 连 headless host，连接窗口极短且失败占绝大多数；终端无法输入。
+频率：2026-09-09 20:02–23:45 期间 controller_connect ok=20 / failed=116（约每 10 分钟才连上一次）。
+环境：Peplink SDWAN 关闭；desktop 与 Mac Studio 各自独立上网；桌面端 Clash Verge 处于 GLOBAL 模式。
+
+## 复现
+
+状态：reproduced
+方法：用产品真实入口 `codux_remote_transport::RemoteTransportFactory::connect_controller()`（参数取自 desktop 真实 `remote-controllers.json`）在临时探针里拨号，得到与 app 日志一致的失败签名。
+实际：
+- 23:29–23:31 探针 8/8 成功；23:42–23:44 探针连续 15 次 4s/6s/8s 全超时，45s 预算单拨在 30s 内 `timed out`；00:52–01:07 连续 75 次全部成功（同一 host、同一 relay）。
+- 失败时 app 与探针同时失败，成功时同时成功 → 与进程无关，是路径/对端可达性。
+- 单条连接可稳定存活 280s（探针），死因是 host 侧 `stream readiness timeout`（探针未开业务流）。
+- 「连接被关闭后立即重拨」在探针中 1:1 复现为 3 连超时。
+证据等级：A（实际运行 + 复现 + 日志 + 测试输出）
+
+## 边界
+
+last-known-good：Peplink 开启时，desktop 经 SDWAN 直连 host（10.10.10.18:*）可用。
+first-wrong：Peplink 关闭后唯一可用路径是 host 自建 relay `iroh-service.dux.plus`，该路径往返 1.2–1.6s 且 host 在其上以分钟级窗口断续可达；desktop 的拨号预算（4/6/8s）、端点生命周期（3 次失败即销毁重建）与退避（上限 60s）按「快速 relay」调参，无法在这条路径上完成/恢复连接。
+
+## 关键证据
+
+1. host 侧健康：`/Users/mac/.codux-agent/status.json`（经产品 file.read 读取）显示 node 78e214f6…、relay=iroh-service.dux.plus、started 2026-09-08T13:49Z；`/ping` 返回 uptimeMs=150943380 → 151909545，与墙钟同步增长（42.2h 无重启）；host.metrics 显示 CPU 空闲。
+2. 路由唯一：host 的 DNS 发现记录（`_iroh.xdtbj7oyu....dns.iroh.link` TXT）= 只有 `relay=https://iroh-service.dux.plus/`，无任何直连地址；本地保存的 directAddrs 全是死掉的 SDWAN 地址 10.10.10.18:58619/63360/51038；host 不与本机同局域网（局域网入站 peer 为手机，device ddf47e02=荣耀Magic V3）。
+3. 路径慢：relay 路径连接 RTT 1.2–1.6s；TLS 握手 0.7–1.0s（Clash GLOBAL 代理绕行）；对照：手机经 relay 连本机 238–444ms、同局域网直连 8–16ms。
+4. 死窗口内我方无故障：relay 的 HTTP 端点全程 1–2s 正常响应；每次重建 endpoint 的 `iroh_controller online=true`（relay 注册成功）。
+5. 拨号成本：成功拨号 0.7–1.9s（热），冷启动最长 7.2s（第 3 次尝试 8s 预算内成功）→ 首个 4s 预算经常不够。
+
+## 假设
+
+1. 陈述：host 在其自建 relay 上的可达性分钟级断续（host 侧网络/relay 转发），是本轮「无法连接」的直接原因。
+   预测：死窗口内我方 relay 注册正常（已证），relay HTTP 正常（已证），而产物侧任何预算都无法连上（已证 30s 超时）。
+   状态：confirmed（对「host 经该 relay 不可达」这一层）；host 腿 vs relay 转发两者未区分。
+2. 陈述：产品重连策略把可达性抖动放大为分钟级不可用。
+   预测：4s 首拨 + 3 次失败重建 endpoint + 60s 退避 → 恢复时间远大于路径恢复时间。
+   状态：confirmed（日志时序 + 探针复现）。
+
+## 根因
+
+因果链：Peplink 关闭 → 记忆地址（SDWAN）全死 + host 不发布直连地址 → 只剩 host relay 一条路 → 该路径慢（1.2–1.6s RTT，代理绕行）且 host 在其上分钟级断续 → 4s 首拨预算常不够 → 3 次失败即销毁/重建 endpoint（再付 4.5–6s 注册）→ 退避至 60s → 用户看到长时间「无法输入」，偶发窗口内连上后 35–136s 又断。
+first-wrong condition：连接建立/恢复的预算与端点生命周期策略，与「唯一可用路径」的实际特性（慢、间歇可达）不匹配。
+证据等级：A
+已确认：true（产品侧策略失配已确认；host 腿 / relay 转发之争未区分，需 host 或 relay 侧证据）
+
+## 已排除
+
+- 桌面端 relay 注册失败（每次重建均 online=true）
+- relay 服务整体不可用（HTTP 全程正常）
+- host 进程重启/机器睡眠（uptime 42.2h 与墙钟同步；CPU 空闲）
+- mDNS/局域网发现问题（host 不在本机局域网，非本场景路径）
+- 传输库选错/ALPN 不一致（探针用真实入口，路径为 relay，成功时正常）
+- 本机代理导致 UDP 不可用（relay 走 TCP；观察到的连接不依赖 UDP 打洞）
+
+## 待解问题
+
+- host 腿与 relay 转发二者谁在死窗口里失效：需 Mac Studio 上 `~/.codux-agent/codux.log`（72MB，产品 file.read 上限 2MB 读不到）中 `iroh_host online=` / reconnect 段，或 `iroh-service.dux.plus`（自建 relay）侧日志。
+- host 机器的上网链路在 Peplink 关闭后是否仍稳定（是否依赖 Peplink 提供出口）。
+
+## Gate 状态
+
+复现成功：true
+基础设施问题已排除：true
+根因 A 级确认：true
+因果链非空：true
+first-wrong condition 非空：true
+自动分级已写入：true
+诊断 Gate：passed（L2）
+
+## 停止条件
+
+- 根因被反驳
+- 原复现未改善
+- 需新增未授权或无当前证据支持的行为、文件或机制
+- 需超出 allowed_files
+- 需触及 Gate 未声明的共享契约、持久化、并发、安全、构建、发布
+- 生产代码 churn 达到已声明的 scope_fuse
+- 自动分级升级
+
+目标检查通过后冻结生产代码，只完成已授权验证。
+
+## 临时诊断物（不得提交，修复完成后删除）
+
+- `crates/codux-remote-transport/examples/dial_probe.rs`（探针：dial / loop / product / tunnel / readfile / hostlog / watch / relaypair 模式）
+
+## 环境侧发现（2026-09-10 03:00）
+
+Clash Verge TUN 全局代理是这条 relay 路径慢的直接来源（实测，同一 relay）：
+
+| relay | 经 TUN（现状） | 直连 en0（绕 TUN） |
+|---|---|---|
+| iroh-service.dux.plus（host relay） | TLS 0.68s / TTFB 0.98s | TLS 0.085s / TTFB 0.12s |
+| aliyun-1.iroh.jujiang.me | TLS 0.65s / TTFB 0.98s | TLS 0.10s / TTFB 0.15s |
+
+命令：`curl --interface en0 --resolve <host>:443:<real-ip> https://<host>/ping`（真实 IP 由 DoH 查得：dux.plus=140.143.238.80、jujiang=120.79.210.7）。
+结论：关掉 TUN 全局代理/改 rule 模式后，relay 路径 RTT 有望从 1.2–1.6s 降到 0.15–0.3s；拨号预算、QUIC 心跳/路径空闲超时（5s/15s）都不再被代理停顿顶穿。已告知用户，未代其修改 Clash 配置。
+
+## 观察窗口（用户要求保留）
+
+- 进程：hub 名 `codux-observe-window`（detached，restart=on-failure）
+- 脚本：`.scratch/observe/watch.sh`（每 60s 用产品入口探一次 host 可达性；状态翻转时同时抓本地 app 日志与 host 自身 agent 日志尾部）
+- 输出：`.scratch/observe/availability.log`（每次探测一行）、`.scratch/observe/events.log`（翻转事件 + 双边日志）
+- host 日志读取方式：产品 terminal 协议（`terminal.create` + `terminal.input` + `terminal.buffer` tail）——host 的 `~/.codux-agent/codux.log` 72MB，超过 file.read 的 2MB 上限
+
+## 构建（已打包为纯 .app，未替换）
+
+- 工作区：`/tmp/codux-fix-build`（`git worktree` @ HEAD 65801753 + 本修复补丁；用户未提交 WIP 未含入）
+- 交付物：`~/Downloads/Codux.app`（233MB，ad-hoc 签名，`codesign -vvv` 通过，内部含 `dials_exhausted`）；按要求只留 app，dmg/updater tarball 与中转目录已删。
+- 未安装/未替换；用户闲时自行替换。
+- 阻塞点：用户当前工作区编译不过（`apps/desktop/src/terminal/pane.rs:1013` `register_hosted_terminal` 传 5 参、定义 7 参）—— 属用户进行中的 hosted-terminal 重构，不属本任务范围。
+
+## Clash Verge 直连旁路（已改，未激活；已备份、已用副本核心验证）
+
+环境：Clash Verge Rev 2.4.7 + mihomo v1.19.21 darwin arm64（mode=global、TUN utun1024、dns fake-ip）。
+生效链路：订阅 profile → Merge.yaml → GUI 文件 `config.yaml`（TUN）/ `dns_config.yaml`（DNS）→ 生成的 `clash-verge.yaml`。
+
+改动（两处，均为 GUI 管理文件）：
+- `config.yaml` `tun.route-exclude-address`：`10.10.0.0/16` → 追加 `140.143.238.80/32`（iroh-service.dux.plus）、`120.79.210.7/32`（aliyun-1.iroh.jujiang.me）
+- `dns_config.yaml` `dns.fake-ip-filter`（mode=blacklist）：追加 `'+.dux.plus'`、`'+.jujiang.me'`
+
+为何两者都要：fake-ip 下两个 relay 域名会解析成 198.18.x.x，仅排除路由不够；只有域名走真实解析 + 真实 IP 被排除出 TUN 路由，流量才会真正直连。
+
+验证：
+- 用装在同一台机器上的同版本核心测试“合并后的运行配置”→ `configuration file /tmp/clash-candidate.yaml test is successful`；
+- 两文件 YAML 可解析，其它 tun/dns 键完整保留。
+- 激活前基线：`route -n get 140.143.238.80` → utun1024；`dig +short iroh-service.dux.plus` → 198.18.0.63。激活后应为 en0 / 140.143.238.80。
+
+备份：`.scratch/backups/clash-verge-20260910-040522/`（47MB，除 logs/cache.db/window_state.json 外全量）。
+回滚：把备份里 `config.yaml`、`dns_config.yaml` 拷回配置目录即可。
+未做的：没有重载/重启运行中的 Clash（激活由用户触发）。
+
+残留风险：relay IP 变更时需同步改 `route-exclude-address`（域名过滤那半不依赖 IP）；若 Mac Studio 侧也跑同类全局代理，它那条腿仍需同样处理。
+
+## 下一步
+
+A 已提交、验证并进入 beta10 本地产物。任务保持 paused；继续前先取得 host 腿证据，再决定修 host 代理路径、落地直连旁路或另开多 relay 冗余任务。
+
+## 修复结果（A 方案）
+
+改动（allowed_files 内，+50/-4）：
+- `crates/codux-remote-transport/src/iroh_link.rs`：新增 `retire_endpoint_after_failed_dials(relay_online)`，拨号耗尽后仅在「无活 relay」时退休重建 pooled endpoint；新增一行 `dials_exhausted relay_live=.. retired=..` 使该决策可观测。
+- `apps/desktop/runtime/src/remote/controller_manager.rs`：`RECONNECT_MAX_DELAY` 60s → 10s（含依据注释）+ 新测试 `reconnect_retry_stays_prompt_while_the_host_is_away`。
+
+验证证据：
+- D1（真实入口，`PROBE_MODE=product PROBE_BOGUS=1`，对不存在的节点两轮连接）：
+  基线（临时把谓词改回 HEAD 行为）：两轮都是 `iroh_lan_mdns enabled` + `retired=true`，每轮 22.3s（重建）；
+  修复后：第二轮 `iroh_controller endpoint reused` + `retired=false`，18.0s（不重建、不重付 relay 注册）。
+- D2（离线单测）：cap=60s 时 `reconnect_retry_stays_prompt_while_the_host_is_away` FAIL；cap=10s 时 PASS。
+- nearest_regression：`cargo test -p codux-remote-transport` 61 passed；`cargo test -p codux-runtime remote::controller_manager::tests` 31 passed。
+- diff 自审：仅 2 个生产文件；`cargo fmt --check` 对这两个文件无 diff（仓内 controller.rs / runtime_terminal.rs 的 fmt 差异为既有未提交改动，未触碰）。
+
+未覆盖（已知残留）：host 在 relay 上的分钟级不可达本身未被消除——A 只把「恢复时延」从分钟级降到秒级；要消除需要 B（多 relay 冗余）或修 host 侧 relay 连接。
+
+# 修复 Gate（L2）
+
+授权因果单元（一个）：
+desktop 控制器的连接建立/恢复策略与「唯一可用路径 = 慢速且间歇可达的 relay」失配。
+绑定证据：
+- 拨号全部超时后无条件销毁 pooled endpoint（iroh_link.rs:1627 调 `evict_controller_endpoint`），而同一时刻 endpoint 的 relay 是连着的（每轮 `online=true`）；销毁后要重付 relay 注册 4.5–6.0s，且新 endpoint 首轮拨号同样超时（多处 `iroh_lan_mdns enabled` 后紧跟 3 连超时）。
+- 重连退避上限 60s（controller_manager.rs:22）：路径恢复后最坏还要等约 60s + 单轮 ~23s 才重连；实测好窗口下热端点拨号仅 0.7–1.9s。
+不做（本单元之外）：不改拨号阶梯（4/6/8s；成功拨号多数 ≤4s）；不改 host 侧、协议、持久化；不做多 relay 冗余（B）；不做观测性（C）。
+
+allowed_files：
+- crates/codux-remote-transport/src/iroh_link.rs
+- apps/desktop/runtime/src/remote/controller_manager.rs
+
+scope_fuse：生产代码 ≤2 文件、净改动 ≤25 行、无新依赖、无新机制（1 个纯谓词 + 1 个常量值）
+
+defect_check（失败基线 → 修复后通过）：
+- D1 端点复用（真实入口，确定性：拨一个 relay 在线但永不响应的节点）
+  基线：HEAD 上连续两次 connect 失败后日志出现新的 `iroh_lan_mdns enabled`（endpoint 被销毁重建）
+  预期：修复后第二次走 `iroh_controller endpoint reused`，端点 id 不变
+  命令：`PROBE_MODE=product PROBE_DIALS=2 cargo run -p codux-remote-transport --example dial_probe`（节点用不存在的 id、relay 用真实 relay）
+- D2 退避上限（离线单测）
+  命令：`cargo test -p codux-runtime remote::controller_manager::tests`
+  基线：HEAD 上 `next_reconnect_delay(Duration::from_secs(60)) <= Duration::from_secs(10)` 失败
+  预期：修复后通过
+
+nearest_regression_check：
+- `cargo test -p codux-remote-transport`（既有 DialSchedule / 连接生命周期测试不回归）
+- `cargo test -p codux-runtime remote::controller_manager::tests`
+
+回滚方案：两处均为独立分支/常量，改回 60s、恢复无条件 evict 即可。
