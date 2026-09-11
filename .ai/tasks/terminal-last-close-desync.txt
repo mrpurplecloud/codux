@@ -206,9 +206,18 @@ next_action：交付未授权；如需交付，桌面产物变更按 AGENTS.md �
 ## Delivery Gate（用户 2026-09-11 已授权）
 
 authorized_action：提交当前可交付工作树到 `main`；push `lan`；desktop 升 `2.0.3-beta.12` 并打包覆盖 `/Applications/Codux.app`；headless agent 升 `2.0.3-beta.11` 并在 Mac Studio 构建部署。
-target_environment：本机 macOS arm64 `/Applications/Codux.app`；`mac@10.10.10.21`（Mac Studio）headless host。
+target_environment：本机 macOS arm64 `/Applications/Codux.app`；`mac@10.10.10.18`（`Mac-Studio.local`，`10.10.10.21` 为同一机器另一地址）headless host。
 prerequisites：Active Contract frozen；target/regression 通过；用户明确确认范围与目标（本对话）。
-rollback：桌面恢复 `/Applications/Codux.app` beta.11 备份；`git revert <commit>`；host 恢复旧 binary。
-artifact_identity：打包后填（版本 / 架构 / bundle id / 签名 / sha256）。
-state：ready
-result：pending
+rollback：
+- 桌面：`/Applications` 尚未替换（沙箱禁止写入），现仍是 beta.11，无需回滚；beta.11 备份在 `.scratch/delivery/Codux.app.beta11.bak`（工作区内）。
+- git：`git revert 9e3c3c73`。
+- host：把 `/Users/mac/.local/bin/codux.2.0.3-beta.9.bak.20260911065323` 覆盖回 `/Users/mac/.local/bin/codux`，再 `launchctl kickstart -k gui/501/com.codux.host`。
+artifact_identity：
+- desktop `Codux.app` 2.0.3-beta.12，arm64，bundle id `com.duxweb.codux`，ad-hoc 签名，binary UUID `171BB9E1-C08A-3E06-AF17-E035144311DB`；updater tar.gz sha256 `89b99c0cce6053ef3a61a99c566b432944c59688633224b42b1a631f467b75af`。dmg 因本沙箱禁止 `hdiutil`/create-dmg 未生成。
+- agent `codux-macos-aarch64` 2.0.3-beta.11，arm64，sha256 `d0c6a0f70aa8f0461f0e8d9cbeaae0b564d84f3153e7766fba7bdaf5b186864b`。
+state：partial
+result：
+- 提交 `9e3c3c73`，push `lan` 成功（`e58b0b1e..9e3c3c73`）。
+- headless agent 已部署到 `mac@10.10.10.18`：旧 beta.9 备份至 `/Users/mac/.local/bin/codux.2.0.3-beta.9.bak.20260911065323`，新二进制 sha256 与本地一致；服务 `com.codux.host` 已 `kickstart -k`，PID 49031，`codux --version` = 2.0.3-beta.11。
+- desktop 未能覆盖 `/Applications`：本沙箱对 `/Applications` 与 `~/Downloads` 写入均 `Operation not permitted`（`touch` 亦被拒），`osascript` 退出 app 也被拒。制品在 `release-artifacts/darwin-arm64/Codux.app`；由用户执行：`osascript -e 'quit app "Codux"'; rm -rf /Applications/Codux.app; ditto "$PWD/release-artifacts/darwin-arm64/Codux.app" /Applications/Codux.app`。
+- host 远程构建尝试因该机到 GitHub 拉 git 依赖网络失败（partial transfer / revision not found），改用本机同 arm64 macOS 构建并经 sha256 校验的 agent 二进制 scp 部署。
