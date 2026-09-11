@@ -71,6 +71,44 @@ pub struct RemoteTerminalOutputEffect {
     pub baseline_screen_keyframe: Option<bool>,
 }
 
+/// Exact mutation a second terminal emulator must apply after routing one
+/// wire frame. Baselines replace state atomically; accepted live bytes append.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteTerminalEmulatorUpdate {
+    Append(Vec<u8>),
+    Replace {
+        history: Vec<u8>,
+        screen: Vec<u8>,
+        cols: usize,
+        rows: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteTerminalEmulatorResult {
+    pub effects: Vec<RemoteTerminalOutputEffect>,
+    pub update: Option<RemoteTerminalEmulatorUpdate>,
+}
+
+#[derive(Default)]
+struct EmulatorUpdateCapture {
+    appended: Vec<u8>,
+    replace: bool,
+}
+
+impl EmulatorUpdateCapture {
+    fn append(&mut self, bytes: &[u8]) {
+        if !self.replace {
+            self.appended.extend_from_slice(bytes);
+        }
+    }
+
+    fn replace(&mut self) {
+        self.replace = true;
+        self.appended.clear();
+    }
+}
+
 impl RemoteTerminalOutputEffect {
     fn loading(loading: bool, phase: RemoteTerminalBufferPhase, progress: Option<f64>) -> Self {
         Self {
@@ -437,6 +475,35 @@ impl RemoteTerminalOutputRouter {
             .contains_key(session_id)
     }
 
+    /// Cancel only the named request and replay live output parked behind it.
+    /// `None` means the request was not current; a successful cancellation can
+    /// contain no emulator update when no live frame was parked.
+    pub fn cancel_buffer_request(
+        &mut self,
+        session_id: &str,
+        request_id: &str,
+        active_session_id: Option<&str>,
+    ) -> Option<RemoteTerminalEmulatorResult> {
+        if self.active_buffer_request_id(session_id) != Some(request_id) {
+            return None;
+        }
+        self.active_buffer_request_by_session.remove(session_id);
+        self.restore_buffer_request_ids
+            .remove(&buffer_request_key(session_id, request_id));
+        self.assembler.remove(session_id);
+        let held_live = self.session(session_id).abort_baseline();
+        let mut emulator = Some(EmulatorUpdateCapture::default());
+        let mut effects = Vec::new();
+        self.replay_held(
+            held_live,
+            active_session_id,
+            &mut effects,
+            &mut emulator,
+        );
+        let capture = emulator.expect("emulator capture remains present");
+        Some(self.emulator_result(Some(session_id), effects, capture))
+    }
+
     // ---- accept ---------------------------------------------------------
 
     pub fn accept(
@@ -444,7 +511,49 @@ impl RemoteTerminalOutputRouter {
         message: &Value,
         active_session_id: Option<&str>,
     ) -> Vec<RemoteTerminalOutputEffect> {
-        self.accept_inner(message, active_session_id, false)
+        let mut emulator = None;
+        self.accept_inner(message, active_session_id, false, &mut emulator)
+    }
+
+    /// Route one frame and return the exact update needed by a separate
+    /// emulator. The regular [`Self::accept`] path stays allocation-free for
+    /// render output beyond work already required by the shared router.
+    pub fn accept_for_emulator(
+        &mut self,
+        message: &Value,
+        active_session_id: Option<&str>,
+    ) -> RemoteTerminalEmulatorResult {
+        let mut emulator = Some(EmulatorUpdateCapture::default());
+        let effects = self.accept_inner(message, active_session_id, false, &mut emulator);
+        let capture = emulator.expect("emulator capture remains present");
+        let session_id = message.get("sessionId").and_then(Value::as_str);
+        self.emulator_result(session_id, effects, capture)
+    }
+
+    fn emulator_result(
+        &self,
+        session_id: Option<&str>,
+        effects: Vec<RemoteTerminalOutputEffect>,
+        capture: EmulatorUpdateCapture,
+    ) -> RemoteTerminalEmulatorResult {
+        let update = if capture.replace {
+            session_id.and_then(|session_id| {
+                let session = self.sessions.get(session_id)?;
+                let history = session.content().as_bytes().to_vec();
+                let snapshot = session.screen_replay_snapshot();
+                Some(RemoteTerminalEmulatorUpdate::Replace {
+                    history,
+                    screen: snapshot.data.into_bytes(),
+                    cols: snapshot.cols,
+                    rows: snapshot.rows,
+                })
+            })
+        } else if capture.appended.is_empty() {
+            None
+        } else {
+            Some(RemoteTerminalEmulatorUpdate::Append(capture.appended))
+        };
+        RemoteTerminalEmulatorResult { effects, update }
     }
 
     fn accept_inner(
@@ -452,6 +561,7 @@ impl RemoteTerminalOutputRouter {
         message: &Value,
         active_session_id: Option<&str>,
         replaying_held_live: bool,
+        emulator: &mut Option<EmulatorUpdateCapture>,
     ) -> Vec<RemoteTerminalOutputEffect> {
         let payload = match message.get("payload") {
             Some(payload)
@@ -632,6 +742,7 @@ impl RemoteTerminalOutputRouter {
                     decoded.buffer_length,
                     decoded.buffer_end,
                     output_seq,
+                    emulator,
                 );
             }
             let mut effects = Vec::new();
@@ -697,7 +808,7 @@ impl RemoteTerminalOutputRouter {
                     output_seq,
                     decoded.buffer_length,
                 ));
-                self.replay_held(held_live, active_session_id, &mut effects);
+                self.replay_held(held_live, active_session_id, &mut effects, emulator);
                 return effects;
             }
             let active_request_id = self
@@ -720,6 +831,9 @@ impl RemoteTerminalOutputRouter {
             if is_baseline_restore && !baseline_has_renderable_data {
                 if decoded.tail {
                     held_live = self.complete_empty_baseline(session_id, output_seq);
+                    if let Some(emulator) = emulator.as_mut() {
+                        emulator.replace();
+                    }
                     self.active_buffer_request_by_session.remove(session_id);
                     self.remove_restore_request(session_id);
                     if is_active_session {
@@ -748,7 +862,7 @@ impl RemoteTerminalOutputRouter {
                     output_seq,
                     decoded.buffer_length,
                 ));
-                self.replay_held(held_live, active_session_id, &mut effects);
+                self.replay_held(held_live, active_session_id, &mut effects, emulator);
                 return effects;
             }
             if is_baseline_restore {
@@ -761,6 +875,9 @@ impl RemoteTerminalOutputRouter {
                     decoded.buffer_end,
                     output_seq,
                 );
+                if let Some(emulator) = emulator.as_mut() {
+                    emulator.replace();
+                }
             }
 
             if is_baseline_restore || self.content(session_id).is_none() {
@@ -774,6 +891,9 @@ impl RemoteTerminalOutputRouter {
                         decoded.buffer_end,
                         output_seq,
                     );
+                    if let Some(emulator) = emulator.as_mut() {
+                        emulator.replace();
+                    }
                 }
                 self.active_buffer_request_by_session.remove(session_id);
                 self.remove_restore_request(session_id);
@@ -796,6 +916,7 @@ impl RemoteTerminalOutputRouter {
                     decoded.buffer_length,
                     decoded.buffer_end,
                     output_seq,
+                    emulator,
                 );
                 self.active_buffer_request_by_session.remove(session_id);
                 self.remove_restore_request(session_id);
@@ -827,6 +948,7 @@ impl RemoteTerminalOutputRouter {
                 decoded.buffer_length,
                 decoded.buffer_end,
                 output_seq,
+                emulator,
             );
             if is_active_session {
                 effects.push(RemoteTerminalOutputEffect::simple(
@@ -842,7 +964,7 @@ impl RemoteTerminalOutputRouter {
             decoded.buffer_length,
         ));
 
-        self.replay_held(held_live, active_session_id, &mut effects);
+        self.replay_held(held_live, active_session_id, &mut effects, emulator);
         effects
     }
 
@@ -851,10 +973,11 @@ impl RemoteTerminalOutputRouter {
         held_live: Vec<String>,
         active_session_id: Option<&str>,
         effects: &mut Vec<RemoteTerminalOutputEffect>,
+        emulator: &mut Option<EmulatorUpdateCapture>,
     ) {
         for held in held_live {
             if let Ok(message) = serde_json::from_str::<Value>(&held) {
-                let mut more = self.accept_inner(&message, active_session_id, true);
+                let mut more = self.accept_inner(&message, active_session_id, true, emulator);
                 effects.append(&mut more);
             }
         }
@@ -913,6 +1036,7 @@ impl RemoteTerminalOutputRouter {
         buffer_length: Option<i64>,
         buffer_end: Option<i64>,
         output_seq: Option<TerminalSequence>,
+        emulator: &mut Option<EmulatorUpdateCapture>,
     ) {
         let buffer_len = buffer_length.and_then(|value| usize::try_from(value).ok());
         // A pure keyframe owns only the visible grid. Rebuilding through the
@@ -930,12 +1054,15 @@ impl RemoteTerminalOutputRouter {
             self.bump_render(session_id);
             return;
         }
-        self.session(session_id).append_live(
+        let uncovered_start = self.session(session_id).append_live(
             data,
             buffer_len,
             buffer_end.and_then(|value| usize::try_from(value).ok()),
             output_seq,
         );
+        if let Some(emulator) = emulator.as_mut() {
+            emulator.append(&data.as_bytes()[uncovered_start..]);
+        }
         self.bump_render(session_id);
     }
 }
@@ -1265,6 +1392,130 @@ mod tests {
             !screen.contains("baseline-screen"),
             "held keyframe must reconcile after baseline: {screen}"
         );
+    }
+
+    #[test]
+    fn emulator_update_replaces_chunked_baseline_after_interleaved_live_output() {
+        let mut router = RemoteTerminalOutputRouter::new(65_536, 65_536);
+        router.bind_session("session-1", true);
+        router.resize_screen("session-1", 80, 24);
+        assert!(router.start_buffer_request("session-1", "baseline-1", true, true, true));
+
+        let first = router.accept_for_emulator(
+            &json!({
+                "type": "terminal.output",
+                "sessionId": "session-1",
+                "payload": {
+                    "data": "stale-head",
+                    "buffer": true,
+                    "chunked": true,
+                    "snapshotId": "snapshot-1",
+                    "chunkIndex": 0,
+                    "chunkCount": 2,
+                    "offset": 0,
+                    "startOffset": 0,
+                    "bufferLength": 20,
+                    "bufferEnd": 20,
+                    "outputSeq": 10,
+                    "tail": true,
+                    "requestId": "baseline-1",
+                    "screenData": "\x1b[H\x1b[2Jbaseline-screen"
+                }
+            }),
+            Some("session-1"),
+        );
+        assert_eq!(first.update, None);
+
+        let live = router.accept_for_emulator(
+            &json!({
+                "type": "terminal.output",
+                "sessionId": "session-1",
+                "payload": {
+                    "data": "\x1b[Hlatest",
+                    "bufferLength": 26,
+                    "outputSeq": 11
+                }
+            }),
+            Some("session-1"),
+        );
+        assert_eq!(live.update, None);
+
+        let final_chunk = router.accept_for_emulator(
+            &json!({
+                "type": "terminal.output",
+                "sessionId": "session-1",
+                "payload": {
+                    "data": "stale-tail",
+                    "buffer": true,
+                    "chunked": true,
+                    "snapshotId": "snapshot-1",
+                    "chunkIndex": 1,
+                    "chunkCount": 2,
+                    "offset": 10,
+                    "startOffset": 0,
+                    "bufferLength": 20,
+                    "bufferEnd": 20,
+                    "outputSeq": 10,
+                    "tail": true,
+                    "requestId": "baseline-1"
+                }
+            }),
+            Some("session-1"),
+        );
+
+        let Some(RemoteTerminalEmulatorUpdate::Replace {
+            history, screen, ..
+        }) = final_chunk.update
+        else {
+            panic!("completed baseline must produce one replacement");
+        };
+        assert!(String::from_utf8_lossy(&history).ends_with("\x1b[Hlatest"));
+        let screen = String::from_utf8_lossy(&screen);
+        assert!(
+            screen.contains("latestne-screen"),
+            "screen replay: {screen:?}"
+        );
+        assert!(router.has_complete_baseline("session-1"));
+    }
+
+    #[test]
+    fn cancelling_emulator_baseline_replays_held_live_in_sequence_order() {
+        let mut router = RemoteTerminalOutputRouter::new(65_536, 65_536);
+        router.bind_session("session-1", true);
+        assert!(router.start_buffer_request("session-1", "baseline-1", true, true, false));
+
+        for (data, output_seq) in [("two", 2), ("one", 1)] {
+            let result = router.accept_for_emulator(
+                &json!({
+                    "type": "terminal.output",
+                    "sessionId": "session-1",
+                    "payload": {
+                        "data": data,
+                        "bufferLength": 6,
+                        "bufferEnd": output_seq * 3,
+                        "outputSeq": output_seq
+                    }
+                }),
+                Some("session-1"),
+            );
+            assert_eq!(result.update, None);
+        }
+
+        let cancelled = router
+            .cancel_buffer_request("session-1", "baseline-1", Some("session-1"))
+            .expect("current request must cancel");
+        assert_eq!(
+            cancelled.update,
+            Some(RemoteTerminalEmulatorUpdate::Append(b"onetwo".to_vec()))
+        );
+        assert!(!router.has_active_buffer_request("session-1"));
+        assert!(!router
+            .session_ref("session-1")
+            .unwrap()
+            .is_restoring_baseline());
+        assert!(router
+            .cancel_buffer_request("session-1", "baseline-1", Some("session-1"))
+            .is_none());
     }
 
     #[test]

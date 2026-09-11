@@ -55,7 +55,8 @@ pub use capture::{TerminalCapturedInput, TerminalInputSnapshot, TerminalOutputSn
 pub use config::{TerminalLaunchContext, TerminalPtyConfig};
 pub use environment::terminal_environment;
 pub use events::{
-    EventSink, ViewportOwnerResolver, terminal_viewport_local_owner, terminal_viewport_remote_owner,
+    EventSink, ViewportOwnerResolver, terminal_viewport_local_owner,
+    terminal_viewport_remote_device_id, terminal_viewport_remote_owner,
 };
 pub use manager::{DesktopTerminalSessionHandle, TerminalManager};
 pub use platform::default_shell;

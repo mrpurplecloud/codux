@@ -90,7 +90,7 @@ impl TerminalPane {
             TerminalView::new(
                 TerminalViewInput {
                     stdin_writer: writer,
-                    bytes_rx: output_rx,
+                    output_rx: TerminalOutputReceiver::Bytes(output_rx),
                     session_event_rx,
                     session_event_wake_rx,
                     session: session.clone(),
@@ -152,7 +152,7 @@ impl TerminalPane {
             TerminalView::new(
                 TerminalViewInput {
                     stdin_writer: writer,
-                    bytes_rx: output_rx,
+                    output_rx: TerminalOutputReceiver::Events(output_rx),
                     session_event_rx,
                     session_event_wake_rx,
                     session: session.clone(),
@@ -253,7 +253,7 @@ impl TerminalPane {
                         ),
                     );
                 }
-                if output_tx.send_async(bytes).await.is_err() {
+                if output_tx.send_async(TerminalOutputEvent::Append(bytes)).await.is_err() {
                     break;
                 }
             }
@@ -396,7 +396,7 @@ impl TerminalPane {
 
 pub struct PendingTerminalAttach {
     session: TerminalSessionBinding,
-    output_tx: flume::Sender<Vec<u8>>,
+    output_tx: flume::Sender<TerminalOutputEvent>,
     session_event_tx: flume::Sender<TerminalUiEvent>,
     session_event_wake_tx: flume::Sender<()>,
     terminal_id: Option<String>,
@@ -482,7 +482,7 @@ struct TerminalSessionBinding {
 struct HostedTerminalBackend {
     controller: Arc<dyn RuntimeTerminalController>,
     session_id: String,
-    output_tx: flume::Sender<Vec<u8>>,
+    output_tx: flume::Sender<TerminalOutputEvent>,
     session_event_tx: flume::Sender<TerminalUiEvent>,
     session_event_wake_tx: flume::Sender<()>,
     config: TerminalPtyConfig,
@@ -495,6 +495,37 @@ struct HostedViewportAuthority {
     state: codux_terminal_core::TerminalViewportState,
     epoch: u64,
     visible: bool,
+    // Desktop UI consumes owner state and requests its baseline in separate
+    // steps. This bit deduplicates that intent; it never authorizes I/O.
+    needs_owner_baseline: bool,
+}
+
+enum TerminalOutputEvent {
+    Append(Vec<u8>),
+    Replace {
+        history: Vec<u8>,
+        screen: Vec<u8>,
+        cols: usize,
+        rows: usize,
+    },
+}
+
+enum TerminalOutputReceiver {
+    Bytes(flume::Receiver<Vec<u8>>),
+    Events(flume::Receiver<TerminalOutputEvent>),
+}
+
+impl TerminalOutputReceiver {
+    async fn recv(&self) -> Option<TerminalOutputEvent> {
+        match self {
+            Self::Bytes(receiver) => receiver
+                .recv_async()
+                .await
+                .ok()
+                .map(TerminalOutputEvent::Append),
+            Self::Events(receiver) => receiver.recv_async().await.ok(),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -521,6 +552,7 @@ fn awaiting_hosted_viewport(
         },
         epoch,
         visible,
+        needs_owner_baseline: false,
     }
 }
 
@@ -530,7 +562,7 @@ fn register_hosted_terminal(
     session_id: &str,
     viewport: Option<&Arc<Mutex<HostedViewportAuthority>>>,
     epoch: u64,
-    output_tx: &flume::Sender<Vec<u8>>,
+    output_tx: &flume::Sender<TerminalOutputEvent>,
     session_event_tx: &flume::Sender<TerminalUiEvent>,
     session_event_wake_tx: &flume::Sender<()>,
 ) {
@@ -546,7 +578,20 @@ fn register_hosted_terminal(
             }
             match event {
                 codux_runtime::runtime_terminal::RuntimeTerminalStreamEvent::Output(bytes) => {
-                    let _ = output_tx.send(bytes);
+                    let _ = output_tx.send(TerminalOutputEvent::Append(bytes));
+                }
+                codux_runtime::runtime_terminal::RuntimeTerminalStreamEvent::Replace {
+                    history,
+                    screen,
+                    cols,
+                    rows,
+                } => {
+                    let _ = output_tx.send(TerminalOutputEvent::Replace {
+                        history,
+                        screen,
+                        cols,
+                        rows,
+                    });
                 }
                 codux_runtime::runtime_terminal::RuntimeTerminalStreamEvent::Event(mut event) => {
                     if let Some(authority) = authority.as_mut() {
@@ -555,17 +600,30 @@ fn register_hosted_terminal(
                                 if *generation < authority.state.generation => return,
                             TerminalEvent::Viewport {
                                 owner,
+                                owner_label,
                                 cols,
                                 rows,
                                 generation,
                                 ..
                             } => {
+                                let was_local = authority.state.owner == authority.identity;
+                                let is_local = *owner == authority.identity;
                                 authority.state.owner = owner.clone();
+                                authority.state.owner_label =
+                                    if is_local { None } else { owner_label.clone() };
                                 authority.state.cols = *cols;
                                 authority.state.rows = *rows;
                                 authority.state.generation = *generation;
+                                if !is_local {
+                                    authority.needs_owner_baseline = false;
+                                } else if !was_local {
+                                    authority.needs_owner_baseline = true;
+                                }
                             }
-                            TerminalEvent::Error { .. } => authority.state.owner.clear(),
+                            TerminalEvent::Error { .. } => {
+                                authority.state.owner.clear();
+                                authority.needs_owner_baseline = false;
+                            }
                             _ => {}
                         }
                         if let TerminalEvent::Viewport { owner, .. } = &mut event
@@ -591,7 +649,7 @@ fn restore_hosted_session(
     config: &TerminalPtyConfig,
     viewport: Option<&Arc<Mutex<HostedViewportAuthority>>>,
     epoch: u64,
-    output_tx: &flume::Sender<Vec<u8>>,
+    output_tx: &flume::Sender<TerminalOutputEvent>,
     session_event_tx: &flume::Sender<TerminalUiEvent>,
     session_event_wake_tx: &flume::Sender<()>,
 ) -> Result<String, String> {
@@ -731,7 +789,7 @@ impl TerminalSessionBinding {
         &self,
         controller: Arc<dyn RuntimeTerminalController>,
         session_id: String,
-        output_tx: flume::Sender<Vec<u8>>,
+        output_tx: flume::Sender<TerminalOutputEvent>,
         session_event_tx: flume::Sender<TerminalUiEvent>,
         session_event_wake_tx: flume::Sender<()>,
         config: TerminalPtyConfig,
@@ -905,7 +963,7 @@ impl TerminalSessionBinding {
         expected_epoch: u64,
         controller: Option<Arc<dyn RuntimeTerminalController>>,
         session_id: Option<String>,
-        output_tx: Option<flume::Sender<Vec<u8>>>,
+        output_tx: Option<flume::Sender<TerminalOutputEvent>>,
         session_event_tx: Option<flume::Sender<TerminalUiEvent>>,
         session_event_wake_tx: Option<flume::Sender<()>>,
     ) {
@@ -1122,12 +1180,45 @@ impl TerminalSessionBinding {
             (inner.hosted.clone(), inner.last_resize)
         };
         if let Some(hosted) = hosted
-            && hosted.viewport.is_some()
+            && let Some(viewport) = hosted.viewport.as_ref()
         {
-            if self.local_viewport_owns()
-                && let Some((cols, rows)) = last_resize
+            let (epoch, needs_baseline) = {
+                let mut viewport = viewport.lock();
+                if viewport.state.owner != viewport.identity {
+                    return Ok(());
+                }
+                (
+                    viewport.epoch,
+                    std::mem::take(&mut viewport.needs_owner_baseline),
+                )
+            };
+            if let Some((cols, rows)) = last_resize
+                && !hosted
+                    .controller
+                    .terminal_resize(&hosted.session_id, cols, rows)
             {
-                self.resize(cols, rows)?;
+                self.fail_hosted(epoch, "failed to resize hosted terminal before baseline");
+                return Err(anyhow::anyhow!(
+                    "failed to resize hosted terminal before baseline"
+                ));
+            }
+            if !needs_baseline {
+                return Ok(());
+            }
+            {
+                let viewport = viewport.lock();
+                if viewport.epoch != epoch || viewport.state.owner != viewport.identity {
+                    return Ok(());
+                }
+            }
+            if !hosted.controller.terminal_buffer_tail(&hosted.session_id) {
+                let mut viewport = viewport.lock();
+                if viewport.epoch == epoch && viewport.state.owner == viewport.identity {
+                    viewport.needs_owner_baseline = true;
+                }
+                return Err(anyhow::anyhow!(
+                    "failed to request hosted terminal baseline"
+                ));
             }
             return Ok(());
         }
@@ -1163,6 +1254,7 @@ impl TerminalSessionBinding {
             return;
         }
         viewport.state.owner.clear();
+        viewport.needs_owner_baseline = false;
         let _ = hosted.session_event_tx.send(TerminalUiEvent::Viewport {
             remote_owner: true,
             generation: viewport.state.generation,
@@ -1186,6 +1278,7 @@ impl TerminalSessionBinding {
             let mut viewport = viewport.lock();
             if !matches!(command, HostedViewportCommand::Renew) {
                 viewport.state.owner.clear();
+                viewport.needs_owner_baseline = false;
                 let _ = hosted.session_event_tx.send(TerminalUiEvent::Viewport {
                     remote_owner: true,
                     generation: viewport.state.generation,

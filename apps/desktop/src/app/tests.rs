@@ -8,6 +8,7 @@ use crate::{
             project_badge_text_from_name, ssh_connect_command,
         },
         shortcuts::{normalized_shortcut_text, shortcut_matches},
+        terminal_actions::stale_terminal_pane_indices,
         terminal_state::{
             TerminalSplitDirection, normalize_terminal_restore_state, structural_terminal_layout,
             terminal_pane_terminal_id, terminal_panes_are_foreign_to_owner, terminal_restore_plan,
@@ -17,7 +18,7 @@ use crate::{
         },
         terminal_worktree_actions::active_terminal_slot_indices,
         terminal_worktree_actions::restored_live_active_terminal_id,
-        types::{TerminalPanePlan, TerminalTabPlan},
+        types::{TerminalPanePlan, TerminalPaneSlot, TerminalTabPlan},
         ui_helpers::restored_terminal_preview_lines,
         workspace_views::{terminal_pane_drop_target_at_position, terminal_pane_rect},
     },
@@ -925,4 +926,51 @@ fn file_search_status_message_reports_match_position() {
         "file search has no matches"
     );
     assert_eq!(file_search_status_message(1, 3), "file search match 2 of 3");
+}
+
+fn lone_pane(terminal_id: &str) -> Vec<TerminalPaneSlot> {
+    vec![TerminalPaneSlot {
+        title: "Only".to_string(),
+        terminal_id: Some(terminal_id.to_string()),
+        pane: None,
+        restored_output_bytes: 0,
+        restored_output_tail: String::new(),
+    }]
+}
+
+#[test]
+fn stale_pane_indices_keep_pane_while_layout_still_owns_it() {
+    let panes = lone_pane("terminal-only");
+    let layout_ids = std::collections::HashSet::from(["terminal-only".to_string()]);
+    assert!(stale_terminal_pane_indices(&panes, None, &layout_ids).is_empty());
+}
+
+#[test]
+fn stale_pane_indices_tear_down_the_last_pane_when_layout_is_empty() {
+    // Regression: the reconcile loop used to stop at `panes.len() > 1`, so a
+    // controller closing the only terminal in a worktree left the dead pane (and
+    // its takeover placeholder) behind. An empty authoritative layout must drop
+    // the final pane too.
+    let panes = lone_pane("terminal-only");
+    let layout_ids = std::collections::HashSet::new();
+    assert_eq!(
+        stale_terminal_pane_indices(&panes, None, &layout_ids),
+        vec![0]
+    );
+}
+
+#[test]
+fn stale_pane_indices_fall_back_to_the_tab_terminal_id() {
+    let panes = vec![TerminalPaneSlot {
+        title: "Legacy".to_string(),
+        terminal_id: None,
+        pane: None,
+        restored_output_bytes: 0,
+        restored_output_tail: String::new(),
+    }];
+    let layout_ids = std::collections::HashSet::new();
+    assert_eq!(
+        stale_terminal_pane_indices(&panes, Some("tab-terminal"), &layout_ids),
+        vec![0]
+    );
 }

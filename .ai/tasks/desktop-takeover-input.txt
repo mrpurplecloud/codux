@@ -1,0 +1,155 @@
+# 任务
+
+ID: desktop-takeover-input
+类型：bug
+状态：active
+创建：2026-09-10
+更新：2026-09-11
+一句话描述：移动端控制的远程项目被桌面端接管后，桌面端仍无法输入。
+
+## 等级
+
+grade：Guarded
+依据：根因跨 hosted viewport ownership、异步 terminal stream、共享 baseline assembler / output sequence 与 desktop emulator publication；涉及共享 runtime trait 和多个现有调用点。
+升级触发证据：未修改版本稳定复现；两个最小失败测试分别锁定 owner 转本机后未请求 baseline，以及 chunked baseline 与交错 live output 未原子收敛。
+
+## Active Contract
+
+state：locked
+
+### 目标
+
+移动端正在控制远程 Codex 等 TUI 终端时，桌面端接管成功后立即保持既有输入与 resize 能力，同时用 host authoritative baseline 原子收敛当前 screen；桌面输入可见地出现在同一 agent 会话。普通 shell 接管行为保持正常。
+
+### 证据
+
+未修改 `/Applications/Codux.app` 2.0.3-beta.10 对 beta.9 host 稳定复现：Codex pane 接管后桌面输入 `z` 无显示；同项目 shell pane 相同步骤立即显示。手机重新打开 Codex pane 可见该 `z`，而桌面再次接管仍不可见，证明输入已到 PTY，desktop current screen 未收敛。失败测试 `hosted_local_viewport_refresh_requests_current_screen_baseline` 实际仅记录 resize、缺少 baseline；失败测试 `requested_chunked_baseline_reconciles_before_interleaved_live_output` 显示较新的 `latest` 被后续 baseline history 覆盖为 `lateststale-tail`。根因证据 A。
+
+### 授权变更
+
+仅授权修复一个因果单元：desktop hosted-terminal consumer 的 authoritative baseline reconciliation。owner 转本机后保持既有交互权限，先 flush resize，再请求一次 tail baseline；共享 `RemoteTerminalOutputRouter` 负责 chunk assembly、sequence、baseline 期间 live hold 与取消时 live 恢复；完整 baseline 作为 replace 事件按同一 FIFO 交给 desktop emulator。不得增加 screen-publication readiness gate，不得修改 host 或 mobile 行为。
+
+### 范围
+
+owner / invariant：host-confirmed `HostedViewportAuthority.state.owner` 继续唯一决定 desktop input / resize 权限；`RemoteTerminalOutputRouter` 唯一拥有 baseline assembly、sequence、held-live 与 overlap 语义；`TerminalModel` 只负责按 stream FIFO 原子应用 `Replace`。`needs_owner_baseline` 仅去重 desktop 分层事件产生的 baseline intent，不参与权限判断。
+allowed_files：`crates/codux-terminal-core/src/lib.rs`、`crates/codux-terminal-core/src/remote_output_router.rs`、`crates/codux-terminal-core/src/remote_pty.rs`、`apps/desktop/runtime/src/remote/controller.rs`、`apps/desktop/runtime/src/runtime_terminal.rs`、`apps/desktop/src/terminal/pane.rs`、`apps/desktop/src/terminal/model.rs`、`apps/desktop/src/terminal/tests/pty_binding.rs`。`apps/desktop/src/terminal/view.rs` 与 `apps/desktop/src/terminal/tests/render_snapshot.rs` 仅允许删除本任务已产生的 readiness/publication 与格式 diff，最终不得保留行为修改。
+out_of_scope：移动端接管桌面端的反向路径；host / agent / protocol wire 行为；普通 shell 行为变更；历史 terminal lane 拥塞；项目连接、发布及其他终端交互问题。
+delivery_metadata：用户要求构建可替换的本机测试 app，并确认桌面、移动端、headless 按实际改动独立升版。本次仅 `apps/desktop/Cargo.toml` 与 `Cargo.lock` 中 `codux` 升至 `2.0.3-beta.11`；headless `2.0.3-beta.10`、mobile `2.0.3-beta.10+58` 保持不变。另有用户单独授权的版本惯例改动共存于 `AGENTS.md`、`docs/version-compatibility.md`、desktop release 脚本/测试及 agent release workflow，不属于本 bug 因果修复。
+
+### 验证
+
+baseline：保留两个修复前失败测试输出；设备对照为 shell 成功 1/1、Codex 失败 1/1、手机可见桌面输入而桌面再次接管仍不可见。
+target_check：`cargo test -p codux-runtime requested_chunked_baseline_reconciles_before_interleaved_live_output -- --nocapture` 与 `cargo test -p codux hosted_local_viewport_refresh_requests_current_screen_baseline -- --nocapture` 均通过；owner 转本机后 input / resize 立即可用且 resize 先于一次 baseline request；构建后的 desktop 同设备步骤中 Codex current screen 收敛并显示后续输入。
+nearest_regression_check：运行 `cargo test -p codux-runtime remote::controller::tests::terminal_ -- --nocapture`、`cargo test -p codux managed_hosted_viewport -- --nocapture`、新增/受影响 `codux-terminal-core` router 专项；验证 baseline send failure / cancel 按 sequence 释放 held live 到同一 FIFO；设备检查同项目 shell 接管仍可输入，未接管 agent pane 仍可输入，mobile owner 时 desktop 仍拒绝输入。
+broader_check_reason：命中共享 runtime trait、多调用点及异步 baseline/live 顺序；只扩大到所有实际 trait 实现、stream consumer 和 baseline/live 顺序测试。
+broader_checks：`cargo check -p codux-runtime -p codux-terminal-core`；`cargo check -p codux`；枚举 `RuntimeTerminalController`、`RuntimeTerminalStreamEvent`、`register_terminal_stream` 全部 caller 并确认 exhaustive match。
+
+## 当前阶段
+
+phase：fix
+
+# Diagnosis
+
+## 现象与复现
+
+环境：桌面端为当前本机运行的 `/Applications/Codux.app` 2.0.3-beta.10；当前已激活远程项目 `beizhentang`（project id `6df67ad0-6ab9-5921-89e8-58b45105d982`），host 为 `Mac-Studio.local` / `10.10.10.21`，运行 Codux 2.0.3-beta.9。另可取证远程项目为 `wiki-open`、`wiki-private`、`VGBridge`。
+步骤：移动端先控制终端；桌面端接管；分别尝试向普通 shell 与 agent 会话输入。
+实际：普通 shell 可输入；agent 会话不能输入。
+期望：两类终端均可在桌面端接管后输入。
+频率：当前 Codex pane 复现 1/1；同轮 shell 对照成功 1/1
+结果：failed
+基础设施问题：false（项目已由用户手动激活；SSH 到 host 成功。独立 controller 探针无法连接，不能替代当前产品连接，但不阻塞当前 UI 复现）。
+
+## 真实链
+
+last-known-good：host authoritative current screen 已含桌面输入的 `z`；手机重新订阅同一 session 可见。
+first-wrong：desktop 收到 owner=`remote:<desktop>` 后发布本机 owner 并解除接管态，但 `refresh_local_viewport_if_current_owner()` 仅 resize、不请求 current-screen baseline；即使 baseline 到达，`ControllerInner::route()` 逐 chunk 前送 raw history、在 history 非空时丢弃首 chunk `screenData`，且不处理 `outputSeq`，使后到 history 覆盖交错的新 live output。
+因果链：手机持有 viewport 时 Codex 在 host grid 更新 -> desktop emulator 停留旧 screen -> Force claim 返回本机 owner -> desktop 只 resize 并立即开放 render/input -> 无 owner baseline 请求 -> 后续 `z` 虽进入 PTY 并更新 host screen，desktop 无 authoritative keyframe；现有 buffer 路径又丢 keyframe且非原子逐 chunk回放 -> TUI current screen持续陈旧。shell 单字符 echo 仅靠增量 raw output可见，故对照正常。
+观察证据：用户明确纠正症状方向，并提供同项目 shell 成功、agent 会话失败的运行对照。2026-09-10 20:44 左右在未修改安装版本完成 Codex pane 实时复现：手机先接管；桌面点击“在此接管”；接管遮罩消失；立即输入单字符 `z` 且未回车，界面无反应。随后同一 `beizhentang` 普通 shell pane 执行相同步骤：遮罩消失，输入 `z` 立即显示。该同轮对照确认接管权威 state、桌面文本输入入口与该 remote host 的共享 transport 可工作；差异缩小到 agent pane 的会话绑定、PTY 输入接受或 TUI 输出回传。桌面运行日志确认该时段激活 `beizhentang`，恢复 hosted pane `...-2b35ee1f-a037-49b8-886d-0f2bc4fc6d34`；恢复后用户返回当前项目。host 进程树确认 quiet shell PTY `ttys005` 位于 `beizhentang`，Codex PTY `ttys008`（PID 93710）从该 UI 项目终端内已切换 cwd 到 `VGBridge`；session-id 到 PTY 的最终映射待实时动作确认。host 历史日志含 995,147 条发送给当前桌面设备 `MPC MBP` 的 `Agent transport send failed: stream=terminal`，control lane 仅 2 条；文件最后更新于 18:29:49，本轮动作未产生匹配日志。该无时间戳历史证据证明 desktop terminal output lane 曾严重拥塞，但不能证明当前输入或回显丢失。安装二进制包含 `hosted terminal viewport command failed`、`Take over` 与 hosted authority 实现字符串，确认运行产物包含 HEAD 中已提交的 hosted viewport owner 路径。现有 `managed_hosted_viewport_` 4 项测试通过。
+
+## 竞争解释（仅仍有歧义时，最多两个）
+
+1. explanation：agent TUI 已收到桌面输入，但其 redraw 没有经 live output 或后续 current-screen baseline 正确恢复到桌面 emulator。
+   prediction：手机重新订阅 host current screen 可看到桌面输入的字符；桌面原 pane 不更新。切走再切回后，若字符出现则 live output 丢失；仍不出现则 desktop baseline 丢弃 `screenData` 的 TUI 恢复路径错误。
+   discriminating_check：重新激活 desktop Codex pane 检查字符；并对含非空 raw history 与 current `screenData` 的 baseline 做未修改代码路径测试。
+   result：手机重新打开失败 Codex pane 后看到桌面输入的 `z`，确认 desktop 输入已到 host 且 Codex 已更新 current screen；桌面随后再次接管同一 pane，接管遮罩消失后仍看不到已有 `z`，确认 current-screen baseline 未恢复到 desktop emulator。
+   state：active
+
+2. explanation：none；接管后输入被 desktop/backend/host 丢弃的解释已被运行证据排除。
+   prediction：若该解释成立，手机重新订阅时不会看到桌面输入字符。
+   discriminating_check：手机重新打开失败 Codex pane并检查 current screen。
+   result：手机可见 `z`，解释不成立。
+   state：rejected
+
+## 根因
+
+statement：desktop hosted terminal 绕过共享 remote-output reconciliation：本机 ownership transition 没有启动 baseline intent，controller 也把 baseline 当普通 byte chunks 并丢弃 authoritative `screenData`。因此 ownership 与 emulator publication可分离，TUI 接管后持续显示旧 screen。
+first-wrong condition：本机 owner state 被接受时，`TerminalSessionBinding` 将 authority 视为可交互，但没有 pending/current-screen publication 状态，也没有调用已存在的 `terminal_buffer_tail()`；若 buffer 到达，`ControllerInner::route()` 在 `data` 非空时选择 raw data并忽略 `screenData`。
+evidence_grade：A
+evidence_reference：未修改设备复现；`cargo test -p codux hosted_local_viewport_refresh_requests_current_screen_baseline -- --nocapture` 失败，actual `['resize:terminal-1:100x30']`、expected 还含 `baseline:terminal-1`；`cargo test -p codux-runtime requested_chunked_baseline_reconciles_before_interleaved_live_output -- --nocapture` 失败，current screen 为 `lateststale-tail`。
+
+## 其他
+
+excluded：此前“移动端接管桌面端后移动端无法输入”的解释已被用户反驳。
+missing_information：none；session-id/PTY 最终映射不再影响因果判断，因为同一输入已由手机 current-screen直接观察。
+completion：complete
+
+# Fix
+
+## Owner 与 invariant
+
+owner：host-confirmed viewport owner 判定交互权限；`RemoteTerminalOutputRouter` 判定 inbound output 如何收敛；`TerminalModel` 应用已判定的原子替换。
+invariant：本机 owner 到达即恢复既有交互；owner transition 只发起一次 baseline intent。chunked baseline 完整组装并吸收/排序交错 live output后，以 replace 事件进入同一 output FIFO；无独立 screen-ready/publication 状态。
+
+## 选中修复
+
+现成正确路径证据：移动端 `apps/mobile/lib/screens/home/state/terminal.dart` 在 owner 确认为本机后立即恢复交互，先 flush resize，再请求 owner baseline；chunk、sequence、held-live 与 gap 交给共享 `RemoteTerminalOutputRouter`，renderer直接读取 router snapshot，不等待 baseline publication。提交 `e969b00a`、`eb50bb85`、`7b822f12` 分别固定 handoff restore、atomic baseline restore 与单一 transport invariant owner。
+机制：desktop 复用同一语义。在现有 runtime trait 暴露 `terminal_buffer_tail()`；本机 owner refresh 先发 resize，再以小型 `needs_owner_baseline` 协调位请求一次带 request id 的 baseline，不改变交互权限。`RemoteController` 仅在有限 baseline transaction 中启用共享 `RemoteTerminalOutputRouter`，普通 live 保持原 direct path；router生成 `Append` 或 `Replace { history, screen }`。desktop stream FIFO承载 append/replace；model replace 清空旧 emulator并恢复 history与 authoritative keyframe。请求发送失败时 router按 sequence恢复 held live，再由 controller在同一 output serialization lock 内投递 `Append`。
+为何最小充分：复用 mobile owner/baseline时序、现有 host buffer wire contract、现有 shared router与 `HeadlessTerminalScreen` restore primitives；只新增 desktop 事件分层所需 intent 去重位和已有 stream 的 `Replace` 变体。删除 `screen_ready`、`baseline_pending`、`baseline_serial`、`HostedBaselinePublication`、snapshot generation gate及重复 `baseline_sessions`。
+备选：host 在 Force 后主动推 keyframe，排除：需同时修改 desktop host与 headless agent，旧 beta.9 host不受益，并与 mobile现有 owner-baseline请求重复。只在 controller 首 chunk转发 `screenData`，排除：修复前交错测试证明后续 history可覆盖较新 live；会再造 shared router已有状态机。
+
+## 实际风险
+
+共享契约：`RuntimeTerminalStreamEvent`、`RuntimeTerminalController`；实际实现共 3 个（生产 `RemoteController`、生产 `WslRuntimeClient`、测试 `HostedTestController`），exhaustive match已枚举。WSL 无 hosted viewport identity，继续走默认 byte-stream，baseline 方法默认返回 false。
+并发 / ownership：baseline chunks、live output与 viewport state异步交错；router持有并排序 live，controller在单个 output serialization lock 内投递 router结果。发送失败不得清空 held live。
+兼容：legacy `register_terminal_output` adapter仍接收 bytes；unmanaged runtime默认 baseline method返回 false但不走 managed hosted readiness路径。
+数据 / 持久化 / 安全：none。
+回滚：纯代码，无迁移；回退上述文件即可。
+verification_only：owner转移后即时 input/resize；resize-before-baseline；请求去重；multi-chunk首 chunk keyframe；baseline间交错live；send failure/cancel held-live恢复；Replace不丢更新的 UI resize intent；旧epoch；shell direct增量输出；所有 trait/event caller编译。
+out_of_scope：host主动推 baseline、mobile router/UI、output ACK/gap主动重试、历史拥塞。
+
+## Stop 与新版 Gate
+
+stop evidence：首次生产修改后审查发现 current diff 含 locked `allowed_files` 未列文件及可丢 held live 的 send-failure窗口。随后现成路径调查确认 mobile 已有更简单正确 handoff：owner 本机后立即交互，resize后请求 baseline，全部输出收敛交给共享 router；当前 desktop diff 的 publication readiness状态机重复职责并改变成熟 shell 输入/resize时机。
+旧 Gate 被反驳字段：目标中“先显示 screen 再允许输入”、owner/readiness invariant、publication gate机制、范围、风险、验证及保留现有骨架建议均失效。
+当前生产 diff：10 个文件，`+1109/-178`；尚未 commit、push、安装。`cargo check -p codux-runtime` 通过；`codux-terminal-core` router 专项 22 项通过；desktop owner target 1 项通过；runtime target 被两个旧测试字段引用编译错误阻断。其余验证未运行。
+新版目标：采用上方 Active Contract；本机 owner 后立即交互，screen异步原子收敛。
+新版证据：原设备与 red测试不变；新增 mobile路径与三个历史提交证据；新增 send-failure可达窗口。
+新版授权变更：采用上方复用机制；删除 publication gate；router取消 baseline时按既有 sequence恢复 held live，并把 append与后续 stream event放入同一 FIFO；不得新增 host/mobile行为或主动 gap retry。
+新版范围：采用上方 allowed files；`view.rs` 与 `render_snapshot.rs` 只回滚本任务过度设计，不保留行为 diff。
+新版验证：删除 publication-before-unlock断言；改为 owner本机后立即允许 input/resize、resize-before-baseline、atomic replacement、send-failure held-live与 shell direct path。
+差异：目标不再新增等待语义；删除四类 readiness/publication协调状态及重复 transaction集合；保留 baseline请求、共享 router和 atomic replace所需最小路径；补齐取消失败语义。
+现有 diff 建议：替换而非保留 publication骨架；只保留能直接绑定 root-cause测试的 router/replace部分，回滚其余本任务格式与状态机 diff。
+approval：approved；用户于 2026-09-10 明确要求“好，继续修复”。
+
+## 修改前方案审查
+
+1. 现成正确路径：pass；mobile handoff与 shared router提供可复用语义，新机制只保留 desktop事件分层所需 `needs_owner_baseline`。
+2. owner / 机制绑定 A 级证据：pass；baseline request补第一个失败点，共享 router + atomic replace补第二个失败点。
+3. 重复职责反驳：pass；删除 screen readiness/publication owner及重复 baseline session集合，不与 router或 viewport owner竞争。
+4. 验证充分性：pass；两项根因测试、send-failure、所有 caller编译、managed owner专项和 shell/Codex设备对照覆盖目标与最近契约。
+
+## 能力（仅选中时）
+
+blocker：none
+logical_capability：none
+resolved_skill：none
+state：complete
+result：未挂载外部工程能力。
+
+## Checkpoint
+
+latest_verified：修复前设备链及两项 red 保留。两项 target、baseline send-failure、owner retry/deadlock、atomic Replace、更新 UI resize intent 均通过；`codux-terminal-core` 139/139、`codux-runtime` 518/518（4 ignored）、desktop `pty_binding` 15/15、`codux` 256/256、headless `codux-agent` 56/56、mobile Rust FFI 12/12、mobile Dart FFI 7/7 通过；相关 cargo check、release version policy、agent packaging、desktop packaging 测试通过。desktop 独立升至 `2.0.3-beta.11`；headless 与 mobile 版本未变。最终本机测试包已移动到 `/Users/mac/Downloads/Codux.app`；ad-hoc 签名有效，bundle id `com.duxweb.codux`，arm64 UUID `E8A08A77-C248-353E-8F36-0A703890D755` 与 `target/release/codux` 匹配。未覆盖 `/Applications/Codux.app`，设备修复结果待用户替换后验证。
+contract_state：locked
+active_capability：none
+next_action：由用户把 `/Users/mac/Downloads/Codux.app` 替换到 `/Applications/Codux.app` 并启动；复测 Codex 接管后 current screen/输入、同项目 shell、mobile owner 时 desktop拒绝输入；通过后冻结 Gate并完成最终审计，并把 compatibility record 从 pending 改为 verified。

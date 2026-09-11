@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn viewport_state_payload_includes_owner_label() {
+    let support_dir = temp_support_dir("codux-remote-viewport-owner-label");
+    write_paired_remote_settings(&support_dir);
+    let runtime = RemoteHostRuntime::new(support_dir.clone());
+    let state = TerminalViewportState {
+        owner: terminal_viewport_remote_owner("device-1"),
+        cols: 80,
+        rows: 24,
+        generation: 3,
+        owner_label: None,
+    };
+
+    let payload = runtime.terminal_viewport_state_payload("session-1", Some("device-1"), &state);
+    assert_eq!(
+        payload.get("ownerLabel").and_then(Value::as_str),
+        Some("Phone"),
+        "viewport state must carry the paired device name for the takeover placeholder"
+    );
+
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
 fn terminal_baseline_viewport_does_not_steal_from_other_owner() {
     let support_dir = temp_support_dir("codux-remote-terminal-baseline-no-steal");
     write_paired_remote_settings(&support_dir);
@@ -243,6 +266,7 @@ fn viewport_state_marks_stale_output_per_viewer() {
     runtime.handle_terminal_event(TerminalEvent::Viewport {
         session_id: session_id.clone(),
         owner: "desktop".to_string(),
+        owner_label: None,
         cols: 100,
         rows: 32,
         generation: 1,

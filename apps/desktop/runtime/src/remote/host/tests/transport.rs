@@ -1310,6 +1310,7 @@ fn viewport_events_do_not_broadcast_terminal_list() {
     runtime.handle_terminal_event(TerminalEvent::Viewport {
         session_id: session_id.clone(),
         owner: "desktop".to_string(),
+        owner_label: None,
         cols: 100,
         rows: 32,
         generation: 1,

@@ -8,6 +8,12 @@ pub type RuntimeTerminalEventForwarder = Box<dyn Fn(TerminalEvent) + Send + Sync
 #[derive(Clone, Debug)]
 pub enum RuntimeTerminalStreamEvent {
     Output(Vec<u8>),
+    Replace {
+        history: Vec<u8>,
+        screen: Vec<u8>,
+        cols: usize,
+        rows: usize,
+    },
     Event(TerminalEvent),
 }
 pub type RuntimeTerminalStreamForwarder = Arc<dyn Fn(RuntimeTerminalStreamEvent) + Send + Sync>;
@@ -60,6 +66,9 @@ pub trait RuntimeTerminalController: Send + Sync {
         false
     }
     fn terminal_viewport_release(&self, _session_id: &str) -> bool {
+        false
+    }
+    fn terminal_buffer_tail(&self, _session_id: &str) -> bool {
         false
     }
 }
@@ -137,5 +146,9 @@ impl RuntimeTerminalController for crate::remote::RemoteController {
 
     fn terminal_viewport_release(&self, session_id: &str) -> bool {
         crate::remote::RemoteController::terminal_viewport_release(self, session_id)
+    }
+
+    fn terminal_buffer_tail(&self, session_id: &str) -> bool {
+        crate::remote::RemoteController::terminal_buffer_tail(self, session_id)
     }
 }

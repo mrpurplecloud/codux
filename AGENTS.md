@@ -2,6 +2,17 @@
 
 These rules supplement global agent instructions for this repository.
 
+## Product Versioning
+
+- Desktop, mobile, and headless agent are independently versioned products.
+  Bump only products whose shipped artifact changes; never synchronize versions
+  merely because another product releases.
+- Rebuilding an unchanged product may retain its existing version. A source
+  change included in that product's shipped artifact requires its own bump.
+- Record cross-product requirements and verified combinations in
+  `docs/version-compatibility.md`. Equal version numbers never imply
+  compatibility.
+
 ## State-Machine Convergence
 
 Apply this section only when reproduced evidence or an accepted contract shows

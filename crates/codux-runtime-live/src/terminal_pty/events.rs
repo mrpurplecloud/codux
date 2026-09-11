@@ -50,6 +50,17 @@ pub fn terminal_viewport_remote_owner(device_id: &str) -> String {
     format!("remote:{}", device_id.trim())
 }
 
+/// Inverse of [`terminal_viewport_remote_owner`]: the paired device id behind a
+/// remote owner string, or `None` when the owner is local/unknown. Hosts use it
+/// to look up the friendly device name for the viewport-state payload.
+pub fn terminal_viewport_remote_device_id(owner: &str) -> Option<&str> {
+    owner
+        .trim()
+        .strip_prefix("remote:")
+        .map(str::trim)
+        .filter(|device_id| !device_id.is_empty())
+}
+
 pub(super) fn terminal_viewport_owner(owner: &str) -> String {
     let owner = owner.trim();
     if owner.is_empty() {

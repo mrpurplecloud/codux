@@ -55,7 +55,7 @@ enum TerminalInternalEvent {
 impl TerminalModel {
     fn new<W>(
         stdin_writer: W,
-        bytes_rx: flume::Receiver<Vec<u8>>,
+        output_rx: TerminalOutputReceiver,
         session_event_rx: flume::Receiver<TerminalUiEvent>,
         session_event_wake_rx: flume::Receiver<()>,
         config: &TerminalConfig,
@@ -119,9 +119,9 @@ impl TerminalModel {
             ..TerminalScreenSnapshot::default()
         });
         let reader_task = cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            while let Ok(bytes) = bytes_rx.recv_async().await {
+            while let Some(event) = output_rx.recv().await {
                 if this
-                    .update(cx, |model, cx| model.receive_output(bytes, cx))
+                    .update(cx, |model, cx| model.receive_output_event(event, cx))
                     .is_err()
                 {
                     break;
@@ -197,6 +197,70 @@ impl TerminalModel {
             written_bytes: None,
             _reader_task: reader_task,
         }
+    }
+
+    fn receive_output_event(&mut self, event: TerminalOutputEvent, cx: &mut Context<Self>) {
+        match event {
+            TerminalOutputEvent::Append(bytes) => self.receive_output(bytes, cx),
+            TerminalOutputEvent::Replace {
+                history,
+                screen,
+                cols,
+                rows,
+            } => self.replace_output(history, screen, cols, rows, cx),
+        }
+    }
+
+    fn replace_output(
+        &mut self,
+        history: Vec<u8>,
+        screen: Vec<u8>,
+        cols: usize,
+        rows: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_output_replacement(history, screen, cols, rows);
+        self.request_snapshot_publish(cx);
+    }
+
+    fn apply_output_replacement(
+        &mut self,
+        history: Vec<u8>,
+        screen: Vec<u8>,
+        cols: usize,
+        rows: usize,
+    ) {
+        // Router replacement already includes every live frame held during
+        // baseline assembly. Any older append backlog is covered by it.
+        self.pending_output_bytes.clear();
+        let has_pending_resize = self
+            .events
+            .iter()
+            .any(|event| matches!(event, TerminalInternalEvent::Resize { .. }));
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+        if !has_pending_resize {
+            self.window_size.num_cols = cols as u16;
+            self.window_size.num_lines = rows as u16;
+        }
+        if self.handle.resize(cols, rows) {
+            self.last_engine_resize_at = Some(Instant::now());
+        }
+        {
+            let mut terminal = self.handle.screen.lock();
+            terminal.clear();
+            terminal.process_replay(&history);
+            if !screen.is_empty() {
+                terminal.replace_visible_with_keyframe(&screen);
+            }
+        }
+        self.selection.clear();
+        self.restored_bootstrap_active = false;
+        self.sync_output_depth = 0;
+        self.sync_output_pending_notify = false;
+        self.sync_output_scan_tail.clear();
+        self.notify_scan_tail.clear();
+        self.snapshot_dirty = true;
     }
 
     fn receive_output(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {

@@ -1,0 +1,206 @@
+# 任务
+
+ID: viewport-owner-label
+类型：bug
+状态：done
+创建：2026-09-11
+更新：2026-09-11
+一句话描述：桌面端接管占位只显示通用「平板/手机」，不显示控制方设备型号/名称。
+
+## 等级
+
+grade：Guarded
+依据：跨 host（desktop / agent）到 controller 的 viewport-state 共享 wire 契约，以及 `TerminalEvent::Viewport` 事件字段；多文件、多调用点。
+升级触发证据：本任务触及跨产品 JSON 契约与共享事件枚举；新增 payload 测试在未修改版本失败。
+
+## Active Contract
+
+state：frozen
+
+### 目标
+
+当另一台设备（手机/平板）持有桌面端正在查看的远程项目终端 viewport 时，桌面端接管占位显示该设备的真实名称/型号（如设备已登记），不再退化为按 grid 长宽比推断的通用「平板/手机」。设备名称未知时可保持现有通用回退。
+
+### 证据
+
+复现（未修改版本，A）：新增测试 `apps/desktop/runtime/src/remote/host/tests/terminal_viewport.rs::viewport_state_payload_includes_owner_label` 断言 `terminal_viewport_state_payload(...)["ownerLabel"] == "Pixel 9"`；未修改版本该 key 不存在，测试失败。
+
+因果链：
+1. desktop-as-controller 场景下，桌面 pane 的 `viewport_owner_label()` 读 `HostedViewportAuthority.state.owner_label`（`apps/desktop/src/terminal/pane.rs:1356`）。
+2. 该 state 只由 controller 转发的 `TerminalEvent::Viewport` 更新；`TerminalEvent::Viewport` 没有 label 字段（`crates/codux-terminal-core/src/terminal_driver.rs:64-71`）。
+3. host 侧 `terminal_viewport_state_payload`（desktop，`terminal_buffer.rs:126`）与 `viewport_state_payload`（agent，`terminals.rs:517`）都不发送 `ownerLabel`。
+4. 因此 controller 端 `owner_label` 恒为 `None`；`render.rs:83` 回退到按 `model_rows >= model_cols` 推断的 `terminal.handoff.phone/tablet` → 用户只看到「平板」。
+5. host 侧其实已具备设备名称来源：desktop `RemoteHostRuntime::device_name_for`（cached_devices），agent `device_store`（PairedDevice.name），且 `state.owner` 编码 `remote:<device_id>`。
+
+first-wrong：viewport-state wire payload 缺 `ownerLabel`，且 `TerminalEvent::Viewport` 不承载该值，controller 无法把 host 已知的设备名送到接管占位。
+
+现有正确路径证据（Guarded 前置）：
+- host 本地（desktop-as-host）路径已有正确实现：`handle_terminal_viewport_claim` / `resize_terminal_viewport_from_envelope` 调 `set_viewport_owner_label(session_id, owner, device_name_for(device_id))`，本地 pane 的 `viewport_owner_label()` 能取到名称。缺的只是把它送到远端 controller。
+- 设备名来源已有：desktop `device_name_for` 查 `cached_devices`；agent `device_store::list()` 的 `PairedDevice.name`。
+- `state.owner` 已有稳定格式 `remote:<device_id>`（`terminal_viewport_remote_owner`），无需新增标识机制。
+- 该 payload 为 JSON，新增可选字段向后兼容：旧 controller 忽略新 key；缺 key 时 `None` → 现有通用回退不变。
+
+### 授权变更
+
+只授权一个因果单元：让 viewport owner 名称沿既有 viewport-state 通道到达桌面接管占位。最小改动：
+- host：desktop / agent 的 viewport-state payload 增加 `ownerLabel`（从 `state.owner` 解析 device id，查已登记设备名；未知则 null）。
+- 事件：`TerminalEvent::Viewport` 增加可选 `owner_label`，controller 解析 payload 时带入；`register_hosted_terminal` 写入 `authority.state.owner_label`。
+- 不改 viewport 所有权/lease 语义、不改接管按钮逻辑、不改移动端、不新增设备名来源或注册机制。
+
+### 范围
+
+owner / invariant：host 的 device-name store 唯一拥有「设备显示名」；`terminal.viewport.state` payload 唯一拥有向 controller 传递 viewport 状态（含 owner 名称）。invariant：controller 渲染接管占位时，owner 名称若 host 已知则必须与 host 一致；未知时保持通用回退。
+allowed_files：`crates/codux-terminal-core/src/terminal_driver.rs`、`crates/codux-runtime-live/src/terminal_pty/events.rs`（+ re-export）、`apps/desktop/runtime/src/remote/host/terminal_buffer.rs`、`apps/desktop/runtime/src/remote/controller.rs`、`apps/desktop/runtime/src/remote/host/terminal_state.rs`、`apps/desktop/src/terminal/pane.rs`、`apps/agent/src/terminals.rs`、以及受 `TerminalEvent::Viewport` 新字段影响的构造点（`crates/codux-terminal-pty/src/lib.rs`、`crates/codux-runtime-live/src/terminal_pty/session.rs`、`apps/desktop/runtime/src/wsl/client.rs`、`apps/agent/src/runtime_stdio/terminal.rs`）与相关测试文件。
+out_of_scope：移动端占位 label；设备重命名 UX；viewport 权限/lease；`device_name_for` 的缓存刷新策略；symptom-1 收敛任务 `terminal-last-close-desync`。
+
+### 验证
+
+baseline：`cargo test -p codux-runtime viewport_state_payload_includes_owner_label` 在未修改版本失败（payload 无 `ownerLabel`）。
+target_check（通过）：
+- `cargo test -p codux-runtime viewport_state_payload_includes_owner_label` → ok（host 解析 `remote:device-1` 并带上已登记名 `Phone`）。
+- `cargo test -p codux-runtime terminal_stream_preserves_output_viewport_order` → ok（controller 把 `ownerLabel` 带进 `TerminalEvent::Viewport`；缺省为 none）。
+- `cargo test -p codux hosted_viewport_exposes_remote_owner_label` → ok（pane 的 authority 暴露 label；本地身份不保留 stale label）。
+nearest_regression_check（通过）：`cargo test -p codux pty_binding` → 16 passed；`cargo test -p codux app::tests` → 27 passed。
+broader_check_reason：命中跨产品 JSON 契约与共享 `TerminalEvent` 枚举，按 §9 检查实际消费者。
+broader_checks：`cargo check -p codux-terminal-core -p codux-runtime-live`、`cargo check -p codux-runtime -p codux-agent`、`cargo check -p codux` 全部通过；`cargo test -p codux-agent` 51 passed / 5 failed，5 项均为 PTY 基础设施失败（`failed to spawn shell`），未修改版本同样失败。
+基础设施未决项：任何需要 spawn PTY 的 host/agent 测试在本沙箱 `openpty Operation not permitted`，记 infrastructure。
+
+### 自审三问
+
+1. 每个生产修改是否直接服务授权目标和证据？
+   是。host payload 增加 `ownerLabel`（desktop/agent），事件增加可选字段并透传到 pane authority；未新增设备名来源或注册机制。
+2. 是否有越界行为、未授权机制、隐藏兜底或已声明相邻回归？
+   无。未改 viewport 权限/lease、接管按钮、移动端；字段可选、旧 peer 忽略、缺省回退不变。
+3. 证据是否证明目标和最近契约？
+   是。payload 测试证明 host 输出名称；controller 测试证明事件带 label（含缺省）；pty_binding 测试证明 pane 拿到 label 且本地身份清除；编译与回归全绿。
+
+### Guarded 反驳检查
+
+claim：把 `ownerLabel` 加在共享 `TerminalEvent::Viewport` 上会破坏 WSL/stdio 事件 wire。
+probe：检查该枚举的所有生产构造/解析点，确认 `TerminalEvent` 只 `derive(Serialize)`、WSL/stdio 均为手写 JSON 而非依赖该枚举反序列化。
+evidence：`cargo check -p codux-terminal-core -p codux-runtime-live -p codux-runtime -p codux-agent -p codux` 全绿；WSL 解析用 `params.get("ownerLabel").and_then(Value::as_str)`，缺省 None。
+disposition：clear。
+
+claim：controller 本地设备名缓存可以替代 host 管道。
+probe：controller 只知道 host 设备，viewport owner 是另一个 controller（手机/平板），其名称登记在 host 的 device store。
+evidence：`device_name_for` 在 host `cached_devices`、agent `device_store`；controller 侧无该登记。
+disposition：clear（必须由 host 提供）。
+
+## Guarded Fix
+
+### 现有正确路径证据
+
+examined_existing_paths：
+- desktop-as-host 本地路径已正确解析名称：`handle_terminal_viewport_claim` / `resize_terminal_viewport_from_envelope` → `set_viewport_owner_label(..., device_name_for(device_id))`（`terminal_dispatch.rs:451-456`、`506-511`），本地 pane `viewport_owner_label()` 可读。缺的只是把它送到远端 controller。
+- agent host 已有名称来源：`apps/agent/src/device_store.rs::list()` 的 `PairedDevice.name`。
+- owner 标识已有稳定格式 `remote:<device_id>`（`terminal_viewport_remote_owner`）；本次只加逆函数 `terminal_viewport_remote_device_id`，未新标识机制。
+- viewport-state payload 为 JSON 消息；新增可选字段是既有 channel 的加法扩展，旧 peer 忽略、缺 key 回退。
+reuse_decision：reuse `device_name_for`（desktop）/`device_store::list`（agent）+ `remote:<id>` 格式；extend-existing `terminal.viewport.state` payload 与 `TerminalEvent::Viewport`
+decision_evidence：本地已能取到名称、host 已登记设备名、payload 已是 JSON；缺口只是「字段未传」这一处。
+
+### 根因与 owner
+
+causal_chain：见 Active Contract「证据」。
+first-wrong condition：viewport-state payload 未输出 `ownerLabel`。
+A_evidence：`viewport_state_payload_includes_owner_label` 未修改版本失败（key 为 None）。
+owner：host 的 device-name store（desktop `cached_devices` / agent `device_store`）拥有名称；`terminal.viewport.state` payload 拥有传递。
+invariant：controller 渲染接管占位时，owner 名称若 host 已知必须与 host 一致；未知保持通用回退。
+
+### 授权机制
+
+causal_unit：viewport owner 名称从 host device store 沿既有 viewport-state 通道到达桌面接管占位。
+mechanism：
+1. host payload 增加 `ownerLabel`：desktop 由 `state.owner_label` 或 `device_name_for(remote:<id>)` 解析；agent 由 `device_store::list()` 解析。
+2. `TerminalEvent::Viewport` 增加可选 `owner_label`（serde default/skip），controller 从 payload 填入；`register_hosted_terminal` 写入 `authority.state.owner_label`（本地身份时为 None）。
+evidence_binding：payload 测试绑定 host 输出；controller 测试绑定事件透传；pty_binding 测试绑定 pane 读取。
+why_minimal_and_sufficient：复用既有名称来源与既有 channel，只加一个可选字段和一次解析；不新增消息、存储或权限机制。
+
+### 备选（仅真实存在时）
+
+alternatives：
+- 只改进 grid 长宽比/类型推断：无法给出设备型号/名称，不满足目标；排除。
+- controller 本地查名字：owner 是另一个 controller，其名字登记在 host，controller 无此数据；排除。
+- 新增独立 `terminal.viewport.owner` 消息：与既有 viewport-state 同源且需额外生命周期/顺序处理，重复现有职责；排除。
+
+### 实际命中风险
+
+contract / data / concurrency / compatibility / rollback：跨产品 JSON 契约；字段可选、旧 peer 忽略、缺省回退不变；事件枚举为纯 Serialize 且所有构造点已更新。回滚 = 还原字段与 payload。
+verification_only：none
+out_of_scope：移动端占位显示、设备重命名 UX、viewport 权限。
+
+### 修改前方案审查
+
+existing_path_check：pass — 复用既有 `device_name_for`/`device_store` 与 payload channel；未新增重复机制。
+owner_and_evidence：host store 是名称 owner，payload 是通道 owner；绑定失败测试与代码路径。
+semantic_scope：足以让桌面占位显示名称，未夹带权限/移动端问题。
+verification_power：host payload + controller 透传 + pane authority 三层测试 + 编译/回归。
+result：pass
+
+## 当前阶段
+
+phase：fix
+
+# Diagnosis
+
+## 现象与复现
+
+环境：repo HEAD `e58b0b1e`；用户报告桌面端接管占位显示「平板」。
+步骤：host 侧生成 viewport-state payload（已登记设备名）；检查是否带 ownerLabel。
+实际：payload 无 ownerLabel；controller 端 owner_label 恒 None，渲染回退通用类型。
+期望：payload 带 `ownerLabel`，controller 把它送到 pane，占位显示设备名。
+频率：always（controller 角色）。
+结果：failed
+基础设施问题：none（本症状不依赖 PTY；GUI 真机复现受会话限制，用 payload/转发测试替代）。
+
+## 真实链
+
+last-known-good：desktop-as-host 本地路径（`set_viewport_owner_label` + 本地 `viewport_owner_label`）能显示名称。
+first-wrong：viewport-state payload 未携带 `ownerLabel`。
+因果链：见 Active Contract「证据」。
+观察证据：`terminal_viewport_state_payload` / `viewport_state_payload` 字段列表；`TerminalEvent::Viewport` 定义；`render.rs` 回退分支。
+
+## 竞争解释（仅仍有歧义时，最多两个）
+
+1. explanation：只是 grid 长宽比推断把手机判成平板，设备名其实已送到。
+   prediction：controller 的 `owner_label` 应为 Some。
+   discriminating_check：检查 payload 是否含 ownerLabel / 事件是否带 label。
+   result：payload 与事件都没有该值，owner_label 恒 None。
+   state：rejected
+
+## 根因
+
+statement：viewport owner 的友好名称只在 host 本地有，没有沿 `terminal.viewport.state` 通道传给 controller；`TerminalEvent::Viewport` 也没有 label 字段，导致 desktop-as-controller 的接管占位只能按 grid 长宽比回退到通用「平板/手机」。
+first-wrong condition：`terminal_viewport_state_payload`/`viewport_state_payload` 不输出 `ownerLabel`。
+evidence_grade：A（payload 测试）+ B（事件/渲染代码路径）
+evidence_reference：新增 `viewport_state_payload_includes_owner_label`；`terminal_buffer.rs:126`；`apps/agent/src/terminals.rs:517`；`terminal_driver.rs:64`；`render.rs:83`。
+
+## 其他
+
+excluded：grid 推断本身（未知设备时仍作为回退保留）；移动端 UI；设备注册/配对。
+missing_information：用户真机型号与设备是否显示为已登记名称（不影响契约修复）。
+completion：complete
+
+## 能力（仅选中时）
+
+blocker：无
+logical_capability：none
+resolved_skill：none
+state：unavailable
+result：none
+
+## Checkpoint
+
+latest_verified：host payload 带 `ownerLabel`；controller 事件透传（含缺省）；pane authority 暴露并清除 label；codux/pty_binding/app tests 与跨 crate check 全绿；PTY 依赖项记 infrastructure。
+contract_state：frozen
+active_capability：none
+next_action：交付未授权；桌面、agent 产物均有源码变更，如需交付按 AGENTS.md 独立升版并走 delivery Gate。
+
+## Delivery Gate（用户 2026-09-11 已授权）
+
+authorized_action：提交当前可交付工作树到 `main`；push `lan`；desktop 升 `2.0.3-beta.12` 并打包覆盖 `/Applications/Codux.app`；headless agent 升 `2.0.3-beta.11` 并在 Mac Studio 构建部署（本任务的 `ownerLabel` 必须 host 侧生效）。
+target_environment：本机 macOS arm64 `/Applications/Codux.app`；`mac@10.10.10.21`（Mac Studio）headless host。
+prerequisites：Active Contract frozen；target/regression 通过；用户明确确认范围与目标（本对话）。
+rollback：桌面恢复 `/Applications/Codux.app` beta.11 备份；`git revert <commit>`；host 恢复旧 binary。
+artifact_identity：打包后填（版本 / 架构 / bundle id / 签名 / sha256）。
+state：ready
+result：pending

@@ -98,5 +98,102 @@ assert.match(
 );
 assert.ok(!fs.existsSync(path.join(tempDir, "missing-release-notes.md")));
 
+const fixtureRoot = path.join(tempDir, "independent-versioning");
+for (const directory of [
+  "apps/desktop",
+  "apps/desktop/runtime",
+  "apps/agent",
+  "apps/wrapper-helper",
+  "apps/mobile",
+]) {
+  fs.mkdirSync(path.join(fixtureRoot, directory), { recursive: true });
+}
+fs.writeFileSync(
+  path.join(fixtureRoot, "apps/desktop/Cargo.toml"),
+  '[package]\nname = "codux"\nversion = "1.0.0"\n',
+);
+fs.writeFileSync(
+  path.join(fixtureRoot, "apps/desktop/runtime/Cargo.toml"),
+  '[package]\nname = "codux-runtime"\nversion = "1.0.1"\n',
+);
+fs.writeFileSync(
+  path.join(fixtureRoot, "apps/agent/Cargo.toml"),
+  '[package]\nname = "codux-agent"\nversion = "1.0.2"\n',
+);
+fs.writeFileSync(
+  path.join(fixtureRoot, "apps/wrapper-helper/Cargo.toml"),
+  '[package]\nname = "codux-wrapper-helper"\nversion = "1.0.3"\n',
+);
+fs.writeFileSync(
+  path.join(fixtureRoot, "apps/mobile/pubspec.yaml"),
+  "version: 1.0.4+5\n",
+);
+fs.writeFileSync(
+  path.join(fixtureRoot, "Cargo.lock"),
+  [
+    '[[package]]\nname = "codux"\nversion = "1.0.0"',
+    '[[package]]\nname = "codux-runtime"\nversion = "1.0.1"',
+    '[[package]]\nname = "codux-agent"\nversion = "1.0.2"',
+    '[[package]]\nname = "codux-wrapper-helper"\nversion = "1.0.3"',
+  ].join("\n\n") + "\n",
+);
+for (const changelog of ["CHANGELOG.md", "CHANGELOG.zh-CN.md"]) {
+  fs.writeFileSync(
+    path.join(fixtureRoot, changelog),
+    "## [3.4.5-beta.6]\n\n- fixture\n",
+  );
+}
+
+const independentVersionResult = spawnSync(
+  "node",
+  [path.join(root, "apps/desktop/scripts/release/prepare-release.mjs"), "v3.4.5-beta.6", "beta"],
+  {
+    cwd: fixtureRoot,
+    env: {
+      ...process.env,
+      RELEASE_NOTES_PATH: path.join(fixtureRoot, "dist", "release-notes.md"),
+    },
+    encoding: "utf8",
+  },
+);
+
+assert.equal(
+  independentVersionResult.status,
+  0,
+  independentVersionResult.stderr || independentVersionResult.stdout,
+);
+assert.match(
+  fs.readFileSync(path.join(fixtureRoot, "apps/desktop/Cargo.toml"), "utf8"),
+  /version = "3\.4\.5-beta\.6"/,
+);
+assert.match(
+  fs.readFileSync(path.join(fixtureRoot, "apps/desktop/runtime/Cargo.toml"), "utf8"),
+  /version = "1\.0\.1"/,
+);
+assert.match(
+  fs.readFileSync(path.join(fixtureRoot, "apps/agent/Cargo.toml"), "utf8"),
+  /version = "1\.0\.2"/,
+);
+assert.match(
+  fs.readFileSync(path.join(fixtureRoot, "apps/wrapper-helper/Cargo.toml"), "utf8"),
+  /version = "1\.0\.3"/,
+);
+assert.match(
+  fs.readFileSync(path.join(fixtureRoot, "apps/mobile/pubspec.yaml"), "utf8"),
+  /version: 1\.0\.4\+5/,
+);
+const fixtureLock = fs.readFileSync(path.join(fixtureRoot, "Cargo.lock"), "utf8");
+assert.match(fixtureLock, /name = "codux"\nversion = "3\.4\.5-beta\.6"/);
+assert.match(fixtureLock, /name = "codux-runtime"\nversion = "1\.0\.1"/);
+assert.match(fixtureLock, /name = "codux-agent"\nversion = "1\.0\.2"/);
+assert.match(fixtureLock, /name = "codux-wrapper-helper"\nversion = "1\.0\.3"/);
+
+const agentWorkflow = fs.readFileSync(
+  path.join(root, ".github/workflows/release-agent.yml"),
+  "utf8",
+);
+assert.doesNotMatch(agentWorkflow, /prepare-release\.mjs/);
+assert.match(agentWorkflow, /apps\/agent\/Cargo\.toml/);
+
 fs.rmSync(tempDir, { recursive: true, force: true });
 console.log("prepare-release notes test passed");

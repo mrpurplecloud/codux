@@ -28,7 +28,8 @@ use codux_runtime_live::remote_terminal_dispatch::{
 };
 use codux_runtime_live::terminal_pty::{TerminalManager, TerminalPtyConfig};
 use codux_runtime_live::terminal_pty::{
-    TerminalViewportState, terminal_viewport_local_owner, terminal_viewport_remote_owner,
+    TerminalViewportState, terminal_viewport_local_owner, terminal_viewport_remote_device_id,
+    terminal_viewport_remote_owner,
 };
 use codux_terminal_core::TerminalEvent;
 use serde_json::{Value, json};
@@ -520,15 +521,34 @@ fn viewport_state_payload(
     device_id: Option<&str>,
     state: &TerminalViewportState,
 ) -> Value {
+    // The driver-level event only knows the owner id; the friendly name lives in
+    // the paired-device store. Resolve it here so controllers can label the
+    // "handed off" placeholder instead of falling back to "phone"/"tablet".
+    let owner_label = state.owner_label.clone().or_else(|| {
+        terminal_viewport_remote_device_id(&state.owner).and_then(device_name_for)
+    });
     json!({
         "sessionId": session_id,
         "owner": state.owner,
+        "ownerLabel": owner_label,
         "cols": state.cols,
         "rows": state.rows,
         "generation": state.generation,
         "staleOutput": device_id.is_some() && fanout_state.is_stale(session_id, device_id),
         "outputSeq": fanout_state.current_seq(session_id),
     })
+}
+
+fn device_name_for(device_id: &str) -> Option<String> {
+    let device_id = device_id.trim();
+    if device_id.is_empty() {
+        return None;
+    }
+    crate::device_store::list()
+        .into_iter()
+        .find(|device| device.id == device_id)
+        .map(|device| device.name)
+        .filter(|name| !name.trim().is_empty())
 }
 
 fn handle_agent_terminal_event(
@@ -575,6 +595,7 @@ fn handle_agent_terminal_event(
         TerminalEvent::Viewport {
             session_id,
             owner,
+            owner_label,
             cols,
             rows,
             generation,
@@ -584,7 +605,7 @@ fn handle_agent_terminal_event(
                 cols,
                 rows,
                 generation,
-                owner_label: None,
+                owner_label,
             };
             for viewer in fanout_state.viewers(&session_id) {
                 let mut envelope = json!({

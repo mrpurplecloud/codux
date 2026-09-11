@@ -1,0 +1,214 @@
+# 任务
+
+ID: terminal-last-close-desync
+类型：bug
+状态：done
+创建：2026-09-11
+更新：2026-09-11
+一句话描述：控制器（移动端）关闭 worktree 布局中的最后一个终端后，桌面端仍保留指向已死会话的 split，显示接管占位，点击接管无反应。
+
+## 等级
+
+grade：Guarded
+依据：跨 host 布局持久化（TerminalLayoutService）、host close 派发与 desktop reconcile/pane 收敛；触及共享持久化布局、多调用点和状态机。
+升级触发证据：本任务即由 53a2ef74 的「控制器关闭 worktree 最后一个终端应拆掉桌面 split」契约未完整实现触发；新增测试在未修改版本失败。
+
+## Active Contract
+
+state：frozen
+
+### 目标
+
+控制器关闭某个 worktree 布局中的最后一个终端后，桌面端在同一作用域不再保留指向该已关闭会话的 split/终端；接管占位随之下线，点击接管不再出现无响应的死面板。普通多 pane 关闭、桌面本机关闭、移动端行为保持既有。
+
+### 证据
+
+复现（未修改版本，A）：新增测试 `apps/desktop/runtime/src/remote/host/tests/terminal_lifecycle.rs::remote_terminal_close_clears_layout_when_last_terminal_is_removed` 失败，输出 `persisted layout still lists the closed terminal: [TerminalPaneSummary { title: "Only", terminal_id: "terminal-only" }]`。该测试不 spawn PTY，绕开本沙箱 openpty 受限（`Operation not permitted`）的基础设施问题。
+
+因果链：
+1. 控制器 `terminal.close` → `RemoteHostRuntime::handle_terminal_close` 杀掉会话并调用 `remove_remote_terminal_from_layout`。
+2. 该函数 load 布局、retain 掉 terminal_id；当这是布局中最后一个终端时 `after_total == 0`。
+3. 它调用 `TerminalLayoutService::save_summary(key, 空布局)`；`sanitize_terminal_layout` 对空 `top_panes` 返回 `None`，`save_summary` 返回 `Err("Terminal layout is empty.")`，调用方 `let _ =` 丢弃 → 持久化布局仍是旧值（仍含已死 terminal_id）。
+4. `publish_remote_terminal_layout_changed` 照常触发；desktop `reconcile_remote_terminal_layout` 重新 load 布局，`layout_ids` 仍含该死 id → 不删 pane。
+5. 即使布局已空/缺失（controller 角色由 `apply_hosted_workspace_update` 正确 delete；或修好第 3 步后），`reconcile_remote_terminal_layout` 的 `while tab.panes.len() > 1` 也永不处理最后一个 pane → pane 仍滞留。
+6. 滞留 pane 绑定已死会话：`local_viewport_owns()` 为 false → 渲染接管占位；点击接管走 `restore_local_viewport()` 对已死会话必然失败，只 `eprintln!`，UI 无反馈。
+
+first-wrong：`remove_remote_terminal_from_layout` 在 `after_total == 0` 时用会拒绝空布局的 `save_summary` 持久化，并丢弃失败（host 角色）；以及 `reconcile_remote_terminal_layout` 的 `while tab.panes.len() > 1` 永不拆最后一个 pane（controller 角色及修好前者后仍阻塞）。
+
+现有正确路径证据（Guarded 前置）：
+- 同一收敛语义在 `apply_hosted_workspace_update`（desktop-as-controller）里已有正确路径：`after_total == 0` 时 `layout_service.delete(&layout_key)`，不走 `save_summary`。host 侧可复用同一 `delete`。
+- 空布局/无布局在 `TerminalLayoutService::load` + `terminal_restore_plan_for_language` 已有正确路径：返回空 summary，restore 时生成默认终端。
+- 已接受契约：commit `53a2ef74` 明确「a controller closing the LAST terminal of a worktree now tears down the desktop split too」，且 reconcile 注释写明「fall through and tear the now-stale desktop panes down instead of leaving an orphaned dead pane behind」。
+- 既有测试 `remote_terminal_close_removes_layout_entry_and_kills_last_terminal` 当前断言 `layout.top_panes.len() == 1` 且仍是 session_a —— 它把 stale 行为写成了期望，修复时需一并更正为期望收敛。
+
+证据等级：A（失败测试直读 persisted layout）+ B（reconcile guard 与 wire/代码路径）。
+
+### 授权变更
+
+只授权一个因果单元：让「控制器关闭 worktree 最后一个终端」在 host 持久化与 desktop pane 两端都收敛。最小改动为：
+- host：`remove_remote_terminal_from_layout` 在 `after_total == 0` 时删除该 layout（复用已存在的 `TerminalLayoutService::delete`），不改 `save_summary`/`sanitize_terminal_layout` 的共享契约。
+- desktop：`reconcile_remote_terminal_layout` 在布局不再包含某 pane 的 terminal_id 时，允许拆掉该 tab 的最后一个 pane（含空布局）；保持空 pane 列表可渲染的既有路径。
+不新增机制、不改 protocol wire、不改移动端、不改 viewport 所有权语义。
+
+### 范围
+
+owner / invariant：`TerminalLayoutService` 唯一拥有「布局里还有什么终端」的持久化；`reconcile_remote_terminal_layout` 唯一拥有「桌面 pane 集合向持久化布局收敛」。invariant：控制器关闭终端成功后，持久化布局与桌面 pane 集合都不再引用该 terminal_id。
+allowed_files：`apps/desktop/runtime/src/remote/host/terminal_buffer.rs`、`apps/desktop/src/app/terminal_actions.rs`、`apps/desktop/runtime/src/remote/host/tests/terminal_lifecycle.rs`。如需为一个可测的收敛纯函数加 seam，再声明 `apps/desktop/src/app/terminal_state.rs` 与 `apps/desktop/src/app/tests.rs`。
+out_of_scope：移动端 UI/关闭入口行为；viewport 接管权限与 label 语义；`save_summary`/`sanitize_terminal_layout` 对空布局的通用契约；其他 close 路径；设备标签问题（单独任务 `viewport-owner-label`）。
+
+### 验证
+
+baseline：`cargo test -p codux-runtime remote_terminal_close_clears_layout_when_last_terminal_is_removed` 在未修改版本失败（persisted layout 仍含 `terminal-only`）。
+target_check（通过）：
+- `cargo test -p codux-runtime remote_terminal_close_clears_layout_when_last_terminal_is_removed` → ok（host 持久化收敛）。
+- `cargo test -p codux stale_pane_indices` → 3 passed（空布局/缺 id ⇒ 拆最后一个 pane；布局仍拥有 ⇒ 保留）。
+nearest_regression_check（通过）：`cargo test -p codux-runtime terminal_layout` → 15 passed；`cargo test -p codux app::tests` → 27 passed。
+broader_check_reason：命中持久化布局共享契约，按 §9 检查 controller 侧 `apply_hosted_workspace_update` 行为不被破坏。
+broader_checks：`cargo test -p codux-runtime terminal_layout` 覆盖 `save_from_gpui_rejects_empty_layout_without_overwriting_existing_layout`、restore/scope 等既有契约，全绿。
+基础设施未决项：`remote::host::tests::terminal_lifecycle` 中需要 spawn PTY 的用例在本沙箱 openpty `Operation not permitted`（含既有 `remote_terminal_close_removes_layout_entry_and_kills_last_terminal`、`remote_terminal_create_emits_layout_changed_event` 等），记 infrastructure，未修改版本同样失败。
+
+### 自审三问
+
+1. 每个生产修改是否直接服务授权目标和证据？
+   是。host 侧只在 `after_total == 0` 分支改用既有 `delete`；desktop 侧只在既有 reconcile 的 pane 收敛判断上去掉最后一个 pane 的保护，并抽同语义纯函数供测试。
+2. 是否有越界行为、未授权机制、隐藏兜底或已声明相邻回归？
+   无。未改 `save_summary`/`sanitize_terminal_layout` 的共享契约，未改移动端、viewport 权限、协议 wire 或设备标签；错误改为 trace + 返回 false，未静默吞。
+3. 证据是否证明目标和最近契约？
+   是。target_check 证明持久化不再引用已关闭 terminal；纯函数测试证明空布局会拆最后一个 pane；terminal_layout/app tests 证明未破坏既有 layout/restore 契约。
+
+### Guarded 反驳检查
+
+claim：只修 host 持久化就够，desktop reconcile 的 `>1` guard 不是必须。
+probe：布局删除后 `reload_terminal_layout` 返回空 `layout_ids`；对只有一个 pane 的 tab，旧循环 `while tab.panes.len() > 1` 条件为 false。
+evidence：`stale_pane_indices_tear_down_the_last_pane_when_layout_is_empty` 在新纯函数下返回 `[0]`；旧内联 guard 会返回空（既不进循环也不 remove）。
+disposition：clear — 两半都是收敛的必要条件；已同时修。
+
+claim：`after_total == 0` 时删除整个 layout 会误删其它 worktree/其它 pane 的布局。
+probe：`scope.layout_key` 由 `remote_terminal_layout_scopes` 按 `terminal_layout_storage_key(project, worktree)` 解析；`delete` 只删该 key；`after_total` 只统计该 layout 自身 top_panes+tabs。
+evidence：target_check 用 project-b/worktree-b 单独 key，删除后 `load` 返回空；controller 路径 `apply_hosted_workspace_update` 已有同款 delete。
+disposition：clear。
+
+## Guarded Fix
+
+### 现有正确路径证据
+
+examined_existing_paths：
+- `apply_hosted_workspace_update`（`apps/desktop/runtime/src/runtime_state/service_hosted_runtime.rs:152-161`）：`after_total == 0` 时走 `layout_service.delete(&layout_key)`，仅非空才 `save_summary`。这是 desktop-as-controller 角色下同一「从布局移除终端」的正确实现。
+- `TerminalLayoutService::delete`（`terminal_layout.rs:230`）：删除 cache 条目；随后 `load`（`:101`）返回空 summary，restore 路径 `terminal_restore_plan_for_language` / `normalize_terminal_restore_state` 会生成默认终端。
+- 相关历史修复：`53a2ef74` 引入本契约；其后 `e5136681`、`bf89daa9`、`f1be6697`、`85b8f5bb` 只做重构/迁移，没有实现「最后一个 pane」的收敛。
+- `reconcile_remote_terminal_layout` 内的注释与 `53a2ef74` 提交信息均已声明空布局应拆 pane；实现被 `while tab.panes.len() > 1` 挡住。
+reuse_decision：reuse `TerminalLayoutService::delete`；extend-existing `reconcile_remote_terminal_layout`
+decision_evidence：空布局删除已有实现与调用点；reconcile 的收敛职责已存在，缺口只是「最后一枚」保护和不可测的内联判断。
+
+### 根因与 owner
+
+causal_chain：见 Active Contract「证据」。
+first-wrong condition：`remove_remote_terminal_from_layout` 在 `after_total == 0` 时调用拒绝空布局的 `save_summary` 并丢弃 Err；以及 `reconcile_remote_terminal_layout` 的 `while tab.panes.len() > 1` 永不匹配最后一个 pane。
+A_evidence：`remote_terminal_close_clears_layout_when_last_terminal_is_removed` 失败输出（persisted layout 仍含 `terminal-only`）。
+owner：`TerminalLayoutService`（布局持久化）；`reconcile_remote_terminal_layout`（桌面 pane 集合收敛）。
+invariant：控制器关闭终端成功后，持久化布局与桌面 pane 集合都不再引用该 terminal_id。
+
+### 授权机制
+
+causal_unit：控制器关闭 worktree 最后一个终端后的双端收敛。
+mechanism：
+1. host `remove_remote_terminal_from_layout` 在 `after_total == 0` 时改调既有 `TerminalLayoutService::delete`（非空仍 `save_summary`）。
+2. `reconcile_remote_terminal_layout` 去掉 `tab.panes.len() > 1` 保护，使布局不再包含的最后一个 pane 也被拆；把该判断抽成纯函数 `stale_terminal_pane_indices` 以便最小验证。
+evidence_binding：机制 1 解释 A 级失败（persisted layout 未清）；机制 2 解释既有契约（空布局应拆 pane）与代码路径（guard 为 false）。
+why_minimal_and_sufficient：只改「最后一枚」分支到既有 delete，并在既有 owner 上放宽一个 guard；不新增持久化格式、不新增机制。
+
+### 备选（仅真实存在时）
+
+alternatives：
+- 放宽 `save_summary` / `sanitize_terminal_layout` 允许空布局：会改变所有 save 调用点与「空布局非法」的共享契约（`save_from_gpui` 等），超出本因果单元；排除。
+- 在 reconcile 里把最后一个 pane reset 成新终端：与 `53a2ef74`「tears down the desktop split」契约及移动端 worktree 可为空的既有路径相反，且凭空创建 PTY；排除。
+- 只修 host 持久化、不动 reconcile：布局为空时 `tab.panes.len() > 1` 为 false，桌面 pane 仍不收敛；排除。
+
+### 实际命中风险
+
+contract / data / concurrency / compatibility / rollback：布局持久化是 host 与所有 controller 共享的文件契约；本次只在「最后一枚」时改用既有 delete，不改变空布局非法契约，其它 close 路径不变。回滚 = 还原两处改动。
+verification_only：none
+out_of_scope：见 Active Contract。
+
+### 修改前方案审查
+
+existing_path_check：pass — 复用既有 `delete` 正确答案；reconcile 是既有 owner，放宽 guard 不新增重复机制。
+owner_and_evidence：两处机制都直接绑定 A 级失败（persisted layout）或既有契约（空布局应拆 pane）。
+semantic_scope：足以修复最后一个终端收敛，未夹带设备标签或 viewport 权限问题。
+verification_power：失败测试证明持久化收敛；纯函数测试证明 reconcile 在空布局/缺 id 时会拆最后一个 pane；回归测试覆盖 close/layout。
+result：pass
+
+## 当前阶段
+
+phase：fix
+
+# Diagnosis
+
+## 现象与复现
+
+环境：repo HEAD `e58b0b1e`（main），macOS；本沙箱 openpty 被拒（PTY 测试记 infrastructure）。
+步骤：控制器对某 worktree 布局中唯一终端发 `terminal.close`；host kill 后检查持久化布局。
+实际：持久化布局仍列出已关闭 terminal_id（新增 PTY-free 测试稳定失败）。
+期望：持久化布局不再引用该 terminal；桌面同作用域 pane 随之拆除。
+频率：always（当被关闭终端是该 layout 最后一个时）。
+结果：failed
+基础设施问题：PTY spawn 在本沙箱 `Operation not permitted`；已用不 spawn PTY 的测试绕过，非本 bug 因果。
+
+## 真实链
+
+last-known-good：commit `53a2ef74` 之前，host 在 `before_total <= 1` 直接 no-op，桌面 split 与 pad tab 都滞留（同样的问题，方向不同）。
+first-wrong：`remove_remote_terminal_from_layout` 在 `after_total == 0` 时调用拒绝空布局的 `save_summary` 并丢弃错误。
+因果链：见 Active Contract「证据」。
+观察证据：失败测试输出；`TerminalLayoutService::save_summary` → `sanitize_terminal_layout` 空返回 None；`reconcile_remote_terminal_layout` 的 `while tab.panes.len() > 1`。
+
+## 竞争解释（仅仍有歧义时，最多两个）
+
+1. explanation：残留 pane 只是 UI 缓存，host 布局其实已正确删除，桌面应在下个事件自愈。
+   prediction：持久化布局应为空/缺失。
+   discriminating_check：新增测试直读 persisted layout。
+   result：persisted layout 仍含 terminal-only —— 与 prediction 相反。
+   state：rejected
+
+2. explanation：问题只在移动端没有发 `terminal.close`。
+   prediction：host 不会执行 kill/layout 移除。
+   discriminating_check：host 测试直接调 `handle_terminal_close` 仍复现 stale layout。
+   result：host 侧独立复现，移动端发送与否非根因。
+   state：rejected
+
+## 根因
+
+statement：`53a2ef74` 引入的「关闭 worktree 最后一个终端 → 拆掉桌面 split」只改了一半：host 用会拒绝空布局的 `save_summary` 持久化空 summary（并丢弃 Err），desktop reconcile 又用 `while tab.panes.len() > 1` 保护最后一个 pane，导致持久化布局与桌面 pane 都不收敛，留下指向死会话的接管占位。
+first-wrong condition：`after_total == 0` 且 `save_summary` 返回 Err 被忽略；以及布局 ids 为空时 `tab.panes.len() > 1` 为 false。
+evidence_grade：A
+evidence_reference：`remote_terminal_close_clears_layout_when_last_terminal_is_removed` 失败输出；`apps/desktop/runtime/src/terminal_layout.rs` `save_summary`/`sanitize_terminal_layout`；`apps/desktop/src/app/terminal_actions.rs` reconcile 循环。
+
+## 其他
+
+excluded：移动端 close 入口、viewport claim/lease、设备标签（另任务）。
+missing_information：UI 级真机复现（需要可运行 app + 两设备），本会话用 host 持久化 + 代码路径替代。
+completion：complete
+
+## 能力（仅选中时）
+
+blocker：无
+logical_capability：none
+resolved_skill：none
+state：unavailable
+result：none
+
+## Checkpoint
+
+latest_verified：target_check 与 nearest_regression_check 全绿；host 最后一枚 terminal 关闭后 persisted layout 为空，desktop reconcile 纯函数在空布局下拆最后一个 pane。PTY 依赖用例记 infrastructure。
+contract_state：frozen
+active_capability：none
+next_action：交付未授权；如需交付，桌面产物变更按 AGENTS.md 独立升版并走 delivery Gate。设备标签症状另建任务 `viewport-owner-label`。
+
+## Delivery Gate（用户 2026-09-11 已授权）
+
+authorized_action：提交当前可交付工作树到 `main`；push `lan`；desktop 升 `2.0.3-beta.12` 并打包覆盖 `/Applications/Codux.app`；headless agent 升 `2.0.3-beta.11` 并在 Mac Studio 构建部署。
+target_environment：本机 macOS arm64 `/Applications/Codux.app`；`mac@10.10.10.21`（Mac Studio）headless host。
+prerequisites：Active Contract frozen；target/regression 通过；用户明确确认范围与目标（本对话）。
+rollback：桌面恢复 `/Applications/Codux.app` beta.11 备份；`git revert <commit>`；host 恢复旧 binary。
+artifact_identity：打包后填（版本 / 架构 / bundle id / 签名 / sha256）。
+state：ready
+result：pending

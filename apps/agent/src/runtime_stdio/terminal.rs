@@ -128,6 +128,7 @@ fn emit_terminal_event(writer: &RuntimeStdioWriter, event: TerminalEvent) {
         TerminalEvent::Viewport {
             session_id,
             owner,
+            owner_label,
             cols,
             rows,
             generation,
@@ -136,6 +137,7 @@ fn emit_terminal_event(writer: &RuntimeStdioWriter, event: TerminalEvent) {
             json!({
                 "sessionId": session_id,
                 "owner": owner,
+                "ownerLabel": owner_label,
                 "cols": cols,
                 "rows": rows,
                 "generation": generation,

@@ -67,6 +67,12 @@ impl<T> RemotePtySession<T> {
         self.history_screen.snapshot_request(false).snapshot()
     }
 
+    /// Snapshot including an ANSI repaint string for consumers that mirror
+    /// this state into a separate terminal emulator.
+    pub fn screen_replay_snapshot(&self) -> TerminalScreenSnapshot {
+        self.history_screen.snapshot_request(true).snapshot()
+    }
+
     pub fn resize_screen(&mut self, cols: usize, rows: usize) {
         self.history_screen.resize(cols, rows);
     }
@@ -96,6 +102,12 @@ impl<T> RemotePtySession<T> {
             self.sequence = 0;
             self.buffer_end = None;
         }
+    }
+
+    /// Stop waiting for a baseline and return every parked live frame in
+    /// sequence order. The caller must replay them before later live output.
+    pub fn abort_baseline(&mut self) -> Vec<T> {
+        self.drain_held_live(None)
     }
 
     /// Park a live frame until the baseline that precedes it arrives. Returns
@@ -196,17 +208,7 @@ impl<T> RemotePtySession<T> {
         }
         let base_sequence = sequence.unwrap_or(self.sequence);
         self.sequence = base_sequence;
-        self.awaiting_baseline = false;
-
-        let mut replay = Vec::new();
-        let held_sequenced_live = std::mem::take(&mut self.held_sequenced_live);
-        for (sequence, output) in held_sequenced_live {
-            if sequence > base_sequence {
-                replay.push(output);
-            }
-        }
-        replay.append(&mut self.held_unsequenced_live);
-        replay
+        self.drain_held_live(Some(base_sequence))
     }
 
     /// Reconcile only the live grid from a host keyframe. Raw cache, complete
@@ -232,12 +234,14 @@ impl<T> RemotePtySession<T> {
     pub fn complete_empty_baseline(&mut self, sequence: Option<TerminalSequence>) -> Vec<T> {
         let base_sequence = sequence.unwrap_or(self.sequence);
         self.sequence = base_sequence;
-        self.awaiting_baseline = false;
+        self.drain_held_live(Some(base_sequence))
+    }
 
+    fn drain_held_live(&mut self, after_sequence: Option<TerminalSequence>) -> Vec<T> {
+        self.awaiting_baseline = false;
         let mut replay = Vec::new();
-        let held_sequenced_live = std::mem::take(&mut self.held_sequenced_live);
-        for (sequence, output) in held_sequenced_live {
-            if sequence > base_sequence {
+        for (sequence, output) in std::mem::take(&mut self.held_sequenced_live) {
+            if after_sequence.is_none_or(|base| sequence > base) {
                 replay.push(output);
             }
         }
@@ -251,7 +255,7 @@ impl<T> RemotePtySession<T> {
         buffer_length: Option<usize>,
         buffer_end: Option<usize>,
         sequence: Option<TerminalSequence>,
-    ) {
+    ) -> usize {
         let data_chars = data.chars().count();
         let previous_end = self.buffer_end;
         let covered_chars = buffer_end
@@ -261,16 +265,15 @@ impl<T> RemotePtySession<T> {
                 previous_end.saturating_sub(frame_start).min(data_chars)
             })
             .unwrap_or(0);
-        let uncovered = if covered_chars == 0 {
-            data
+        let uncovered_start = if covered_chars == 0 {
+            0
         } else {
-            let start = data
-                .char_indices()
+            data.char_indices()
                 .nth(covered_chars)
                 .map(|(index, _)| index)
-                .unwrap_or(data.len());
-            &data[start..]
+                .unwrap_or(data.len())
         };
+        let uncovered = &data[uncovered_start..];
         if !uncovered.is_empty() {
             // The live view is the raw PTY history reflowed to the consumer's
             // grid. A baseline can already include a queued live frame, so use
@@ -302,6 +305,7 @@ impl<T> RemotePtySession<T> {
         if let Some(sequence) = sequence {
             self.sequence = sequence;
         }
+        uncovered_start
     }
 
     pub fn clear(&mut self) {

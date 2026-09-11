@@ -20,8 +20,8 @@ pub use output_sequence::{
     TerminalOutputSequenceAction, TerminalOutputSequenceResult, TerminalOutputSequencer,
 };
 pub use remote_output_router::{
-    RemoteTerminalBufferPhase, RemoteTerminalOutputEffect, RemoteTerminalOutputEffectKind,
-    RemoteTerminalOutputRouter,
+    RemoteTerminalBufferPhase, RemoteTerminalEmulatorResult, RemoteTerminalEmulatorUpdate,
+    RemoteTerminalOutputEffect, RemoteTerminalOutputEffectKind, RemoteTerminalOutputRouter,
 };
 pub use remote_pty::RemotePtySession;
 pub use runtime_model::{

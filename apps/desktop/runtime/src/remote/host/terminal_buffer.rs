@@ -129,8 +129,13 @@ impl RemoteHostRuntime {
         device_id: Option<&str>,
         state: &TerminalViewportState,
     ) -> Value {
+        let owner_label = state.owner_label.clone().or_else(|| {
+            terminal_viewport_remote_device_id(&state.owner)
+                .and_then(|owner_device_id| self.device_name_for(owner_device_id))
+        });
         json!({
             "owner": state.owner,
+            "ownerLabel": owner_label,
             "cols": state.cols,
             "rows": state.rows,
             "generation": state.generation,
@@ -418,11 +423,32 @@ impl RemoteHostRuntime {
             return false;
         }
         // A controller may close the LAST terminal in a layout (after_total == 0).
-        // Persist the now-empty summary so the desktop reconcile tears its pane
-        // down too. Previously closing the only terminal in a worktree bailed out
-        // here (before_total <= 1 / after_total == 0), so it silently no-opped on
-        // both ends -- the desktop split AND the pad tab both lingered.
-        let _ = service.save_summary(&scope.layout_key, layout);
+        // `save_summary` rejects empty layouts (`sanitize_terminal_layout` returns
+        // None), so the previous "persist the now-empty summary" silently failed
+        // and the desktop reconcile kept seeing the dead terminal in `layout_ids`
+        // -- the orphaned takeover pane lingered. Reuse the same delete path the
+        // controller-side reconcile uses so both roles converge on an empty layout.
+        if after_total == 0 {
+            if let Err(error) = service.delete(&scope.layout_key) {
+                crate::runtime_trace::runtime_trace(
+                    "remote",
+                    &format!(
+                        "terminal layout delete failed key={} error={error}",
+                        scope.layout_key
+                    ),
+                );
+                return false;
+            }
+        } else if let Err(error) = service.save_summary(&scope.layout_key, layout) {
+            crate::runtime_trace::runtime_trace(
+                "remote",
+                &format!(
+                    "terminal layout save failed key={} error={error}",
+                    scope.layout_key
+                ),
+            );
+            return false;
+        }
         true
     }
 }

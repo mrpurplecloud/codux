@@ -176,7 +176,7 @@ impl TerminalView {
     {
         let TerminalViewInput {
             stdin_writer,
-            bytes_rx,
+            output_rx,
             session_event_rx,
             session_event_wake_rx,
             session,
@@ -186,7 +186,7 @@ impl TerminalView {
         let model = cx.new(|cx| {
             TerminalModel::new(
                 stdin_writer,
-                bytes_rx,
+                output_rx,
                 session_event_rx,
                 session_event_wake_rx,
                 &config,
@@ -1297,7 +1297,7 @@ impl TerminalView {
 
 struct TerminalViewInput<W> {
     stdin_writer: W,
-    bytes_rx: flume::Receiver<Vec<u8>>,
+    output_rx: TerminalOutputReceiver,
     session_event_rx: flume::Receiver<TerminalUiEvent>,
     session_event_wake_rx: flume::Receiver<()>,
     session: TerminalSessionBinding,

@@ -752,6 +752,7 @@ impl RemoteHostRuntime {
             TerminalEvent::Viewport {
                 session_id,
                 owner,
+                owner_label,
                 cols,
                 rows,
                 generation,
@@ -761,7 +762,7 @@ impl RemoteHostRuntime {
                     cols,
                     rows,
                     generation,
-                    owner_label: None,
+                    owner_label,
                 };
                 let viewers = self.terminal_output_viewers(&session_id);
                 for device_id in viewers {

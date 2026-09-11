@@ -147,24 +147,21 @@ impl CoduxApp {
         let mut removed_terminal_ids = Vec::new();
         for tab in &mut self.terminals {
             let tab_terminal_id = tab.terminal_id.clone();
-            let mut index = 0;
-            while tab.panes.len() > 1 && index < tab.panes.len() {
-                let terminal_id = tab.panes[index]
+            let stale = stale_terminal_pane_indices(
+                &tab.panes,
+                tab_terminal_id.as_deref(),
+                &layout_ids,
+            );
+            for index in stale.into_iter().rev() {
+                if let Some(terminal_id) = tab.panes[index]
                     .terminal_id
                     .clone()
-                    .or_else(|| tab_terminal_id.clone());
-                if terminal_id
-                    .as_deref()
-                    .is_some_and(|terminal_id| !layout_ids.contains(terminal_id))
+                    .or_else(|| tab_terminal_id.clone())
                 {
-                    if let Some(terminal_id) = terminal_id.as_deref() {
-                        removed_terminal_ids.push(terminal_id.to_string());
-                    }
-                    tab.panes.remove(index);
-                    removed_stale = true;
-                } else {
-                    index += 1;
+                    removed_terminal_ids.push(terminal_id);
                 }
+                tab.panes.remove(index);
+                removed_stale = true;
             }
         }
         let mut lifecycle_removed = false;
@@ -1145,4 +1142,26 @@ impl CoduxApp {
         self.spawn_attach_pending_terminals(None, vec![(pty_config, attach)], cx);
         self.invalidate_terminal_workspace(cx);
     }
+}
+
+/// Indices of panes whose terminal no longer exists in the authoritative layout.
+///
+/// A pane is identified by its own `terminal_id`, falling back to the tab's id
+/// for legacy single-terminal tabs. Panes with no id at all are left alone.
+/// Unlike the old inline loop this has no "keep at least one pane" guard: when a
+/// controller closes the last terminal in a worktree the layout comes back empty
+/// (or missing) and the stale final pane must be torn down too.
+pub(in crate::app) fn stale_terminal_pane_indices(
+    panes: &[TerminalPaneSlot],
+    tab_terminal_id: Option<&str>,
+    layout_ids: &std::collections::HashSet<String>,
+) -> Vec<usize> {
+    panes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, slot)| {
+            let terminal_id = slot.terminal_id.as_deref().or(tab_terminal_id)?;
+            (!layout_ids.contains(terminal_id)).then_some(index)
+        })
+        .collect()
 }

@@ -14,13 +14,7 @@ const channel = rawChannel === "stable" || rawChannel === "beta" ? rawChannel : 
 
 if (!dryRun) {
   updateCargoVersion("apps/desktop/Cargo.toml", version);
-  updateCargoVersion("apps/desktop/runtime/Cargo.toml", version);
-  updateCargoVersion("apps/agent/Cargo.toml", version);
-  updateCargoVersion("apps/wrapper-helper/Cargo.toml", version);
   updateCargoLockPackageVersion("Cargo.lock", "codux", version);
-  updateCargoLockPackageVersion("Cargo.lock", "codux-agent", version);
-  updateCargoLockPackageVersion("Cargo.lock", "codux-wrapper-helper", version);
-  updateCargoLockPackageVersion("Cargo.lock", "codux-runtime", version);
 }
 
 const notesPath =

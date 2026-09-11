@@ -65,6 +65,12 @@ pub enum TerminalEvent {
         #[serde(rename = "sessionId")]
         session_id: String,
         owner: String,
+        #[serde(
+            default,
+            rename = "ownerLabel",
+            skip_serializing_if = "Option::is_none"
+        )]
+        owner_label: Option<String>,
         cols: u16,
         rows: u16,
         generation: u64,

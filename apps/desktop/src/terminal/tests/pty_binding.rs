@@ -141,13 +141,18 @@ impl RuntimeTerminalController for HostedTestController {
     fn terminal_viewport_release(&self, _session_id: &str) -> bool {
         self.succeeds("release")
     }
+
+    fn terminal_buffer_tail(&self, session_id: &str) -> bool {
+        self.record(format!("baseline:{session_id}"));
+        !self.failures.lock().unwrap().contains("baseline")
+    }
 }
 
 fn managed_binding(
     controller: Arc<HostedTestController>,
 ) -> (
     TerminalSessionBinding,
-    flume::Receiver<Vec<u8>>,
+    flume::Receiver<TerminalOutputEvent>,
     flume::Receiver<TerminalUiEvent>,
 ) {
     let config = TerminalPtyConfig {
@@ -175,13 +180,74 @@ fn managed_binding(
 }
 
 fn viewport_event(owner: &str, generation: u64) -> codux_runtime::runtime_terminal::RuntimeTerminalStreamEvent {
+    labeled_viewport_event(owner, None, generation)
+}
+
+fn labeled_viewport_event(
+    owner: &str,
+    owner_label: Option<&str>,
+    generation: u64,
+) -> codux_runtime::runtime_terminal::RuntimeTerminalStreamEvent {
     codux_runtime::runtime_terminal::RuntimeTerminalStreamEvent::Event(TerminalEvent::Viewport {
         session_id: "terminal-1".to_string(),
         owner: owner.to_string(),
+        owner_label: owner_label.map(str::to_string),
         cols: 80,
         rows: 24,
         generation,
     })
+}
+
+fn baseline_event() -> codux_runtime::runtime_terminal::RuntimeTerminalStreamEvent {
+    codux_runtime::runtime_terminal::RuntimeTerminalStreamEvent::Replace {
+        history: b"restored".to_vec(),
+        screen: b"\x1b[H\x1b[2Jrestored".to_vec(),
+        cols: 80,
+        rows: 24,
+    }
+}
+
+fn receive_baseline(output: &flume::Receiver<TerminalOutputEvent>) {
+    let event = output.recv_timeout(Duration::from_secs(1)).unwrap();
+    let TerminalOutputEvent::Replace {
+        history, screen, ..
+    } = event
+    else {
+        panic!("expected requested baseline replacement");
+    };
+    assert_eq!(history, b"restored");
+    assert!(screen.ends_with(b"restored"));
+}
+
+#[test]
+fn output_replacement_discards_stale_screen_and_restores_keyframe() {
+    let mut model = TerminalModel::new_for_test(20, 4, 100);
+    model.handle.screen.lock().process(b"stale");
+    model.resize(
+        30,
+        5,
+        TerminalWindowSize {
+            num_cols: 30,
+            num_lines: 5,
+            cell_width: 1,
+            cell_height: 1,
+        },
+    );
+
+    model.apply_output_replacement(
+        b"history".to_vec(),
+        b"\x1b[H\x1b[2Jcurrent".to_vec(),
+        20,
+        4,
+    );
+    assert_eq!(model.dimensions(), (30, 5));
+    assert!(model.apply_model_events());
+    assert_eq!(*model.handle.engine_dims.lock(), (30, 5));
+    model.handle.publish_snapshot();
+
+    let first_row = super::fixtures::row_text(&model.handle.snapshot(), 0);
+    assert!(first_row.contains("current"), "first row: {first_row:?}");
+    assert!(!first_row.contains("stale"), "first row: {first_row:?}");
 }
 
 fn wait_for_stream(controller: &HostedTestController) {
@@ -375,7 +441,7 @@ fn hosted_restore_reuses_existing_session_without_reopening() {
 #[test]
 fn managed_hosted_viewport_gates_io_and_obeys_host_generation() {
     let controller = Arc::new(HostedTestController::managed());
-    let (binding, _, events) = managed_binding(controller.clone());
+    let (binding, output, events) = managed_binding(controller.clone());
     controller.actions.lock().unwrap().clear();
 
     assert!(!binding.local_viewport_owns());
@@ -386,6 +452,21 @@ fn managed_hosted_viewport_gates_io_and_obeys_host_generation() {
     controller.emit(0, viewport_event("remote:phone", 2));
     assert!(!binding.local_viewport_owns());
     controller.emit(0, viewport_event("remote:desktop", 2));
+    assert!(binding.local_viewport_owns());
+    binding.refresh_local_viewport_if_current_owner().unwrap();
+    binding.write(b"x").unwrap();
+    binding.resize(100, 30).unwrap();
+    assert_eq!(
+        *controller.actions.lock().unwrap(),
+        [
+            "resize:terminal-1:100x30",
+            "baseline:terminal-1",
+            "input:terminal-1:x",
+            "resize:terminal-1:100x30",
+        ]
+    );
+    controller.emit(0, baseline_event());
+    receive_baseline(&output);
     assert!(binding.local_viewport_owns());
     controller.emit(
         0,
@@ -399,13 +480,8 @@ fn managed_hosted_viewport_gates_io_and_obeys_host_generation() {
     assert!(binding.local_viewport_owns());
     controller.emit(0, viewport_event("remote:phone", 1));
     assert!(binding.local_viewport_owns());
-
-    binding.write(b"x").unwrap();
-    binding.resize(100, 30).unwrap();
-    assert_eq!(
-        *controller.actions.lock().unwrap(),
-        ["input:terminal-1:x", "resize:terminal-1:100x30"]
-    );
+    controller.emit(0, viewport_event("remote:desktop", 3));
+    assert!(binding.local_viewport_owns());
     binding.restore_local_viewport().unwrap();
     assert!(!binding.local_viewport_owns());
     assert_eq!(controller.actions.lock().unwrap().last().unwrap(), "force");
@@ -413,6 +489,45 @@ fn managed_hosted_viewport_gates_io_and_obeys_host_generation() {
         event,
         TerminalUiEvent::Viewport { remote_owner: false, generation: 2, .. }
     )));
+}
+
+#[test]
+fn hosted_viewport_exposes_remote_owner_label() {
+    let controller = Arc::new(HostedTestController::managed());
+    let (binding, _, _) = managed_binding(controller.clone());
+    assert!(binding.viewport_owner_label().is_none());
+
+    controller.emit(
+        0,
+        labeled_viewport_event("remote:phone", Some("Pixel 9"), 2),
+    );
+    assert!(!binding.local_viewport_owns());
+    assert_eq!(binding.viewport_owner_label().as_deref(), Some("Pixel 9"));
+
+    // A controller reverting to its own identity must not keep the remote label.
+    controller.emit(0, labeled_viewport_event("remote:desktop", None, 3));
+    assert!(binding.local_viewport_owns());
+    assert!(binding.viewport_owner_label().is_none());
+}
+
+#[test]
+fn hosted_baseline_request_failure_keeps_owner_and_retries_intent() {
+    let controller = Arc::new(HostedTestController::managed());
+    let (binding, _, _) = managed_binding(controller.clone());
+    binding.resize(100, 30).unwrap();
+    controller.emit(0, viewport_event("remote:desktop", 1));
+    controller.fail("baseline");
+
+    assert!(binding.refresh_local_viewport_if_current_owner().is_err());
+    assert!(binding.local_viewport_owns());
+
+    controller.failures.lock().unwrap().clear();
+    controller.actions.lock().unwrap().clear();
+    binding.refresh_local_viewport_if_current_owner().unwrap();
+    assert_eq!(
+        *controller.actions.lock().unwrap(),
+        ["resize:terminal-1:100x30", "baseline:terminal-1"]
+    );
 }
 
 #[test]
@@ -434,7 +549,31 @@ fn hosted_local_viewport_refresh_does_not_deadlock() {
         .unwrap();
     assert_eq!(
         *controller.actions.lock().unwrap(),
-        ["resize:terminal-1:100x30"]
+        ["resize:terminal-1:100x30", "baseline:terminal-1"]
+    );
+}
+
+#[test]
+fn hosted_local_viewport_refresh_requests_current_screen_baseline() {
+    let controller = Arc::new(HostedTestController::managed());
+    let (binding, _, _) = managed_binding(controller.clone());
+    binding.resize(100, 30).unwrap();
+    controller.emit(0, viewport_event("remote:desktop", 1));
+    controller.actions.lock().unwrap().clear();
+
+    assert!(binding.local_viewport_owns());
+    binding.write(b"x").unwrap();
+    binding.refresh_local_viewport_if_current_owner().unwrap();
+    binding.refresh_local_viewport_if_current_owner().unwrap();
+
+    assert_eq!(
+        *controller.actions.lock().unwrap(),
+        [
+            "input:terminal-1:x",
+            "resize:terminal-1:100x30",
+            "baseline:terminal-1",
+            "resize:terminal-1:100x30",
+        ]
     );
 }
 
@@ -499,7 +638,10 @@ fn managed_hosted_viewport_reconnect_drops_old_epoch_and_respects_visibility() {
         0,
         codux_runtime::runtime_terminal::RuntimeTerminalStreamEvent::Output(b"new".to_vec()),
     );
-    assert_eq!(output.recv_timeout(Duration::from_secs(1)).unwrap(), b"new");
+    assert!(matches!(
+        output.recv_timeout(Duration::from_secs(1)).unwrap(),
+        TerminalOutputEvent::Append(bytes) if bytes == b"new"
+    ));
     assert!(output.try_recv().is_err());
     assert!(binding.local_viewport_owns());
     assert!(!next.actions.lock().unwrap().iter().any(|action| action == "auto"));

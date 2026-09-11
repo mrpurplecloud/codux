@@ -10,15 +10,6 @@ on:
         description: "Existing release tag to build, for example v1.9.1."
         required: true
         type: string
-      channel:
-        description: "Release channel metadata to apply."
-        required: false
-        default: auto
-        type: choice
-        options:
-          - auto
-          - beta
-          - stable
 
 permissions:
   contents: write
@@ -32,7 +23,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.meta.outputs.version }}
-      channel: ${{ steps.meta.outputs.channel }}
       source_ref: ${{ steps.ref.outputs.source_ref }}
     steps:
       - name: Resolve source ref
@@ -50,20 +40,16 @@ jobs:
         with:
           ref: ${{ steps.ref.outputs.source_ref }}
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Resolve release metadata
+      - name: Resolve agent version
         id: meta
         shell: bash
-        env:
-          RELEASE_NOTES_PATH: dist/release-notes.md
         run: |
-          mkdir -p dist
-          requested_channel="${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'auto' }}"
-          node apps/desktop/scripts/release/prepare-release.mjs "${{ steps.ref.outputs.source_ref }}" "${requested_channel}"
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' apps/agent/Cargo.toml | head -n 1)"
+          if [[ -z "$version" ]]; then
+            echo "Unable to resolve apps/agent/Cargo.toml version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
   build:
     needs: metadata
@@ -125,14 +111,6 @@ jobs:
           restore-keys: |
             agent-rust-release-${{ runner.os }}-${{ matrix.id }}-
             agent-rust-release-${{ runner.os }}-
-
-      - name: Apply release version
-        shell: bash
-        env:
-          RELEASE_NOTES_PATH: dist/release-notes.md
-        run: |
-          mkdir -p dist
-          node apps/desktop/scripts/release/prepare-release.mjs "${{ needs.metadata.outputs.source_ref }}" "${{ needs.metadata.outputs.channel }}"
 
       - name: Build Linux agent on Debian 10 baseline
         if: runner.os == 'Linux'

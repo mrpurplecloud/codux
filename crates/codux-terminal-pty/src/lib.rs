@@ -365,6 +365,7 @@ impl LocalPtySession {
             TerminalEvent::Viewport {
                 session_id: self.id.clone(),
                 owner: state.owner,
+                owner_label: state.owner_label,
                 cols: state.cols,
                 rows: state.rows,
                 generation: state.generation,

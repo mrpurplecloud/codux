@@ -392,6 +392,52 @@ fn remote_terminal_create_emits_layout_changed_event() {
 }
 
 #[test]
+fn remote_terminal_close_clears_layout_when_last_terminal_is_removed() {
+    let support_dir = temp_support_dir("codux-remote-close-last-layout");
+    write_two_project_state(&support_dir);
+    let terminals = Arc::new(TerminalManager::new());
+    let runtime = Arc::new(RemoteHostRuntime::new_with_ai_history_and_terminals(
+        support_dir.clone(),
+        Default::default(),
+        Arc::clone(&terminals),
+    ));
+    let layout_key = terminal_layout_storage_key("project-b", "worktree-b");
+    // The controller owns the only terminal in this worktree layout. The PTY is
+    // already gone (killed elsewhere), so no shell is spawned in this test.
+    TerminalLayoutService::new(support_dir.clone())
+        .save_from_gpui(
+            &layout_key,
+            Vec::new(),
+            vec![TerminalPaneSummary {
+                title: "Only".to_string(),
+                terminal_id: "terminal-only".to_string(),
+            }],
+            vec![1.0],
+            0.24,
+        )
+        .expect("save layout");
+    runtime.drain_events();
+
+    runtime.handle_terminal_close(&RemoteEnvelope {
+        kind: "terminal.close".to_string(),
+        device_id: Some("device-1".to_string()),
+        session_id: Some("terminal-only".to_string()),
+        request_id: None,
+        seq: None,
+        payload: json!({ "projectId": "project-b", "worktreeId": "worktree-b" }),
+    });
+
+    let layout = TerminalLayoutService::new(support_dir.clone()).load(Some(&layout_key));
+    assert!(
+        layout.top_panes.is_empty(),
+        "persisted layout still lists the closed terminal: {:?}",
+        layout.top_panes
+    );
+
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
 fn remote_terminal_close_removes_layout_entry_and_kills_last_terminal() {
     let support_dir = temp_support_dir("codux-remote-close-layout-entry");
     write_two_project_state(&support_dir);
@@ -474,10 +520,14 @@ fn remote_terminal_close_removes_layout_entry_and_kills_last_terminal() {
     });
 
     let layout = TerminalLayoutService::new(support_dir.clone()).load(Some(&layout_key));
-    assert_eq!(layout.top_panes.len(), 1);
-    assert_eq!(layout.top_panes[0].terminal_id, session_a);
-    // Closing the last terminal now tears it down (previously it no-opped so
-    // the dead pane lingered on both the desktop split and the pad tab).
+    // Closing the last terminal tears it down on both ends: the dead session is
+    // gone AND the persisted layout no longer lists it, so the desktop reconcile
+    // can drop the stale pane instead of leaving the takeover placeholder behind.
+    assert!(
+        layout.top_panes.is_empty(),
+        "closing the last terminal left a stale layout entry: {:?}",
+        layout.top_panes
+    );
     assert!(terminals.snapshot(&session_a).is_err());
 
     fs::remove_dir_all(support_dir).ok();

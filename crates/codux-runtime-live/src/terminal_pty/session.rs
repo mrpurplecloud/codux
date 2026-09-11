@@ -842,6 +842,7 @@ impl TerminalPtySessionHandle {
             TerminalEvent::Viewport {
                 session_id,
                 owner: state.owner.clone(),
+                owner_label: state.owner_label.clone(),
                 cols: state.cols,
                 rows: state.rows,
                 generation: state.generation,

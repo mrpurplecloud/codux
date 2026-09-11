@@ -39,7 +39,7 @@ use crate::project_store::{
 use crate::terminal_layout::{TerminalLayoutService, terminal_layout_storage_key};
 use crate::terminal_pty::{
     TerminalEvent, TerminalManager, TerminalPtyConfig, TerminalSessionSnapshot,
-    TerminalViewportState, terminal_viewport_remote_owner,
+    TerminalViewportState, terminal_viewport_remote_device_id, terminal_viewport_remote_owner,
 };
 use crate::worktree::{
     WorktreeCreateRequest, WorktreeMergeRequest, WorktreeRemoveRequest, WorktreeService,

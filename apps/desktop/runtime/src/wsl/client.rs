@@ -468,6 +468,10 @@ fn terminal_event_from_stdio(method: &str, params: &Value) -> Option<TerminalEve
         "terminal.viewport" => Some(TerminalEvent::Viewport {
             session_id,
             owner: params.get("owner")?.as_str()?.to_string(),
+            owner_label: params
+                .get("ownerLabel")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             cols: u16::try_from(params.get("cols")?.as_u64()?).ok()?,
             rows: u16::try_from(params.get("rows")?.as_u64()?).ok()?,
             generation: params.get("generation")?.as_u64()?,
@@ -644,6 +648,7 @@ mod tests {
             Some(TerminalEvent::Viewport {
                 session_id,
                 owner,
+                owner_label: None,
                 cols: 120,
                 rows: 40,
                 generation: 3,
