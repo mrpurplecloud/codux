@@ -167,7 +167,7 @@ impl CoduxApp {
     ) -> gpui::Entity<ProjectColumnView> {
         let app_entity = cx.entity();
         let project_list_state = self.ensure_project_list_state(cx);
-        let collapsed = self.project_column_collapsed;
+        let collapsed = self.ui_layout.project_column_collapsed;
         let language = self.state.settings.language.clone();
         let scroll_handle = self.project_scroll_handle.clone();
 

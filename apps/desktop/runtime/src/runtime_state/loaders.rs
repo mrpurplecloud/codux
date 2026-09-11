@@ -47,6 +47,13 @@ fn load_settings(support_dir: &Path) -> SettingsSummary {
     SettingsService::new(support_dir.to_path_buf()).summary()
 }
 
+fn load_ui_layout(support_dir: &Path) -> UiLayoutState {
+    crate::config::ConfigStore::for_support_dir(support_dir)
+        .get("uiLayout")
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
+
 fn load_git_workspace(support_dir: &Path, project_path: &str) -> git::GitWorkspaceSnapshot {
     crate::runtime_cache::cached_git_workspace(support_dir, project_path).unwrap_or_else(|| {
         let snapshot = git::GitService::workspace_snapshot(project_path);

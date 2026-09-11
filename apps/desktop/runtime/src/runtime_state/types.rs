@@ -1,6 +1,27 @@
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UiLayoutState {
+    pub project_column_collapsed: bool,
+    pub task_column_collapsed: bool,
+    pub task_section_terminals_collapsed: bool,
+    pub task_section_sessions_collapsed: bool,
+}
+
+impl Default for UiLayoutState {
+    fn default() -> Self {
+        Self {
+            project_column_collapsed: true,
+            task_column_collapsed: false,
+            task_section_terminals_collapsed: false,
+            task_section_sessions_collapsed: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct RuntimeState {
     pub support_dir: PathBuf,
+    pub ui_layout: UiLayoutState,
     pub settings: SettingsSummary,
     pub projects: Vec<ProjectInfo>,
     pub selected_project: Option<ProjectInfo>,

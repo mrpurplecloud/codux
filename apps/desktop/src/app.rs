@@ -47,7 +47,9 @@ use codux_runtime::{
     },
     runtime_activity::RuntimeActivitySummary,
     runtime_bridge::RuntimeInventory,
-    runtime_state::{FileEntry, FileKind, ProjectInfo, RuntimeService, RuntimeState},
+    runtime_state::{
+        FileEntry, FileKind, ProjectInfo, RuntimeService, RuntimeState, UiLayoutState,
+    },
     settings::{SettingsSummary, locale_from_language_setting},
     ssh::{SSHConnectionProfile, SSHProfileSummary, SSHProfileUpsertRequest, SSHSummary},
     terminal_layout::{

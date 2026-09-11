@@ -382,10 +382,7 @@ pub struct CoduxApp {
     /// `None` = single full-body view (the default). Session-only; not persisted.
     pub(in crate::app) workspace_split: Option<WorkspaceSplitKind>,
     pub(in crate::app) assistant_panel: Option<AssistantPanel>,
-    pub(in crate::app) project_column_collapsed: bool,
-    pub(in crate::app) task_column_collapsed: bool,
-    pub(in crate::app) task_section_terminals_collapsed: bool,
-    pub(in crate::app) task_section_sessions_collapsed: bool,
+    pub(in crate::app) ui_layout: UiLayoutState,
     pub(in crate::app) project_list_state: Option<gpui::Entity<ProjectListState>>,
     /// Last polled client→host link state per host device id. Drives the project
     /// connection badge and triggers terminal re-attach when a host reconnects.

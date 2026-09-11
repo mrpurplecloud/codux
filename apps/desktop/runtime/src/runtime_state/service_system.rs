@@ -1,4 +1,8 @@
 impl RuntimeService {
+    pub fn save_ui_layout(&self, layout: &UiLayoutState) -> Result<(), String> {
+        persist_ui_layout(&self.support_dir, layout)
+    }
+
     pub fn terminal_font_families(&self) -> Vec<String> {
         crate::system_fonts::terminal_font_families()
     }
@@ -584,6 +588,17 @@ impl RuntimeService {
     pub fn sync_tool_permissions(&self) -> ToolPermissionsSummary {
         ToolPermissionsService::new(self.support_dir.clone()).sync()
     }
+}
+
+fn persist_ui_layout(support_dir: &Path, layout: &UiLayoutState) -> Result<(), String> {
+    let layout = serde_json::to_value(layout).map_err(|error| error.to_string())?;
+    crate::config::update_raw_state_snapshot(
+        &crate::config::state_file_path(support_dir.to_path_buf()),
+        |raw| {
+            raw.insert("uiLayout".to_string(), layout);
+            Ok(())
+        },
+    )
 }
 
 // Shared by RuntimeService and the remote host runtime so every project

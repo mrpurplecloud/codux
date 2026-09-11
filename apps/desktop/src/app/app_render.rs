@@ -290,7 +290,7 @@ impl Render for CoduxApp {
 
         let project_column_view = self.project_column_view(cx);
         let has_project = self.state.selected_project.is_some();
-        let show_task_column = has_project && !self.task_column_collapsed;
+        let show_task_column = has_project && !self.ui_layout.task_column_collapsed;
         let task_column_view = show_task_column.then(|| self.task_column_view(cx));
         if !has_project {
             self.task_column_view = None;
@@ -301,7 +301,7 @@ impl Render for CoduxApp {
         }
         let workspace_column_view = self.workspace_column_view(cx);
         let status_bar_view = self.status_bar_view(cx);
-        let project_column_width = px(if self.project_column_collapsed {
+        let project_column_width = px(if self.ui_layout.project_column_collapsed {
             PROJECT_COLUMN_COLLAPSED_WIDTH
         } else {
             PROJECT_COLUMN_EXPANDED_WIDTH

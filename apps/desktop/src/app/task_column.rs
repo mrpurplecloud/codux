@@ -89,7 +89,7 @@ impl CoduxApp {
         &mut self,
         cx: &mut Context<Self>,
     ) -> gpui::Entity<TaskColumnView> {
-        let sessions_collapsed = self.task_section_sessions_collapsed;
+        let sessions_collapsed = self.ui_layout.task_section_sessions_collapsed;
         if let Some(view) = self.task_column_view.clone() {
             self.update_task_column_child_views(cx);
             view.update(cx, |view, cx| {
@@ -535,7 +535,7 @@ impl CoduxApp {
         TaskTerminalListSnapshot {
             labels,
             terminals,
-            collapsed: self.task_section_terminals_collapsed,
+            collapsed: self.ui_layout.task_section_terminals_collapsed,
         }
     }
 
@@ -552,7 +552,7 @@ impl CoduxApp {
         TaskSessionListSnapshot {
             labels,
             sessions,
-            collapsed: self.task_section_sessions_collapsed,
+            collapsed: self.ui_layout.task_section_sessions_collapsed,
         }
     }
 }
@@ -1130,13 +1130,15 @@ fn session_section_heading(
             cx.update_entity(&app_entity, |app, cx| {
                 match section {
                     TaskSectionKind::Terminals => {
-                        app.task_section_terminals_collapsed =
-                            !app.task_section_terminals_collapsed;
+                        app.ui_layout.task_section_terminals_collapsed =
+                            !app.ui_layout.task_section_terminals_collapsed;
                     }
                     TaskSectionKind::Sessions => {
-                        app.task_section_sessions_collapsed = !app.task_section_sessions_collapsed;
+                        app.ui_layout.task_section_sessions_collapsed =
+                            !app.ui_layout.task_section_sessions_collapsed;
                     }
                 }
+                app.persist_ui_layout();
                 // Getter (not just child refresh) syncs the collapsed flag into the view and notifies it, so the docked flex re-renders now.
                 let _ = app.task_column_view(cx);
             });

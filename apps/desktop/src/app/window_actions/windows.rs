@@ -79,6 +79,7 @@ impl CoduxApp {
             .map(|branch| branch.name.clone());
         let git_review = app_git_review(&state);
         let project_open_applications = Vec::new();
+        let ui_layout = state.ui_layout.clone();
         let pet_catalog = runtime_service.pet_catalog();
         let pet_snapshot = runtime_service.pet_snapshot().unwrap_or_default();
         let pet_custom_pets = pet_catalog.custom_pets.clone();
@@ -351,10 +352,7 @@ impl CoduxApp {
             stats_time_range: StatsTimeRange::ThirtyDays,
             workspace_split: None,
             assistant_panel: None,
-            project_column_collapsed: true,
-            task_column_collapsed: false,
-            task_section_terminals_collapsed: false,
-            task_section_sessions_collapsed: false,
+            ui_layout,
             project_list_state: None,
             remote_link_states: std::collections::HashMap::new(),
             remote_saved_host_ids: Vec::new(),

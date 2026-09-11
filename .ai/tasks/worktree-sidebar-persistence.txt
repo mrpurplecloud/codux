@@ -1,0 +1,130 @@
+# 任务
+
+ID: worktree-sidebar-persistence
+类型：feature
+状态：done
+创建：2026-09-11
+更新：2026-09-11
+一句话描述：记住桌面端主窗口侧栏折叠布局，重启 Codux 后恢复。
+
+## 等级
+
+grade：Guarded
+依据：需求涉及桌面 UI 状态跨应用重启持久化；布局状态跨 `CoduxApp`、`RuntimeState` 和共享 `state.json`，还命中异步写入、旧数据兼容及多个构造 / 切换调用点。
+升级触发证据：feature define 已完成；持久化与共享状态风险已确认。
+
+## Active Contract
+
+state：frozen
+
+### 目标
+
+用户关闭 Worktree 侧栏后，重启桌面 Codux，侧栏仍保持关闭；主窗口项目栏、Worktree 栏及其 Terminals/Sessions 折叠状态按最近一次布局恢复。
+
+### 证据
+
+当前行为：用户报告 Worktree 侧栏关闭后状态未被记住，重启桌面 Codux 后再次显示，必须重新使用快捷键关闭。代码显示 `task_column_collapsed`、`project_column_collapsed`、`task_section_terminals_collapsed` 和 `task_section_sessions_collapsed` 只在 `CoduxApp` 内存中初始化 / 切换，没有持久化调用。现有正确路径：共享 `ConfigStore` 通过 `state.json` 承载项目状态，`update_raw_state_snapshot` 保留未知字段并由退出流程统一 flush；终端布局和文件编辑布局已有各自持久化实现。差距：主窗口侧栏折叠状态没有接入持久化路径。
+
+### 授权变更
+
+仅实现主窗口侧栏折叠布局的持久化与启动恢复：项目栏、Worktree 栏、Terminals 区段、Sessions 区段四个状态。每条生产机制复用现有 `ConfigStore` / `state.json` 更新路径；不新增独立布局系统，不改变内容视图或窗口尺寸。
+
+### 范围
+
+owner / invariant：`CoduxApp.ui_layout` 是运行时唯一布局状态 owner；启动从 `RuntimeState.ui_layout` 初始化，切换后持久化投影与运行时状态一致。
+allowed_files：`.ai/tasks/worktree-sidebar-persistence.txt`；`apps/desktop/runtime/src/runtime_state/types.rs`；`apps/desktop/runtime/src/runtime_state/state.rs`；`apps/desktop/runtime/src/runtime_state/service_system.rs`；`apps/desktop/runtime/src/runtime_state/loaders.rs`；`apps/desktop/src/app.rs`；`apps/desktop/src/app/app_state.rs`；`apps/desktop/src/app/app_lifecycle.rs`；`apps/desktop/src/app/app_render.rs`；`apps/desktop/src/app/project_column_actions.rs`；`apps/desktop/src/app/window_actions/keyboard.rs`；`apps/desktop/src/app/window_actions/view_toggles.rs`；`apps/desktop/src/app/task_column.rs`；`apps/desktop/src/app/window_actions/windows.rs`。
+out_of_scope：其他产品（mobile、headless）；Terminal/Files/Review/Stats 内容视图；assistant panel 选择；workspace split；窗口尺寸、快捷键定义、发布配置；与本需求无关的现有工作树改动。
+
+### 验证
+
+baseline：未修改版本基线命令通过：`cargo test -p codux-runtime runtime_state::tests --lib`（3 passed）；`cargo check -p codux`（0 errors）。用户已观察到关闭 Worktree 侧栏后重启会重新显示。
+target_check：布局持久化往返测试 5 passed，确认四个状态写入 `state.json` 后重新加载相同；其中测试确认 `futureField` 保留。桌面 UI 重启 smoke 未执行，本轮未启动或安装应用。
+nearest_regression_check：config 回归 8 passed；`codux` package tests 259 passed；caller audit 无旧字段引用，快捷键 / 菜单仍指向同一切换函数，格式检查未发现本次文件差异。基线后的 `cargo check -p codux` 曾 0 errors；最终重跑被用户既有 `owner_label` WIP 阻断。
+broader_check_reason：命中共享 state.json 持久化与桌面构造路径，需验证旧数据兼容、原有 state 字段保留及桌面编译组合。
+broader_checks：`cargo test -p codux-runtime runtime_state::tests --lib`；`cargo test -p codux-runtime config::tests --lib`；`cargo check -p codux`。
+
+## 当前阶段
+
+phase：implementation
+
+### Define Gate
+
+需求：主窗口侧栏折叠布局跨桌面应用重启恢复。
+
+可执行验收：
+1. 缺少 `uiLayout` 的旧 `state.json` 使用现有默认值：项目栏折叠、Worktree 栏展开、Terminals/Sessions 展开。
+2. 关闭 Worktree 侧栏，退出并重新启动 Codux，Worktree 侧栏保持关闭。
+3. 再次打开 Worktree 侧栏，退出并重新启动 Codux，Worktree 侧栏保持打开。
+4. 项目栏及 Terminals/Sessions 区段折叠状态按最近一次布局恢复。
+5. 现有快捷键、菜单切换和已有项目 / 终端布局状态保持正常；保存布局不删除 `state.json` 其他字段。
+
+非目标：内容视图、assistant panel、workspace split、窗口尺寸、mobile/headless。
+
+当前行为 / 目标差距：四个布局布尔值当前是 `CoduxApp` 会话字段，启动时硬编码，目标是使用共享持久化 state 加载并在切换后写回。
+
+已知约束：`state.json` 同时由项目、工作树和远程目录使用；必须通过现有 `ConfigStore` 更新，保留未知字段；写入异步排队，退出时依赖既有 `flush_all_config_writes`。
+
+## 能力（仅选中时）
+
+blocker：none
+logical_capability：none
+resolved_skill：none
+state：pending
+result：
+
+## Checkpoint
+
+latest_verified：目标测试 5 passed、config 8 passed、codux package tests 259 passed；完整 runtime 519 passed，2 个 watch 测试单独重跑通过。后续编译重跑仅因用户既有 `TerminalEvent::Viewport.owner_label` WIP 失败；未修改该 WIP。已创建本地 commit `58f5128`（amend 前 SHA）。
+contract_state：complete
+active_capability：none
+next_action：无；本任务本地 commit 完成，不 push、不安装、不发布。
+
+## Design Gate
+
+查证范围与结果：
+- `apps/desktop/src/app/window_actions/view_toggles.rs`：项目栏与 Worktree 栏切换函数是现有列可见性 owner；快捷键与 native menu 都调用它们。
+- `apps/desktop/src/app/task_column.rs`：Terminals/Sessions 折叠点击直接修改同一 `CoduxApp` 状态字段。
+- `apps/desktop/src/app/app_lifecycle.rs`、`apps/desktop/src/app/window_actions/windows.rs`：主窗口和辅助窗口构造都把四个字段硬编码为默认值。
+- `apps/desktop/runtime/src/config.rs`、`project_store.rs`：`ConfigStore` / `update_raw_state_snapshot` 是 `state.json` 共享读改写 owner，保留未知字段、串行更新，退出由 `flush_all_config_writes` 落盘。
+- `apps/desktop/runtime/src/project_store/terminal_layout.rs`、`terminal_layout.rs`、`file_editor_layout.rs`：已有布局持久化按不同语义分别复用 state/cache；没有主窗口侧栏折叠状态实现。
+- 历史 `f1be6697`：终端 pane 折叠已按 worktree 接入 TerminalLayout；不覆盖主窗口侧栏可见性。
+
+复用结论：复用共享 `ConfigStore` / `update_raw_state_snapshot` 和现有退出 flush；由 `RuntimeState` 加载可选 `uiLayout`，由 `RuntimeService` 提供写回入口，`CoduxApp.ui_layout` 持有运行时唯一布局状态。无需依赖、独立文件或新布局系统。
+
+owner / invariant：`CoduxApp.ui_layout` 是运行时唯一 owner；`state.json.uiLayout` 是持久化投影。切换先更新 owner，再通过共享 state 更新投影；启动缺失 / 部分字段使用安全默认值。
+
+选中设计：新增 `UiLayoutState`（四个带 serde 默认值的布尔字段）；`RuntimeState` 加载它；`RuntimeService::save_ui_layout` 只更新 `state.json` 的 `uiLayout` 字段；主窗口构造从 `RuntimeState` 初始化，四个现有切换点统一调用保存入口。
+
+真实备选及排除：
+- `settings.json` / `AppSettings`：排除。它承载用户偏好并映射 `SettingsSummary`，把瞬时主窗口布局放入此契约会扩大设置 API 和同步路径。
+- 独立布局文件 / `PersistentCacheStore`：排除。当前全局项目 UI 状态已有 `state.json` owner，新增文件会重复持久化职责并增加恢复 / 备份路径。
+- 按项目保存布局：排除。用户需求是桌面当前界面布局，现有四个状态也是 `CoduxApp` 全局字段，不存在项目键或项目切换语义。
+
+接口、数据、兼容、迁移、回滚：只增加 `state.json` 可选顶层 `uiLayout`，旧文件无需迁移；缺失或部分值按现有默认恢复；raw 更新保留其他字段。无跨产品 API、依赖或数据库迁移。回滚代码后旧版本忽略 `uiLayout`；删除该字段即可恢复默认布局。
+
+verification_only 风险：异步 state writer 在进程异常退出时可能尚未落盘；仅通过正常退出 flush 和持久化往返测试证明，崩溃恢复不在验收范围。
+
+修改前方案审查：
+1. 现有正确路径优先复用：通过；复用 `ConfigStore` / `state.json` / 退出 flush，无新增同职责存储。
+2. owner / 机制解释需求：通过；当前硬编码初始化与无保存调用解释重启丢失，四个切换点接入持久化投影。
+3. 语义范围：通过；只覆盖主窗口四个侧栏折叠状态，不扩展内容视图或其他产品。
+4. 验证：通过；覆盖旧数据默认、往返落盘、四个状态、快捷键 / 菜单与桌面编译。
+
+方案审查结果：pass；Active Contract ready，生产修改获授权。
+
+## Guarded rebuttal
+
+claim：写回布局可能覆盖共享 `state.json` 其他状态，或某个旧布局 caller 仍绕过唯一 owner。
+probe：持久化测试写入既有 `projects` / `futureField` 后保存并读取；枚举所有布局字段与保存入口 caller。
+evidence：测试确认 `futureField` 保留且四个布局值往返一致；`rg` 显示四个切换点均更新 `CoduxApp.ui_layout` 并调用 `persist_ui_layout`，无旧字段引用。
+disposition：clear
+
+## Delivery Gate
+
+authorized_action：在当前 `main` 分支创建本地 commit，提交本任务生产改动与任务记录；不 push、不建分支、不安装、不发布。
+target_environment：本地 Git repository `/Users/mac/Documents/development/github_ref/codux`。
+prerequisites：Active Contract 已 frozen；目标测试、最近回归测试、caller audit、格式检查已完成；当前 diff 仅纳入 allowed_files 与本任务语义范围。
+rollback：如需撤销已提交行为，使用该 commit 的 `git revert`；不回退或清理其他用户 WIP。
+artifact_identity：本地 commit message `feat(desktop): persist sidebar layout`；最终 SHA 以 `git log -1 --format=%H` 为准。
+state：complete
+result：已在当前 `main` 分支创建本地 commit；未 push、未建分支、未安装、未发布。

@@ -6,7 +6,8 @@ impl CoduxApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.project_column_collapsed = !self.project_column_collapsed;
+        self.ui_layout.project_column_collapsed = !self.ui_layout.project_column_collapsed;
+        self.persist_ui_layout();
         self.invalidate_project_shell(cx);
     }
 
@@ -15,8 +16,16 @@ impl CoduxApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.task_column_collapsed = !self.task_column_collapsed;
+        self.ui_layout.task_column_collapsed = !self.ui_layout.task_column_collapsed;
+        self.persist_ui_layout();
         self.invalidate_project_shell(cx);
+    }
+
+    pub(in crate::app) fn persist_ui_layout(&mut self) {
+        let layout = self.ui_layout.clone();
+        if let Err(error) = self.runtime_service.save_ui_layout(&layout) {
+            self.status_message = format!("failed to save interface layout: {error}");
+        }
     }
 
     pub(in crate::app) fn close_active_workspace_item(

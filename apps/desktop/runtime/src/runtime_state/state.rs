@@ -6,6 +6,7 @@ impl RuntimeState {
     pub fn load_from_support_dir(support_dir: PathBuf) -> Self {
         let (projects, selected_project) = load_projects(&support_dir);
         let settings = load_settings(&support_dir);
+        let ui_layout = load_ui_layout(&support_dir);
         let selected_path = selected_project
             .as_ref()
             .map(|project| project.path.as_str());
@@ -77,6 +78,7 @@ impl RuntimeState {
 
         Self {
             support_dir,
+            ui_layout,
             settings,
             projects,
             selected_project,
@@ -412,5 +414,60 @@ mod tests {
             runtime_model_scope_key(Some(&project), &worktrees).as_deref(),
             Some("project-a::worktree-b")
         );
+    }
+
+    #[test]
+    fn ui_layout_defaults_missing_fields() {
+        let layout: UiLayoutState =
+            serde_json::from_value(serde_json::json!({ "taskColumnCollapsed": true }))
+                .expect("layout state");
+
+        assert!(layout.project_column_collapsed);
+        assert!(layout.task_column_collapsed);
+        assert!(!layout.task_section_terminals_collapsed);
+        assert!(!layout.task_section_sessions_collapsed);
+    }
+
+    #[test]
+    fn ui_layout_persists_without_replacing_existing_state() {
+        use std::{fs, time::SystemTime};
+
+        let support_dir = std::env::temp_dir().join(format!(
+            "codux-ui-layout-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&support_dir).expect("support directory");
+        fs::write(
+            support_dir.join("state.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "projects": [{ "id": "project-1" }],
+                "futureField": "keep"
+            }))
+            .expect("initial state"),
+        )
+        .expect("write initial state");
+
+        let expected = UiLayoutState {
+            project_column_collapsed: false,
+            task_column_collapsed: true,
+            task_section_terminals_collapsed: true,
+            task_section_sessions_collapsed: false,
+        };
+        persist_ui_layout(&support_dir, &expected).expect("save layout");
+        crate::config::flush_all_config_writes();
+
+        let saved: Value = serde_json::from_slice(
+            &fs::read(support_dir.join("state.json")).expect("saved state"),
+        )
+        .expect("parse saved state");
+        assert_eq!(saved["futureField"], "keep");
+        assert_eq!(saved["uiLayout"], serde_json::to_value(&expected).unwrap());
+        assert_eq!(load_ui_layout(&support_dir), expected);
+
+        fs::remove_dir_all(support_dir).expect("remove test state");
     }
 }

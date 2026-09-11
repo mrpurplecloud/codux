@@ -16,6 +16,7 @@ impl CoduxApp {
     pub fn new(window: &mut Window, cx: &mut App) -> Result<Self> {
         let mut state = RuntimeState::load();
         set_active_settings_snapshot(state.settings.clone());
+        let ui_layout = state.ui_layout.clone();
         theme::apply_component_theme(
             &state.settings.theme,
             &state.settings.theme_color,
@@ -430,10 +431,7 @@ impl CoduxApp {
             stats_time_range: StatsTimeRange::ThirtyDays,
             workspace_split: None,
             assistant_panel: None,
-            project_column_collapsed: true,
-            task_column_collapsed: false,
-            task_section_terminals_collapsed: false,
-            task_section_sessions_collapsed: false,
+            ui_layout,
             project_list_state: None,
             remote_link_states: std::collections::HashMap::new(),
             remote_saved_host_ids,

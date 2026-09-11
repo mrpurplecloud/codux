@@ -268,7 +268,7 @@ impl CoduxApp {
         let project_create = shortcut_matches(shortcuts, "project.create", &actual);
         let task_create = shortcut_matches(shortcuts, "task.create", &actual);
         if project_create || task_create {
-            if self.task_column_collapsed || !task_create {
+            if self.ui_layout.task_column_collapsed || !task_create {
                 self.open_project_create_window(window, cx);
             } else {
                 self.open_worktree_creator_window(window, cx);
