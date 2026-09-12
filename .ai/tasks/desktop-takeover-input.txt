@@ -604,4 +604,32 @@ Pending/Unknown UI 修复。完整 `cargo fmt --all -- --check` 仍受当前 bro
 
 contract_state：frozen
 completion：done
-next_action：无生产修改；待用户在实际设备替换安装包后复测接管短暂窗口与失败重试。
+next_action：无生产修改；待用户在实际设备复测接管短暂窗口与失败重试。
+
+## Delivery
+
+2026-09-11：用户已授权提交、升版、构建与本机部署。提交 `d9d29a7a`
+（`fix(desktop): harden hosted takeover state and labels`）已在 `main`。
+Desktop 升至 `2.0.3-beta.13`；headless agent 保持 `2.0.3-beta.12`；mobile
+保持 `2.0.3-beta.10+59`。兼容性记录已写入 `docs/version-compatibility.md`。
+
+验证过：desktop/runtime 与 agent 专项测试、cargo check、release build、
+package/JSON/diff 检查；最终 staging 与两份安装包二进制 SHA-256 均为
+`232f0b22c80535cf286eafaca19537bdcbb49aa92bd14ef081093813574e0ade`，版本、
+bundle id、arm64 与 ad-hoc codesign 均通过。DMG SHA-256 为
+`76b44047b59de50137be471e4f3e9dd2afeb99ea8704d48f98ea1e4f07d56d62`；updater
+archive SHA-256 为
+`4d50d14eb95fd489a6af8ef3e70fd504edb407f3b5134b3c2b951aaee638b9af`。
+
+已将 beta13 安装到 `/Users/mac/Downloads/Codux.app` 与
+`/Applications/Codux.app`，旧 beta11/beta12 分别保留为
+`/Users/mac/Downloads/Codux.app.beta11.d9d29a7.bak` 与
+`/Users/mac/Downloads/Codux.app.beta12.d9d29a7.bak`；启动后 PID `36769` 使用
+`/Applications/Codux.app/Contents/MacOS/Codux`。Tauri updater 私钥未配置，
+updater 签名跳过；DMG/app 本机 ad-hoc 签名有效。Android 真机未连接，接管
+短暂窗口与真实设备型号仍未作设备级复测；`device.info`/hardware model 来源
+缺口按批准范围 deferred。
+
+delivery_state：installed_and_running
+contract_state：frozen
+completion：done
