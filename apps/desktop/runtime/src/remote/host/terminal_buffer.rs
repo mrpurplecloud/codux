@@ -133,6 +133,15 @@ impl RemoteHostRuntime {
             terminal_viewport_remote_device_id(&state.owner)
                 .and_then(|owner_device_id| self.device_name_for(owner_device_id))
         });
+        crate::runtime_trace::runtime_trace(
+            "remote",
+            &format!(
+                "[DEBUG-takeover-label] embedded-host.viewport.payload session={session_id} device={} owner={} owner_label={}",
+                device_id.unwrap_or("<none>"),
+                state.owner,
+                owner_label.as_deref().unwrap_or("<null>")
+            ),
+        );
         json!({
             "owner": state.owner,
             "ownerLabel": owner_label,

@@ -441,6 +441,17 @@ impl ControllerInner {
                 .and_then(Value::as_u64)
                 .and_then(|value| u16::try_from(value).ok())
         {
+            let owner_label = payload
+                .get("ownerLabel")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            crate::runtime_trace::runtime_trace(
+                "remote-controller",
+                &format!(
+                    "[DEBUG-takeover-label] viewport.state.recv session={session_id} owner={owner} owner_label={} size={cols}x{rows} generation={generation}",
+                    owner_label.as_deref().unwrap_or("<null>")
+                ),
+            );
             if let Ok(mut terminal_output) = self.terminal_output.lock() {
                 terminal_output.set_dimensions(session_id, cols as usize, rows as usize);
             }
@@ -449,10 +460,7 @@ impl ControllerInner {
                 RuntimeTerminalStreamEvent::Event(TerminalEvent::Viewport {
                     session_id: session_id.to_string(),
                     owner: owner.to_string(),
-                    owner_label: payload
-                        .get("ownerLabel")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
+                    owner_label,
                     cols,
                     rows,
                     generation,

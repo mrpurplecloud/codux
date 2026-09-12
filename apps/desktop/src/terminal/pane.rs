@@ -498,6 +498,17 @@ struct HostedViewportAuthority {
     // Desktop UI consumes owner state and requests its baseline in separate
     // steps. This bit deduplicates that intent; it never authorizes I/O.
     needs_owner_baseline: bool,
+    // Empty owner is pending only while a viewport request is in flight. Once
+    // that request fails or an owner response says empty, UI can offer retry.
+    owner_request_pending: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ViewportOwnershipState {
+    Local,
+    Remote,
+    Pending,
+    Unknown,
 }
 
 enum TerminalOutputEvent {
@@ -553,6 +564,7 @@ fn awaiting_hosted_viewport(
         epoch,
         visible,
         needs_owner_baseline: false,
+        owner_request_pending: true,
     }
 }
 
@@ -569,6 +581,7 @@ fn register_hosted_terminal(
     let output_tx = output_tx.clone();
     let emit = terminal_ui_event_sink(session_event_tx.clone(), session_event_wake_tx.clone());
     let viewport = viewport.cloned();
+    let debug_session_id = session_id.to_string();
     controller.register_terminal_stream(
         session_id,
         Arc::new(move |event| {
@@ -608,12 +621,39 @@ fn register_hosted_terminal(
                             } => {
                                 let was_local = authority.state.owner == authority.identity;
                                 let is_local = *owner == authority.identity;
+                                codux_runtime::runtime_trace::runtime_trace(
+                                    "terminal-takeover",
+                                    &format!(
+                                        "[DEBUG-takeover-label] pane.viewport.recv session={} identity={} owner={owner} owner_label={} size={cols}x{rows} generation={generation}",
+                                        debug_session_id,
+                                        authority.identity,
+                                        owner_label.as_deref().unwrap_or("<null>")
+                                    ),
+                                );
                                 authority.state.owner = owner.clone();
                                 authority.state.owner_label =
-                                    if is_local { None } else { owner_label.clone() };
+                                    if is_local || owner.is_empty() {
+                                        None
+                                    } else {
+                                        owner_label.clone()
+                                    };
                                 authority.state.cols = *cols;
                                 authority.state.rows = *rows;
                                 authority.state.generation = *generation;
+                                authority.owner_request_pending = false;
+                                codux_runtime::runtime_trace::runtime_trace(
+                                    "terminal-takeover",
+                                    &format!(
+                                        "[DEBUG-takeover-label] pane.viewport.saved session={} owner={} owner_label={} is_local={is_local}",
+                                        debug_session_id,
+                                        authority.state.owner,
+                                        authority
+                                            .state
+                                            .owner_label
+                                            .as_deref()
+                                            .unwrap_or("<null>")
+                                    ),
+                                );
                                 if !is_local {
                                     authority.needs_owner_baseline = false;
                                 } else if !was_local {
@@ -622,7 +662,9 @@ fn register_hosted_terminal(
                             }
                             TerminalEvent::Error { .. } => {
                                 authority.state.owner.clear();
+                                authority.state.owner_label = None;
                                 authority.needs_owner_baseline = false;
+                                authority.owner_request_pending = false;
                             }
                             _ => {}
                         }
@@ -1254,7 +1296,9 @@ impl TerminalSessionBinding {
             return;
         }
         viewport.state.owner.clear();
+        viewport.state.owner_label = None;
         viewport.needs_owner_baseline = false;
+        viewport.owner_request_pending = false;
         let _ = hosted.session_event_tx.send(TerminalUiEvent::Viewport {
             remote_owner: true,
             generation: viewport.state.generation,
@@ -1278,7 +1322,9 @@ impl TerminalSessionBinding {
             let mut viewport = viewport.lock();
             if !matches!(command, HostedViewportCommand::Renew) {
                 viewport.state.owner.clear();
+                viewport.state.owner_label = None;
                 viewport.needs_owner_baseline = false;
+                viewport.owner_request_pending = true;
                 let _ = hosted.session_event_tx.send(TerminalUiEvent::Viewport {
                     remote_owner: true,
                     generation: viewport.state.generation,
@@ -1342,16 +1388,37 @@ impl TerminalSessionBinding {
         visible
     }
 
-    fn local_viewport_owns(&self) -> bool {
+    fn viewport_ownership(&self) -> ViewportOwnershipState {
         let inner = self.inner.lock();
         if let Some(viewport) = inner.hosted.as_ref().and_then(|hosted| hosted.viewport.as_ref()) {
             let viewport = viewport.lock();
-            return viewport.state.owner == viewport.identity;
+            if viewport.state.owner.is_empty() {
+                return if viewport.owner_request_pending {
+                    ViewportOwnershipState::Pending
+                } else {
+                    ViewportOwnershipState::Unknown
+                };
+            }
+            return if viewport.state.owner == viewport.identity {
+                ViewportOwnershipState::Local
+            } else {
+                ViewportOwnershipState::Remote
+            };
         }
         inner.session
             .as_ref()
-            .map(|session| session.viewport_state().owner == terminal_viewport_local_owner())
-            .unwrap_or(true)
+            .map(|session| {
+                if session.viewport_state().owner == terminal_viewport_local_owner() {
+                    ViewportOwnershipState::Local
+                } else {
+                    ViewportOwnershipState::Remote
+                }
+            })
+            .unwrap_or(ViewportOwnershipState::Local)
+    }
+
+    fn local_viewport_owns(&self) -> bool {
+        matches!(self.viewport_ownership(), ViewportOwnershipState::Local)
     }
 
     /// Friendly name of the remote device that currently owns the viewport (for

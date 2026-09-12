@@ -2,7 +2,7 @@
 
 ID: desktop-takeover-input
 类型：bug
-状态：active
+状态：done
 创建：2026-09-10
 更新：2026-09-11
 一句话描述：移动端控制的远程项目被桌面端接管后，桌面端仍无法输入。
@@ -46,7 +46,7 @@ broader_checks：`cargo check -p codux-runtime -p codux-terminal-core`；`cargo 
 
 ## 当前阶段
 
-phase：fix
+phase：verify
 
 # Diagnosis
 
@@ -151,5 +151,457 @@ result：未挂载外部工程能力。
 
 latest_verified：修复前设备链及两项 red 保留。两项 target、baseline send-failure、owner retry/deadlock、atomic Replace、更新 UI resize intent 均通过；`codux-terminal-core` 139/139、`codux-runtime` 518/518（4 ignored）、desktop `pty_binding` 15/15、`codux` 256/256、headless `codux-agent` 56/56、mobile Rust FFI 12/12、mobile Dart FFI 7/7 通过；相关 cargo check、release version policy、agent packaging、desktop packaging 测试通过。desktop 独立升至 `2.0.3-beta.11`；headless 与 mobile 版本未变。最终本机测试包已移动到 `/Users/mac/Downloads/Codux.app`；ad-hoc 签名有效，bundle id `com.duxweb.codux`，arm64 UUID `E8A08A77-C248-353E-8F36-0A703890D755` 与 `target/release/codux` 匹配。未覆盖 `/Applications/Codux.app`，设备修复结果待用户替换后验证。
 contract_state：locked
+
+# Reopen：takeover device model label
+
+触发：用户澄清 beta12 终端问题为误报；headless 首次启动的存储权限弹窗未被
+看到，授权后连接与远程终端均正常。该回归不再修复，agent/transport 生产代码
+不得因前述假设改动。
+
+## Active Contract
+
+state：active
+
+### 目标
+
+移动端控制终端时，桌面 takeover 界面稳定显示实际控制设备型号；设备型号已知
+时不得显示通用“平板”，未知时才使用明确的通用占位。输入、viewport owner 和
+远程终端行为保持不变。
+
+### 证据
+
+用户现场确认：headless 存储权限授权后连接与 terminal 正常；剩余问题仅为
+takeover UI 有时显示“平板”。当前尚未锁定型号字段、覆盖顺序或缺省值 first-wrong，
+不能先定性根因。
+
+### 授权变更
+
+仅修复 takeover device model label 的来源/优先级/缺省语义；不得修改 agent
+terminal dispatch、remote transport、queue、viewport ownership、输入/resize、
+权限流程或移动端连接行为。
+
+### 范围
+
+owner / invariant：设备能力/身份协议字段的 canonical source 唯一决定展示型号；
+takeover UI 只格式化并展示，不用“平板”覆盖已知型号。
+allowed_files：查证后限定为设备身份协议、desktop hosted viewport model 和对应
+测试文件；未查证前不增加文件、不改生产代码。
+out_of_scope：已确认正常的 headless storage permission、terminal create、stale
+controller、queue fanout、原 takeover 输入/屏幕收敛问题。
+
+### 验证
+
+baseline：复现真实型号显示为“平板”的 UI/协议输入，记录设备型号原始字段及
+最后一次覆盖者。
+target_check：同一设备重复 claim/reconnect/owner update 后始终显示 canonical
+model；未知设备仍显示约定占位；不得改变 owner/input 行为。
+nearest_regression_check：已有 takeover owner、viewport state、设备身份和 desktop
+UI 测试；必要时运行对应 desktop/mobile integration smoke。
+
+## 当前阶段
+
+phase：diagnosis
+
+## 能力（仅选中时）
+
+blocker：none
+logical_capability：none
+resolved_skill：none
+state：complete
+result：diagnosing-bugs loop 已因用户现场澄清停止；beta12 terminal 假设不纳入实现。
+
+## Checkpoint
+
+latest_verified：headless storage permission 授权后 terminal/connection 正常；未修改
+agent/transport 生产代码。下一动作：枚举设备型号字段、接管消息和 UI fallback，先
+构造稳定 red，再锁 canonical owner。
+contract_state：active
 active_capability：none
 next_action：由用户把 `/Users/mac/Downloads/Codux.app` 替换到 `/Applications/Codux.app` 并启动；复测 Codex 接管后 current screen/输入、同项目 shell、mobile owner 时 desktop拒绝输入；通过后冻结 Gate并完成最终审计，并把 compatibility record 从 pending 改为 verified。
+
+# Reopen：beta12 remote terminal regression
+
+触发：用户确认 beta12 引入新回归；desktop beta12 与 mobile 均出现
+`timed out waiting for terminal.created from remote host`，普通远程 shell
+也无法打开。原 takeover 因果单元和本回归分离，暂不修改。
+
+## 等级
+
+grade：Guarded
+依据：跨 headless agent terminal dispatch、共享 resource subscription owner
+和 bounded transport control queue；影响 desktop/mobile 多个请求方。
+
+## Active Contract
+
+state：locked
+
+### 目标
+
+远程 host 创建 terminal 时，请求设备稳定收到 `terminal.created`；同项目
+terminal list 只发给该 project 的 terminals resource subscribers，不得用
+无目标广播占用请求设备 control queue；desktop/mobile 普通 shell 与 agent
+terminal 创建恢复。原 desktop takeover 行为保持不变。
+
+### 证据
+
+未修改 beta12 代码可执行复现：真实 iroh endpoint、同一请求 peer 不读取
+control stream 时，`device_id=None` 连续接受 84 个 `terminal.list`，随后定向
+`terminal.created` 返回 false，输出
+`REPRO_RESULT=same-peer terminal.list fanout filled requester queue and dropped terminal.created`。
+`2374e940` 是 beta12 引入差异：删除 `project_subscribers` 路由，把 create/exit/close
+list 改为 `send(..., device_id=None)`；transport control queue 为 64，发送为
+`try_send`，满时丢弃。现有 beta12 测试
+`terminal_create_reconciles_every_connected_device` 直接锁定错误的全连接行为。
+当前进程日志另有 `terminal.created` 超时，但未把旧 stale controller 或历史
+terminal-stream failure 归入本因果单元。
+
+### 授权变更
+
+只修复 agent terminal list recipient selection：恢复 project/session
+subscription 语义；`terminal.created` 继续定向请求设备，list reconciliation
+不得与请求 reply 共享无目标 fanout。不得修改 transport queue 容量、desktop/mobile
+router、host主动 baseline、relay、retry policy 或原 takeover 路径。
+
+### 范围
+
+owner / invariant：`RemoteTerminalSubscriptions` 唯一决定 terminal list
+接收者；`TerminalFanout` 负责把 session project 映射为 subscribers；agent
+terminal dispatch 负责按 recipient 发送 list。请求 reply 必须保持定向且不被
+同一请求触发的 reconciliation list 挤占。
+allowed_files：`apps/agent/src/terminals.rs` 及其测试；必要时仅对应
+`apps/agent/src/agent_worktree.rs` 调用点。不改原 takeover 文件，不改 transport。
+out_of_scope：stale controller replacement、历史 terminal lane 拥塞、relay/host
+抖动、desktop/mobile UI、queue capacity/retry、普通 shell 之外的旧问题。
+
+### 验证
+
+baseline：修复前运行新的 recipient/reply regression，必须在当前 beta12
+行为失败；保留真实 same-peer queue repro 输出。
+target_check：project subscriber 收到 list；未订阅 peer 不收到 list；create
+requester 只收到定向 `terminal.created`，在每 peer bounded queue 模型下 reply
+仍成功；close/exit 使用同一 recipient owner。
+nearest_regression_check：`cargo test -p codux-agent` terminal 专项、
+`cargo test -p codux-remote-transport`；真实 beta12 desktop/mobile 各执行
+terminal create 与普通 shell smoke test。通过标准为不再出现
+`timed out waiting for terminal.created from remote host`，且原 agent
+terminal subscription/baseline/output tests 保持通过。
+
+## 当前阶段
+
+phase：diagnosis
+
+## 能力（仅选中时）
+
+blocker：需要 tight red feedback loop 验证 beta12 first-wrong 与 recipient owner。
+logical_capability：Ask Matt:diagnosing-bugs
+resolved_skill：/Users/mac/.agents/skills/diagnosing-bugs/SKILL.md
+state：active
+result：same-peer bounded-queue repro 已完成；当前补 agent dispatch seam regression。
+
+## Checkpoint
+
+latest_verified：生产代码未改；2374e940 all-peer terminal list fanout 与同 peer
+control queue 丢 `terminal.created` 已可执行复现；stale controller 机制列为
+out_of_scope。下一动作：先添加并运行 recipient/reply red，再按 locked contract
+做最小共享路由修复。
+contract_state：locked
+
+## Reopen：beta12 terminal creation regression
+
+触发：用户反馈上一版修复后，desktop beta12 与 mobile 均出现 `timed out waiting for terminal.created from remote host`，普通终端 shell 也无法打开。
+
+状态：stopped；approval：pending。
+
+stop evidence：
+
+- 未修改生产代码时，本机 `runtime-rust.log` 在同一连接建立后连续记录 8 次 `terminal.created` 超时；首轮 hosted attach 仍为 2/2 成功，随后多个项目的 `terminal_load` 每次卡 20 秒，并把 blocking queue 拖成连续约 40 秒等待。
+- Mac Studio 当前 headless agent 确认为 `2.0.3-beta.11`。本次运行段仅出现一次连接丢失；旧日志中的 995129 条 terminal send failure 属于 2026-09-08 历史段，不能作为本次根因。
+- `2374e940` 将 agent 的 `terminal.list` 从项目订阅者改为 `send(..., device_id=None)`，即所有连接 peer；control queue 为 64，发送使用 `try_send`，满时静默丢弃。现有测试 `terminal_create_reconciles_every_connected_device` 正好锁定这一新行为；它与 resource subscription owner 冲突，是当前最强根因候选，但 queue 饱和到 `terminal.created` 超时仍需回归测试确认。
+
+旧 Gate 被反驳字段：原任务 `out_of_scope` 明确排除 host/agent/protocol wire；新症状同时影响 desktop 与 mobile，且 first-wrong 位于 headless agent 的 terminal-list fanout，不能继续沿用 desktop-only baseline contract。原 `completion：complete`、交付 app 与设备复测结论不覆盖本次回归。
+
+新版 Active Contract（待批准）：
+
+- 目标：远程 host 创建/重连 terminal 时，请求设备稳定收到 `terminal.created`；未订阅当前 project 的连接不再收到无关 `terminal.list`；desktop/mobile 普通 shell 与 agent terminal 创建均恢复。
+- 证据：A 级为 beta12 实际日志及远端 beta11 版本确认；B 级为 `2374e940` 当前调用链、control queue/`try_send` 实现和现有全连接回归测试。A 级 queue 饱和因果待最小测试补齐，不把历史 terminal-stream 丢包并入本修复。
+- 授权变更：仅修正 agent terminal list 的 recipient selection，恢复 project/session subscription 语义；`terminal.created` 仍先单播请求设备。不得修改 transport queue、desktop/mobile output router、host主动 baseline、relay 或 retry policy。
+- owner / invariant：`RemoteTerminalSubscriptions` 唯一决定 terminal list 接收者；terminal output 仍只发 session viewers；请求 reply 与 reconciliation push 不得共用无目标广播。
+- allowed_files：`apps/agent/src/terminals.rs`、必要时 `apps/agent/src/agent_worktree.rs` 及对应测试；不改原 desktop takeover baseline 文件。
+- out_of_scope：历史 terminal lane 拥塞、relay/host 抖动、desktop/mobile UI、transport queue 容量和重试机制。
+- verification：先跑现有 agent terminal baseline；新增“未订阅 peer 不收 list、project subscriber 收 list、请求设备收到 created 且 list fanout 不占用其关键 reply”的最小回归；再跑 `cargo test -p codux-agent` terminal 专项与 `cargo test -p codux-remote-transport`。
+
+差异：由 desktop-only hosted viewport 修复转为 agent terminal-list fanout 修复；生产文件新增 agent terminal dispatch，删除历史 terminal-stream 证据作为本次根因的依据；不回滚已交付 takeover baseline，除非新测试证明二者共享同一 first-wrong。
+
+## Reopen checkpoint
+
+latest_verified：当前工作区 tracked clean；现有 targeted agent tests 均通过，包括 `terminal_create_reconciles_every_connected_device`、`closing_missing_terminal_reconciles_every_connected_device`、`project_subscription_does_not_receive_future_session_errors`。这些测试证明当前全连接行为，但还不是目标回归。
+contract_state：stopped
+active_capability：none
+next_action：等待用户明确批准新版 Active Contract；批准后补最小 recipient/queue 回归，锁根因，再做 surgical fix。
+
+## Reproduction audit：2374e940 queue hypothesis
+
+2026-09-11：用临时 raw iroh 双 peer 探针复现真实 transport。A、B 使用独立 endpoint；B 不读取 control stream，先填入 66 个 1 MiB frame，确认 B 的 host-side control queue 已停止接受。随后按生产顺序对 A 定向发送 `terminal.created`，再用 `device_id=None` 广播 `terminal.list`。A 在 0ms 内收到 `terminal.created` 与 `terminal.list`。
+
+结论：`terminal.list` 无目标广播叠加另一 peer queue 饱和，不能解释请求 peer 的 `terminal.created` 超时；该候选根因撤销。首次探针误用同进程 `connect_controller`，共享 endpoint 使 B 替换 A，结果作废；raw 双 endpoint 已排除该干扰。未修改生产代码。
+
+next_action：继续构造可执行的端到端 terminal.create 失败复现，优先区分 agent create/PTY 阻塞、请求 peer 连接替换或 reply 入队后消费失败；在此之前不定性、不改生产代码、不请求修复批准。
+
+## Reproduction audit update：same-peer queue 与 stale controller
+
+2026-09-11：补充两条可执行探针，均未修改生产代码。
+
+- same-peer queue：临时 `same_peer` 使用当前 transport 建立一个不读 control stream 的请求 peer；host 以 `device_id=None` 连续广播 84 个 `terminal.list` 后，向同一 peer 定向发送 `terminal.created`。输出为 `accepted=84 created_send=false`，最终没有 `terminal.created`。这证明 `2374e940` 的 all-peer list fanout 与同一 bounded control queue 组合可丢关键 reply；但 Mac Studio 当前 beta11 日志从本次进程启动后 `Agent transport send failed: stream=control` 为 0，两个 control failure 位于旧 beta6 日志段，故尚无本次事故的现场因果证据。该风险保留为最近回归，不据此定性。
+- stale controller：临时 `controller_alias` 使用两个独立 iroh endpoint，以同一 device alias 建立 A/B；B 替换 A 后，A 的 `controller.send(terminal.create)` 返回 `true`，host `host_seen=[]`，A 在等待窗口没有 reply。稳定输出为 `REPRO_RESULT=controller send accepted stale terminal.create but no terminal.created reply after peer replacement`。该探针直接复现 `terminal.created` waiter 超时链。
+
+first-wrong：`RemoteIrohHostTransport::insert_peer` 替换旧 alias 时立即关闭旧 connection；旧 `RemoteIrohControllerTransport` 的 reader/close callback 尚未执行前，`send()` 仍只看到未关闭的 mpsc sender，`try_send` 返回成功。请求进入陈旧队列后被连接关闭丢弃，`RemoteController::request()` 继续等待 20 秒。桌面 `publish_connection` 也把旧 controller 的 shutdown 放在 live slot replacement 之后异步执行，扩大同一窗口。
+
+现场关联：未修改 beta12 desktop 日志存在多次 `terminal.created` 20 秒超时及约 40 秒 `terminal_load`；Mac Studio beta11 日志反复出现 `iroh_host_peer_replaced`，稳定连接下独立 terminal probe 可成功。故 stale peer replacement 是当前已可执行复现且与现场最吻合的根因候选；same-peer queue 仅列为可达相邻风险，不能夹带进修复。
+
+当前结论：A 级确认 stale transport failure mechanism；beta12 现场由该机制触发的完整设备链仍需在一次受控 reconnect/replacement 期间记录 requestId 对齐后，才把现场归因冻结为根因。生产代码、任务原 Active Contract 与授权范围保持不变，修复批准仍 pending。
+
+next_action：停止外部扰动；准备最小修复方案，优先验证旧 controller 在新 live connection 发布前后是否仍可发送。未获用户明确批准前不改生产代码。
+
+# Reopen：takeover label diagnostic
+
+触发：用户补充真实行为：agent 会话稳定显示接管提示和正确型号；shell 通常不显示
+提示而直接由移动端控制，但偶尔停在接管层并显示“平板”。用户明确要求增加型号
+诊断日志。beta12 terminal 创建问题已确认是权限弹窗误报，不纳入当前任务。
+
+## Active Contract
+
+state：active
+
+### 目标
+
+用一次真实 Android 真机复现区分 shell/agent 的接管层设计行为与型号字段丢失：记录
+移动端发送设备身份、host 解析结果、viewport.state wire 字段、desktop 接收值、pane
+保存值和 fallback 渲染条件。已知型号显示为“平板”时，日志必须能定位 first-wrong。
+
+### 证据
+
+用户现场观察：agent 会话型号正确；shell 接管过渡偶发停在“平板”。Android Studio
+ADB 真机 `AD7B024702000799` 已连接，移动端版本
+`2.0.3-beta.10.sideload`；现有移动日志只记录 owner/尺寸，不记录 `ownerLabel`。
+源码显示 desktop 没有 shell/agent 分支，接管层唯一条件是
+`local_viewport_owns() == false`；因此“shell 不提示”可能是 owner 快速收敛，“平板”
+必须继续用现场日志判别，不能先定性为 by design。
+
+### 授权变更
+
+仅允许加入临时、可回滚、带唯一前缀 `[DEBUG-takeover-label]` 的诊断日志；不改变
+协议字段、owner 判定、shell/agent 行为、输入、resize、transport、queue、权限或
+fallback 语义。采集完成后删除全部诊断改动。
+
+### 范围
+
+owner / invariant：viewport owner 身份字段及其 canonical label 在移动端、host、
+desktop controller、pane state、render fallback 之间不得无声丢失。
+allowed_files：仅 `apps/mobile/lib/screens/home/state/terminal.dart`、
+`apps/agent/src/terminals.rs`、desktop runtime controller/host viewport 发送点、
+`apps/desktop/src/terminal/pane.rs`、`apps/desktop/src/terminal/render.rs` 及必要
+的构建产物；日志不得提交为行为修复。
+out_of_scope：terminal 创建/连接、远程 shell、viewport ownership、输入/resize、
+权限流程和任何未被 first-wrong 证据支持的 fallback 修复。
+
+### 验证
+
+baseline：未修改运行链已观察到 Android `terminal.viewport.state` owner/尺寸；无
+`ownerLabel` 诊断，桌面当前进程无主窗口，尚未完成当前 shell/agent 对照复现。
+target_check：使用 Android Studio ADB 真机重复 agent 与 shell 接管；每次异常必须能
+按同一 session 对齐五个边界日志并指出首个空/错误 label。未复现或日志链不完整不得
+定性根因。
+cleanup_check：`rg '\[DEBUG-takeover-label\]'` 无生产命中；行为代码 diff 为空。
+
+## 当前阶段
+
+phase：diagnosis
+
+## Checkpoint
+
+latest_verified：正式 `/Applications/Codux.app` 已重新配对并生成新 controller
+`8ec35817fa684f42bd952f639d286989`；headless `codux device` 记录为 `MPC MBP`，
+最近配对时间为 2026-09-12 00:07；正式 `remote-controllers.json` 仅保存新 ID。
+旧项目状态仍保留 `a5f00c6abaaa45d3a1dae7d2697ec742` 的 runtimeTarget，正式日志因此
+继续出现 `No saved remote host for device a5f...`；该错误属于旧项目/终端恢复绑定，不能
+作为新 controller 连接失败证据。未修改行为代码，未定性型号根因。下一动作：只用新
+`8ec...` 项目副本执行 shell/agent 接管对照。
+contract_state：active
+active_capability：Ask Matt:diagnosing-bugs
+next_action：只用新 `8ec...` 项目副本执行 shell/agent 接管对照；采集后立即删除日志
+改动，不进入 fix Gate。
+
+## Code audit：VGBridge split takeover
+
+2026-09-11：未改生产行为。`TerminalManager.sessions`、host fanout、desktop
+`terminal_streams` 与每个 `TerminalSessionBinding` 均按 `session_id` 分隔；同项目
+两个 terminal 不共享 viewport owner。`session_terminal_baseline_auto_claims_and_targets_only_subscribed_split`
+通过：session A 被 remote owner 接管时只改变 A，session B 保持原 owner/grid。
+
+桌面自动路径：首次 layout 或非本机 owner 时尝试 `Auto`；host `Auto` 只接管默认
+local owner，不能覆盖已有 remote explicit owner。remote owner 仍显示 takeover；
+本机 owner 收到 authoritative state 后显示正常 terminal、允许 input/resize。手动
+按钮走 `Force`，只作用当前 session。
+
+label 路径：host 从 paired-device store 的 `name` 生成 `ownerLabel`，controller 按
+session 转发，pane 保存；`viewport_state_payload_includes_owner_label`、
+`hosted_viewport_exposes_remote_owner_label` 均通过。该字段是配对/设备设置名称，
+不是可靠的 Android 硬件 model；名称本身为“平板”时，显示“平板”属于数据值，不是
+aspect-ratio fallback。
+
+fallback 仍可达：旧 host/缺失 ownerLabel、unknown/unnamed paired device，以及
+`Auto`/reconnect 在 authoritative reply 前先清空 owner 的短窗口。当前 render 在
+owner 非本机时立即显示 overlay，label 缺失则按 grid aspect ratio 显示 phone/tablet。
+因此“另一 terminal 显示按钮”只能由该 session 自身 remote owner 或该 session 的
+transient unknown state 触发，不能由同项目另一 session 的 takeover 直接触发。
+
+verification：
+- `cargo test -p codux-runtime viewport_state_payload_includes_owner_label -- --nocapture`：1 passed。
+- `cargo test -p codux hosted_viewport_exposes_remote_owner_label -- --nocapture`：1 passed。
+- `cargo test -p codux-runtime session_terminal_baseline_auto_claims_and_targets_only_subscribed_split -- --nocapture`：1 passed。
+- ADB `devices -l`：无在线设备；shell/agent 现场对照尚未完成，间歇性 first-wrong 未冻结。
+
+next_action：连接 Android 真机后按 session 对齐 `[DEBUG-takeover-label]` 五个边界；
+若现场需修复，先区分 transient empty owner 与 host label `<null>`，再进入 fix Gate。
+
+## Code audit：diagnostic frequency and transient owner window
+
+2026-09-12：当前诊断标记共 9 个调用点：agent 1、desktop controller 1、embedded
+host 1、desktop pane 2、desktop render 1、mobile 3。`render.fallback` 位于
+`Render::render`，ownerLabel 缺失时每次重绘都会同步调用 `runtime_trace`；该函数持有
+全局 Mutex，并执行 metadata/open/append/close，不能视为无性能影响。其余 Rust 日志按
+viewport state/payload 事件触发；host 连续输出时还会按每 8 个 output sequence 对非 owner
+viewer 重发 owner state，约有每秒数次上界。mobile 日志默认 info 开启，写入 800 条内存
+环形列表并调用 `debugPrint`；state/claim 均非零成本。
+
+owner 清空发生在 `Auto`、`Force`、`Release` 发送前；此时 `local_viewport_owns()` 为
+false，desktop input/resize 均拒绝，权限边界 fail-closed。当前 render 把“owner 为空”与
+“已确认 remote owner”都映射为 takeover overlay，因此可能瞬间出现按钮和 aspect-ratio
+fallback。绝对安全的 UI 修复只能把空 owner 单独视为 pending/unknown，隐藏 takeover
+按钮（或显示不可操作等待态）；继续保持 input/resize 拒绝。不能把空 owner 当 local，不能
+直接保留旧 owner 作为授权依据。当前 clear 路径还保留旧 `owner_label`，造成 pending
+期间标签可能陈旧；单独清 label 会重新触发“平板” fallback，需和 pending 展示一起处理。
+
+来源缺口已确定：mobile `connection.dart` 发送 `device.info`，但 desktop host
+`handle_remote_envelope` 没有 `REMOTE_DEVICE_INFO` 分支，未知消息落入 `_ => {}`；host
+只在 pairing 时把 `deviceName` 写入 `cached_devices.name`，没有后续更新。且现有
+`device.info` payload 只有 `name`，pairing 协议也只有 `deviceName`/`platform`，没有硬件
+model 字段。故当前代码不能保证 takeover 显示实际 Android 型号；`ownerLabel=平板`
+是配对/设置名称时的数据值，`ownerLabel=<null>` 时才是 UI 的 aspect-ratio fallback。
+
+本机 `Codux Dev/runtime-rust.log` 现有标记仅 3 条，均为 embedded-host payload、均为
+`owner_label=<null>`，时间跨度约 2ms；无 controller/pane/render 真机链，不能替代新
+controller 后的 shell/agent 对照。未改生产行为；修复仍待 fix Gate。
+
+## Scope decision
+
+用户暂缓设备身份协议扩展（model/device.info receiver）。pending UI、fallback 文案和
+诊断日志调整均不宣称绝对安全：前两项改变可见 UI，日志调整可能改变异步时序或丢失
+观测。当前保留诊断阶段，未进入 fix Gate。残余风险：`device.info` 仍无 host receiver，
+现有协议仍无法保证真实硬件 model；`ownerLabel=平板` 数据路径仍可出现。
+
+## Fix Gate：pending owner 与缺失 label
+
+用户已同意继续，#3 设备身份协议扩展暂缓。进入 fix 阶段；本次只处理 takeover
+UI 的两个确定缺口及 render 热路径诊断日志。
+
+contract_state：locked
+
+### 目标
+
+`owner` 为空的异步窗口保持 fail-closed：继续拒绝 input/resize，显示不可操作的
+pending 状态，不显示接管按钮。已确认 remote owner 继续显示接管按钮；有
+`ownerLabel` 时原样显示，缺失时显示明确的“未知设备”，不再按 viewport 尺寸
+伪装成“平板”。同项目其他 session、owner 权限和接管时序保持不变。
+
+### 证据
+
+`hosted_viewport_command` 在 Auto/Force/Release 前清空 owner；当前
+`Render::render` 将空 owner 与 confirmed remote owner 合并成 takeover overlay，
+导致短暂接管按钮。`owner_label` 还可能在清空后保留旧值。现有 label 诊断已确认
+缺失 label 的唯一 UI fallback 为 viewport aspect ratio；真实设备名来自配对缓存，
+不是硬件 model。`render.fallback` 位于每次重绘路径，`runtime_trace` 同步持有
+全局锁并写文件；事件边界日志保留用于诊断。
+
+### 授权变更
+
+只改 desktop hosted viewport state/UI 与对应测试、terminal locale 文案；移除
+`render.fallback` 重绘日志，保留 owner/payload/claim 等低频事件边界日志。不得改
+device.info/model 协议、host/mobile/agent 行为、owner 判定、input/resize 权限、
+baseline/reconnect/transport 或其他 terminal 行为。
+
+### 范围
+
+owner / invariant：host-confirmed viewport owner 仍是唯一交互权限来源；空 owner
+只表示 pending/unknown，绝不推导为 local 或 confirmed remote。`ownerLabel` 只作
+展示字段；缺失值只显示通用未知占位。
+allowed_files：`apps/desktop/src/terminal/pane.rs`、
+`apps/desktop/src/terminal/render.rs`、`apps/desktop/src/terminal/tests/pty_binding.rs`、
+`apps/desktop/runtime-assets/i18n/locales/terminal.json`。
+out_of_scope：device.info/model 协议及来源补齐；paired-device 数据迁移；host、
+agent、mobile 行为；viewport ownership、输入/resize、baseline、连接和其他日志。
+
+### 验证
+
+baseline：保留当前空 owner 会显示 takeover overlay、旧 label 可能残留及缺失
+label 按尺寸显示 Phone/Tablet 的代码证据；现有 owner label、owner generation、
+input/resize 测试通过。
+target_check：pending 窗口无接管按钮且无旧 label；confirmed remote owner 仍有
+接管按钮；缺失 label 显示未知设备；owner 清空后 input/resize 仍被拒绝。
+nearest_regression_check：运行 `cargo test -p codux managed_hosted_viewport -- --nocapture`
+及 desktop terminal 相关测试，`cargo fmt --check`、JSON 解析检查和
+`git diff --check` 通过；确认 debug 日志只剩事件边界调用。
+
+approval：approved；用户于 2026-09-11 明确表示“同意结论，继续”。
+next_action：先运行 pending/label red test，再做最小实现；完成专项验证后冻结生产
+代码，保留未授权 #3 残余风险。
+
+## Fix review stop：owner 空值语义
+
+首次 fix 修改后的设计审查发现：当前 `ViewportOwnershipState` 已把 Local/Remote/
+Pending 统一给 render 与 input 权限使用，但仍把所有 `owner=""` 映射为 Pending。
+`owner=""` 同时来自命令进行中、连接/命令失败、错误和重连初始化；失败路径会因此
+永久隐藏接管按钮，丢失用户重试入口。现有专项测试只覆盖成功清空窗口和 label，不覆盖
+失败后的 UI 恢复。
+
+状态机修订要求：新增最小的“owner 请求进行中”协调状态；只有请求进行中隐藏接管
+按钮，失败/错误/无请求的空 owner 回到可重试 Unknown；所有非 Local 状态继续拒绝
+input/resize。label 仍只作展示，缺失显示 Unknown；不得扩展 device.info/model。
+当前生产 diff 暂停叠加，等待该状态语义获批准后再继续 fix。
+
+## Fix review approval
+
+用户已批准加入最小 `owner_request_pending` 状态。授权保持不变：请求进行中隐藏
+接管按钮；失败、错误或无请求的空 owner 回到可重试 Unknown；非 Local 状态继续
+拒绝 input/resize；不扩展 device.info/model 协议。
+
+## Fix verification
+
+latest_verified：`owner_request_pending` 已成为空 owner 的唯一进行中标记。初始
+attach/reconnect 及 Auto/Force/Release 请求清空 owner 后为 Pending；权威 Viewport
+或 Error、命令/resize/input/baseline 失败后清除标记，空 owner 进入 Unknown。Unknown
+继续拒绝 input/resize，但显示“未知设备”和接管重试；Pending 隐藏接管按钮并清除旧
+owner label。Local/Remote 既有行为保持不变。
+
+target_check：`cargo test -p codux pty_binding -- --nocapture` 通过，19 项；覆盖
+Pending、权威空 owner、Force 失败回 Unknown、旧 label 清理和缺失 label 不按尺寸推断。
+`cargo test -p codux managed_hosted_viewport -- --nocapture` 通过，4 项；
+`cargo test -p codux takeover_label_does_not_infer_device_from_missing_owner_label -- --nocapture`
+通过，1 项。
+
+nearest_regression_check：`cargo test -p codux terminal::tests::viewport -- --nocapture`
+通过，13 项；`cargo check -p codux` 通过，0 errors、1 future-incompat warning；
+`terminal.json` JSON 解析通过；`git diff --check` 通过。所有 input/resize/右键菜单
+caller 仍通过 `local_viewport_owns()` 的 Local-only 判定。
+
+diagnostics：移除 render 重绘热路径 `[DEBUG-takeover-label]`；保留 8 个 viewport/
+payload/claim 事件边界调用。它们仍有非零日志成本，但不随 GPUI render 重绘触发。
+
+residual：配对名称仍可能是“平板”；`device.info` 未被 desktop host 接收，现有协议
+没有硬件 model 字段。该来源缺口已明确记录但按用户批准保持 deferred，不影响本次
+Pending/Unknown UI 修复。完整 `cargo fmt --all -- --check` 仍受当前 broader diff
+中既有格式差异阻断；本次新增代码无 `git diff --check` 问题，未执行全库格式重写。
+
+contract_state：frozen
+completion：done
+next_action：无生产修改；待用户在实际设备替换安装包后复测接管短暂窗口与失败重试。

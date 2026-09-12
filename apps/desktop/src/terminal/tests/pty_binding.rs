@@ -511,6 +511,92 @@ fn hosted_viewport_exposes_remote_owner_label() {
 }
 
 #[test]
+fn hosted_viewport_clear_drops_stale_label_and_command_enters_pending() {
+    let controller = Arc::new(HostedTestController::managed());
+    let (binding, _, _) = managed_binding(controller.clone());
+
+    controller.emit(
+        0,
+        labeled_viewport_event("remote:phone", Some("Pixel 9"), 2),
+    );
+    assert_eq!(binding.viewport_owner_label().as_deref(), Some("Pixel 9"));
+
+    controller.emit(
+        0,
+        labeled_viewport_event("", Some("stale device"), 3),
+    );
+    assert_eq!(
+        binding.viewport_ownership(),
+        ViewportOwnershipState::Unknown
+    );
+    assert!(binding.viewport_owner_label().is_none());
+
+    controller.emit(
+        0,
+        labeled_viewport_event("remote:phone", Some("Pixel 9"), 4),
+    );
+    binding.restore_local_viewport().unwrap();
+
+    assert!(!binding.local_viewport_owns());
+    assert_eq!(
+        binding.viewport_ownership(),
+        ViewportOwnershipState::Pending
+    );
+    assert!(binding.viewport_owner_label().is_none());
+}
+
+#[test]
+fn failed_hosted_viewport_command_exposes_retryable_unknown_state() {
+    let controller = Arc::new(HostedTestController::managed());
+    let (binding, _, _) = managed_binding(controller.clone());
+
+    assert_eq!(
+        binding.viewport_ownership(),
+        ViewportOwnershipState::Pending
+    );
+    controller.fail("force");
+    binding.restore_local_viewport().unwrap();
+
+    assert_eq!(
+        binding.viewport_ownership(),
+        ViewportOwnershipState::Unknown
+    );
+    assert!(!binding.local_viewport_owns());
+}
+
+#[test]
+fn takeover_label_does_not_infer_device_from_missing_owner_label() {
+    assert_eq!(
+        takeover_device_label(ViewportOwnershipState::Remote, None, "zh-Hans"),
+        "未知设备"
+    );
+    assert_eq!(
+        takeover_device_label(
+            ViewportOwnershipState::Remote,
+            Some("  ".to_string()),
+            "zh-Hans"
+        ),
+        "未知设备"
+    );
+    assert_eq!(
+        takeover_device_label(
+            ViewportOwnershipState::Remote,
+            Some("Pixel 9".to_string()),
+            "zh-Hans"
+        ),
+        "Pixel 9"
+    );
+    assert_eq!(
+        takeover_device_label(
+            ViewportOwnershipState::Pending,
+            Some("stale device".to_string()),
+            "zh-Hans"
+        ),
+        "正在确认设备状态..."
+    );
+}
+
+#[test]
 fn hosted_baseline_request_failure_keeps_owner_and_retries_intent() {
     let controller = Arc::new(HostedTestController::managed());
     let (binding, _, _) = managed_binding(controller.clone());

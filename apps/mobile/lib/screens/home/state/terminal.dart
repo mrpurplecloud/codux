@@ -16,8 +16,18 @@ extension _HomePageTerminal on HomeController {
     final previousOwner =
         _terminalViewportController.ownerFor(sessionId)?.trim() ?? '';
     final applied = _terminalViewportController.applyRemoteState(message);
-    if (!applied) return;
     final payload = message.payload is Map ? message.payload as Map : null;
+    final rawOwner = payload?['owner']?.toString() ?? '';
+    final rawOwnerLabel = payload?['ownerLabel']?.toString();
+    final activeDeviceId = _activeDevice?.deviceId.trim() ?? '';
+    final activeDeviceName = _activeDevice?.name.trim() ?? '';
+    CoduxLog.info(
+      '[DEBUG-takeover-label] viewport.state session=$sessionId '
+      'rawOwner=$rawOwner rawOwnerLabel=${rawOwnerLabel ?? '<null>'} '
+      'applied=$applied previousOwner=$previousOwner '
+      'activeDeviceId=$activeDeviceId activeDeviceName=$activeDeviceName',
+    );
+    if (!applied) return;
     final owner = _terminalViewportController.ownerFor(sessionId) ?? '';
     final localOwner = _activeDevice == null
         ? ''
@@ -29,6 +39,11 @@ extension _HomePageTerminal on HomeController {
     // "Take over here" to move the PTY grid to this device.
     final handedAway =
         owner.isNotEmpty && (localOwner.isEmpty || owner != localOwner);
+    CoduxLog.info(
+      '[DEBUG-takeover-label] viewport.derived session=$sessionId '
+      'owner=$owner localOwner=$localOwner handedAway=$handedAway '
+      'interactive=${localOwner.isNotEmpty && owner == localOwner}',
+    );
     final staleOutput =
         payload != null &&
         payload['staleOutput'] == true &&
@@ -549,6 +564,12 @@ extension _HomePageTerminal on HomeController {
             _viewportClaimThrottle) {
       return;
     }
+    CoduxLog.info(
+      '[DEBUG-takeover-label] viewport.claim session=$id '
+      'intent=${intent.name} renewOnly=$renewOnly '
+      'activeDeviceId=${_activeDevice?.deviceId.trim() ?? ''} '
+      'activeDeviceName=${_activeDevice?.name.trim() ?? ''}',
+    );
     final sent = _sendTerminalEnvelope(
       RelayEnvelope(
         type: RemoteMessageType.terminalViewportClaim,

@@ -527,6 +527,11 @@ fn viewport_state_payload(
     let owner_label = state.owner_label.clone().or_else(|| {
         terminal_viewport_remote_device_id(&state.owner).and_then(device_name_for)
     });
+    eprintln!(
+        "[DEBUG-takeover-label] agent.viewport.payload session={session_id} owner={} owner_label={}",
+        state.owner,
+        owner_label.as_deref().unwrap_or("<null>")
+    );
     json!({
         "sessionId": session_id,
         "owner": state.owner,

@@ -1,3 +1,5 @@
+use gpui::prelude::FluentBuilder as _;
+
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.set_render_visible(true, cx);
@@ -55,7 +57,9 @@ impl Render for TerminalView {
         // owner-CHANGE event, so switching to a session a remote already owns
         // (no change → no event) would leave it stale and we'd wrongly render the
         // live terminal instead of the "taken over" placeholder.
-        let remote_viewer = !self.session.local_viewport_owns();
+        let viewport_ownership = self.session.viewport_ownership();
+        let remote_viewer = !matches!(viewport_ownership, ViewportOwnershipState::Local);
+        let viewport_pending = matches!(viewport_ownership, ViewportOwnershipState::Pending);
         let terminal = if remote_viewer {
             // Handed off to a remote device (phone/pad). We deliberately do NOT
             // mirror its (differently-sized) grid into this pane -- that is the
@@ -69,10 +73,8 @@ impl Render for TerminalView {
             let accent = cx.theme().primary;
             let accent_fg = cx.theme().primary_foreground;
             let lang = self.config.language.clone();
-            // Infer the controlling device type from its grid aspect ratio
-            // (portrait → phone, landscape → tablet). A friendly device NAME
-            // needs a device_id→name pipe from the host; for now the type stands
-            // in for it.
+            // Icon follows current grid orientation. Device label comes from
+            // the owner state; missing labels stay explicitly unknown.
             let (model_cols, model_rows) = self.model.read(cx).dimensions();
             let portrait = model_rows >= model_cols;
             let device_icon = if portrait {
@@ -80,13 +82,11 @@ impl Render for TerminalView {
             } else {
                 HeroIconName::DeviceTablet
             };
-            let device_label = self.session.viewport_owner_label().unwrap_or_else(|| {
-                if portrait {
-                    codux_runtime::i18n::translate(&lang, "terminal.handoff.phone", "Phone")
-                } else {
-                    codux_runtime::i18n::translate(&lang, "terminal.handoff.tablet", "Tablet")
-                }
-            });
+            let device_label = takeover_device_label(
+                viewport_ownership,
+                self.session.viewport_owner_label(),
+                &lang,
+            );
             terminal.child(
                 div()
                     .absolute()
@@ -121,45 +121,48 @@ impl Render for TerminalView {
                             .text_color(fg.opacity(0.88))
                             .child(device_label.to_string()),
                     )
-                    .child(div().h(px(4.0)))
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .text_color(fg.opacity(0.45))
-                            .child(codux_runtime::i18n::translate(
-                                &lang,
-                                "terminal.handoff.inUse",
-                                "is using this terminal",
-                            )),
-                    )
-                    .child(div().h(px(24.0)))
-                    .child(
-                        div()
-                            .id("terminal-take-over")
-                            .px(px(16.0))
-                            .py(px(6.0))
-                            .rounded(px(999.0))
-                            .bg(accent)
-                            .cursor_pointer()
-                            .hover(|style| style.opacity(0.88))
-                            .on_click(cx.listener(|view, _event, _window, cx| {
-                                if let Err(error) = view.session.restore_local_viewport() {
-                                    eprintln!("failed to reclaim terminal viewport: {error}");
-                                }
-                                cx.notify();
-                            }))
+                    .when(viewport_pending, |this| this.child(div().h(px(24.0))))
+                    .when(!viewport_pending, |this| {
+                        this.child(div().h(px(4.0)))
                             .child(
                                 div()
                                     .text_size(px(13.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(accent_fg)
+                                    .text_color(fg.opacity(0.45))
                                     .child(codux_runtime::i18n::translate(
                                         &lang,
-                                        "terminal.handoff.takeOver",
-                                        "Take over",
+                                        "terminal.handoff.inUse",
+                                        "is using this terminal",
                                     )),
-                            ),
-                    ),
+                            )
+                            .child(div().h(px(24.0)))
+                            .child(
+                                div()
+                                    .id("terminal-take-over")
+                                    .px(px(16.0))
+                                    .py(px(6.0))
+                                    .rounded(px(999.0))
+                                    .bg(accent)
+                                    .cursor_pointer()
+                                    .hover(|style| style.opacity(0.88))
+                                    .on_click(cx.listener(|view, _event, _window, cx| {
+                                        if let Err(error) = view.session.restore_local_viewport() {
+                                            eprintln!("failed to reclaim terminal viewport: {error}");
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(accent_fg)
+                                            .child(codux_runtime::i18n::translate(
+                                                &lang,
+                                                "terminal.handoff.takeOver",
+                                                "Take over",
+                                            )),
+                                    ),
+                            )
+                    }),
             )
         } else {
             let terminal = terminal.child(element).child(
@@ -195,6 +198,29 @@ impl Render for TerminalView {
                 terminal_context_menu(menu, &menu_view, &menu_language, cx)
             })
     }
+}
+
+fn takeover_device_label(
+    ownership: ViewportOwnershipState,
+    owner_label: Option<String>,
+    language: &str,
+) -> String {
+    if matches!(ownership, ViewportOwnershipState::Pending) {
+        return codux_runtime::i18n::translate(
+            language,
+            "terminal.handoff.pending",
+            "Checking device status...",
+        );
+    }
+    owner_label
+        .filter(|label| !label.trim().is_empty())
+        .unwrap_or_else(|| {
+            codux_runtime::i18n::translate(
+                language,
+                "terminal.handoff.unknownDevice",
+                "Unknown device",
+            )
+        })
 }
 
 // Zed-style right-click menu; stays closed while a mouse-reporting app consumes
