@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use codux_protocol::{
     REMOTE_BLOB_MAX_BYTES, REMOTE_TERMINAL_UPLOAD_BLOB, RemoteEnvelope, RemoteTransportKind,
 };
-use futures_util::StreamExt;
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use iroh::{
     Endpoint, EndpointAddr, RelayMap, RelayMode, RelayUrl, SecretKey, TransportAddr, Watcher,
     endpoint::{Connection, PathEvent, RecvStream, SendStream, presets},
@@ -93,9 +93,9 @@ const IROH_STREAM_READY_TIMEOUT: Duration = Duration::from_secs(10);
 /// The timeout tests wait this out; the behaviour is the same at any length.
 #[cfg(test)]
 const IROH_STREAM_READY_TIMEOUT: Duration = Duration::from_secs(1);
-/// How many times to re-dial on the same warm endpoint before surfacing an error
-/// to the reconnect loop (which then cold-starts a fresh endpoint). Each attempt
-/// gets `BASE + 2s * attempt`, so 4s + 6s + 8s = 18s of dialling on one online().
+/// Maximum dials on the same warm endpoint before surfacing an error to the
+/// reconnect loop. Retry windows are `BASE + 2s * attempt`: 4s + 6s + 8s = 18s.
+/// Earlier handshakes remain eligible to win during later retry windows.
 const IROH_DIAL_ATTEMPTS: usize = 3;
 /// Growth per relay-routed dial attempt (see [`DialSchedule`]).
 const IROH_DIAL_STEP: Duration = Duration::from_secs(2);
@@ -115,9 +115,9 @@ const IROH_DIRECT_DIAL_ATTEMPTS: usize = 2;
 /// - **Relay-routed** dials get an escalating ladder. The first dial to a peer
 ///   routinely stalls while the relay primes the cross-path, and the re-dial
 ///   then connects in milliseconds, so patience genuinely pays here.
-/// - **Relay-less** dials go straight at addresses we already hold. Such a dial
-///   either completes within an RTT or the address is unreachable; escalating
-///   only makes the caller wait longer for a verdict that will not change.
+/// - **Relay-less** dials go straight at addresses we already hold. They keep a
+///   shorter total budget without requiring each handshake to finish inside
+///   the first retry window; high RTT alone does not prove unreachability.
 ///
 /// The relay-less budget is bounded by [`IROH_ONLINE_TIMEOUT`]: before this
 /// policy existed, an unreachable relay cost the user exactly that long before
@@ -1563,29 +1563,36 @@ impl RemoteIrohControllerTransport {
         } = acquire_controller_endpoint(relay_url.as_ref(), &relay_authentication, &on_log).await?;
         let connection = {
             let online_started = std::time::Instant::now();
-            let mut dial_started = online_started;
-            let pending = endpoint.connect(endpoint_addr.clone(), CODUX_REMOTE_ALPN);
+            let start_dial = |attempt| {
+                let endpoint = &endpoint;
+                let addr = endpoint_addr.clone();
+                async move {
+                    let started = std::time::Instant::now();
+                    let result = endpoint.connect(addr, CODUX_REMOTE_ALPN).await;
+                    (attempt, started.elapsed(), result)
+                }
+            };
+            let mut pending = Box::pin(start_dial(1));
             let relay_ready = tokio::time::timeout_at(relay_startup_deadline, endpoint.online());
-            tokio::pin!(pending, relay_ready);
+            tokio::pin!(relay_ready);
             // Let any usable path win while the relay registers. If registration
             // wins, keep polling this same dial: cancelling it would throw away
             // a handshake already in progress. A failed early dial still gets
             // the remainder of this endpoint's startup window and retry budget;
             // subsequent connections cannot restart the startup window.
             let mut connection = tokio::select! {
-                result = &mut pending => match result {
+                (_, elapsed, result) = &mut pending => match result {
                     Ok(connection) => {
                         log_transport(&on_log, format!(
                             "iroh_controller dial elapsed_ms={} attempt=1",
-                            dial_started.elapsed().as_millis(),
+                            elapsed.as_millis(),
                         ));
                         Some(connection)
                     }
                     Err(error) => {
                         log_transport(&on_log, format!("iroh_controller early dial failed error={error}"));
                         let _ = relay_ready.await;
-                        pending.set(endpoint.connect(endpoint_addr.clone(), CODUX_REMOTE_ALPN));
-                        dial_started = std::time::Instant::now();
+                        pending.set(start_dial(1));
                         None
                     }
                 },
@@ -1604,28 +1611,41 @@ impl RemoteIrohControllerTransport {
             // not consume the retry allowance of a slow, usable relay.
             let schedule = DialSchedule::for_relay_state(relay_online);
             let mut last_dial_cause = None;
-            for attempt in 0..schedule.attempts {
+            let mut dials = FuturesUnordered::new();
+            if connection.is_none() {
+                dials.push(pending);
+            }
+            // A retry starts another chance to connect; it does not revoke an
+            // earlier handshake's chance to finish. A reachable path can take
+            // longer than one retry interval. Keep the existing attempt count
+            // and total budget, and drop every losing dial when this scope ends.
+            'attempts: for attempt in 0..schedule.attempts {
                 if connection.is_some() {
                     break;
                 }
-                match tokio::time::timeout(schedule.timeout_for(attempt), &mut pending).await {
-                    Ok(Ok(established)) => {
-                        log_transport(
-                            &on_log,
-                            format!(
-                                "iroh_controller dial elapsed_ms={} attempt={}",
-                                dial_started.elapsed().as_millis(),
-                                attempt + 1
-                            ),
-                        );
-                        connection = Some(established);
-                        break;
-                    }
-                    Ok(Err(error)) => {
-                        last_dial_cause = Some(format!("connect failed: {error}"));
-                    }
-                    Err(_) => {
-                        last_dial_cause = None;
+                let attempt_started = tokio::time::Instant::now();
+                let deadline = attempt_started + schedule.timeout_for(attempt);
+                while !dials.is_empty() {
+                    match tokio::time::timeout_at(deadline, dials.next()).await {
+                        Ok(Some((winner, elapsed, Ok(established)))) => {
+                            log_transport(
+                                &on_log,
+                                format!(
+                                    "iroh_controller dial elapsed_ms={} attempt={winner}",
+                                    elapsed.as_millis(),
+                                ),
+                            );
+                            connection = Some(established);
+                            break 'attempts;
+                        }
+                        Ok(Some((_, _, Err(error)))) => {
+                            last_dial_cause = Some(format!("connect failed: {error}"));
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            last_dial_cause = None;
+                            break;
+                        }
                     }
                 }
                 let attempt_error = dial_exhausted_error(relay_online, last_dial_cause.as_deref());
@@ -1634,11 +1654,12 @@ impl RemoteIrohControllerTransport {
                     format!(
                         "iroh_controller dial retry attempt={} elapsed_ms={} reason={attempt_error}",
                         attempt + 1,
-                        dial_started.elapsed().as_millis()
+                        attempt_started.elapsed().as_millis()
                     ),
                 );
-                pending.set(endpoint.connect(endpoint_addr.clone(), CODUX_REMOTE_ALPN));
-                dial_started = std::time::Instant::now();
+                if attempt + 1 < schedule.attempts {
+                    dials.push(Box::pin(start_dial(attempt + 2)));
+                }
             }
             let Some(connection) = connection else {
                 // Relay setup continues throughout the dials. Only its current
@@ -1733,7 +1754,7 @@ impl RemoteIrohControllerTransport {
             let transport = Arc::clone(&transport);
             let on_state = Arc::clone(&on_state);
             Arc::new(move || {
-                if transport.close_sender() {
+                if transport.close() {
                     on_state(String::new(), "closed".to_string());
                 }
             })
@@ -1752,7 +1773,7 @@ impl RemoteIrohControllerTransport {
         Ok(transport)
     }
 
-    fn close_sender(&self) -> bool {
+    fn close(&self) -> bool {
         if self.closed.swap(true, Ordering::SeqCst) {
             return false;
         }
@@ -1765,8 +1786,12 @@ impl RemoteIrohControllerTransport {
         if let Ok(mut tx) = self.upload_tx.lock() {
             *tx = None;
         }
-        if let Ok(mut connection) = self.connection.lock() {
-            *connection = None;
+        if let Ok(mut connection) = self.connection.lock()
+            && let Some(connection) = connection.take()
+        {
+            // Readers and path observers hold clones. Releasing our handle
+            // alone would leave this connection live until the peer closes it.
+            connection.close(0u32.into(), b"controller closed");
         }
         true
     }
@@ -1890,9 +1915,10 @@ impl RemoteTransport for RemoteIrohControllerTransport {
     async fn shutdown(&self) {
         // Do NOT close the endpoint: it is process-shared (see
         // acquire_controller_endpoint), so closing it here would kill every other
-        // controller connection and force the next one to cold-start. Dropping our
-        // connection (close_sender) is enough; the pool keeps the endpoint warm.
-        let _ = self.close_sender();
+        // controller connection and force the next one to cold-start. Closing our
+        // connection explicitly also releases its readers and path watcher;
+        // the pool keeps the endpoint warm for other connections.
+        let _ = self.close();
     }
 }
 
@@ -2885,6 +2911,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn controller_shutdown_closes_its_connection_and_keeps_the_shared_endpoint_live() {
+        let _guard = CONTROLLER_TEST_LOCK.lock().await;
+        let first_host = test_host().await;
+        let second_host = test_host().await;
+        let unavailable_relay = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let relay: RelayUrl = format!("http://{}/", unavailable_relay.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let (first, mut first_messages) =
+            connect_test_controller(first_host.transport.endpoint.addr(), &relay, "first").await;
+        let (second, mut second_messages) =
+            connect_test_controller(second_host.transport.endpoint.addr(), &relay, "second").await;
+        assert_eq!(first.endpoint.id(), second.endpoint.id());
+        assert_controller_ping(&first, &mut first_messages).await;
+        assert_controller_ping(&second, &mut second_messages).await;
+        // A path watcher or an in-flight reader can still hold a connection
+        // handle. Shutdown must close the connection despite those observers.
+        let observed = first.connection.lock().unwrap().as_ref().unwrap().clone();
+        first.shutdown().await;
+        let closed_locally = observed.close_reason().is_some();
+        assert_controller_ping(&second, &mut second_messages).await;
+        first.shutdown().await;
+        second.shutdown().await;
+        first_host.transport.shutdown().await;
+        second_host.transport.shutdown().await;
+        assert!(
+            closed_locally,
+            "shutdown left the connection live until the peer closed it"
+        );
+    }
+
+    #[tokio::test]
     async fn reused_offline_controller_does_not_restart_relay_startup_budget() {
         let _guard = CONTROLLER_TEST_LOCK.lock().await;
         let unavailable_relay = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2929,6 +2987,79 @@ mod tests {
             elapsed <= DialSchedule::for_relay_state(false).total_budget() + Duration::from_secs(1),
             "reusing an offline endpoint restarted relay startup: {elapsed:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn slow_handshake_survives_a_retry_boundary() {
+        assert_controller_connects_after_handshake_delays(vec![
+            IROH_DIAL_BASE_TIMEOUT + Duration::from_millis(250),
+        ])
+        .await;
+    }
+
+    #[tokio::test]
+    async fn stalled_handshake_does_not_block_a_retry() {
+        assert_controller_connects_after_handshake_delays(vec![
+            Duration::from_secs(60),
+            Duration::ZERO,
+        ])
+        .await;
+    }
+
+    async fn assert_controller_connects_after_handshake_delays(delays: Vec<Duration>) {
+        let _guard = CONTROLLER_TEST_LOCK.lock().await;
+        let unavailable_relay = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let relay: RelayUrl = format!("http://{}/", unavailable_relay.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        acquire_controller_endpoint(Some(&relay), "", &None)
+            .await
+            .unwrap();
+        tokio::time::sleep(IROH_ONLINE_TIMEOUT).await;
+
+        let host = test_host().await;
+        let delayed = direct_endpoint(vec![CODUX_REMOTE_ALPN.to_vec()]).await;
+        let server = delayed.clone();
+        let handler = host.transport.clone();
+        let accept_task = tokio::spawn(async move {
+            let mut peers = tokio::task::JoinSet::new();
+            let mut attempt = 0;
+            while let Some(incoming) = server.accept().await {
+                let handler = handler.clone();
+                let delay = delays[attempt.min(delays.len() - 1)];
+                attempt += 1;
+                peers.spawn(async move {
+                    // Delay the real QUIC handshake, keeping the application
+                    // stream ACKs fast so this tests only the dial boundary.
+                    tokio::time::sleep(delay).await;
+                    if let Ok(connection) = incoming.await {
+                        handler.handle_connection(connection).await;
+                    }
+                });
+            }
+        });
+        let connected = tokio::time::timeout(
+            IROH_DIAL_BASE_TIMEOUT + Duration::from_secs(2),
+            connect_test_controller(delayed.addr(), &relay, "slow-handshake"),
+        )
+        .await;
+        let (controller, mut messages) = match connected {
+            Ok(connected) => connected,
+            Err(error) => {
+                accept_task.abort();
+                panic!("retry must retain a slow handshake instead of restarting it: {error}");
+            }
+        };
+        assert_controller_ping(&controller, &mut messages).await;
+        // Keep the winner live beyond the late arrival of the other dial.
+        // Aborting the accept worker immediately would hide interference from
+        // a cancelled handshake completing on the server after publication.
+        tokio::time::sleep(IROH_DIAL_BASE_TIMEOUT + Duration::from_millis(500)).await;
+        assert_controller_ping(&controller, &mut messages).await;
+        accept_task.abort();
+        controller.shutdown().await;
+        delayed.close().await;
+        host.transport.shutdown().await;
     }
 
     #[test]
