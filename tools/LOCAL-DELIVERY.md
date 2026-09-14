@@ -28,6 +28,12 @@ an existing sideload package with the same verified signer. The installed APK's
 hash must match the delivered file. Launch the app in the desired pane afterward;
 the script does not rearrange split-screen tasks.
 
+For Android LAN discovery changes, check the visible sideload app with
+`python3 tools/check_android_lan_discovery.py --serial AD7B024702000799 --expect held`.
+After hiding it, use `--expect released`; after returning, use `--expect held`
+again. This read-only check verifies the installed multicast permission and the
+app UID's Wi-Fi multicast lock, not successful mDNS discovery or NAT traversal.
+
 Desktop reuses `apps/desktop/scripts/release/package-gpui.mjs`. The resulting app
 has a local ad-hoc signature, not a notarized public-release signature. Final
 copies are verified. Existing different same-name downloads are preserved; new

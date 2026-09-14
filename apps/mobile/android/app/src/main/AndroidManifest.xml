@@ -1,5 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Iroh uses raw mDNS sockets for local address discovery. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
     <!-- Keeps the process out of the freezer while backgrounded so the host
          link's heartbeats keep flowing; see ConnectionKeepAliveService. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>

@@ -2782,6 +2782,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cold_lan_controller_selects_direct_with_a_live_relay() {
+        use iroh_relay::server::{RelayConfig, Server, ServerConfig};
+
+        let _guard = CONTROLLER_TEST_LOCK.lock().await;
+        crate::install_rustls_crypto_provider();
+        let mut server_config = ServerConfig::default();
+        server_config.relay = Some(RelayConfig::new(([127, 0, 0, 1], 0)));
+        let server = Server::spawn(server_config).await.expect("local relay");
+        let relay: RelayUrl = format!("http://{}/", server.http_addr().unwrap())
+            .parse()
+            .unwrap();
+        let endpoint = Endpoint::builder(presets::N0)
+            .relay_mode(RelayMode::Custom(RelayMap::from(relay.clone())))
+            .clear_address_lookup()
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .alpns(vec![CODUX_REMOTE_ALPN.to_vec()])
+            .bind()
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), endpoint.online())
+            .await
+            .expect("host relay online");
+        let addr = endpoint.addr();
+        assert!(addr.ip_addrs().next().is_some());
+        assert!(addr.relay_urls().next().is_some());
+        let host = test_host_on_endpoint(endpoint, Arc::new(|_| None));
+        let (controller, mut messages) = tokio::time::timeout(
+            Duration::from_secs(2),
+            connect_test_controller(addr, &relay, "cold-lan-with-relay"),
+        )
+        .await
+        .expect("known LAN address must connect promptly with a live relay");
+        let connection = controller
+            .connection
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert!(
+            connection
+                .paths()
+                .iter()
+                .any(|path| path.is_selected() && path.remote_addr().is_ip()),
+            "the first usable controller connection must select the known LAN path"
+        );
+        assert_controller_ping(&controller, &mut messages).await;
+        controller.shutdown().await;
+        host.transport.endpoint.close().await;
+        drop(server);
+    }
+
+    #[tokio::test]
+    async fn relay_bootstrap_controller_upgrades_to_direct_without_reconnecting() {
+        use iroh_relay::server::{RelayConfig, Server, ServerConfig};
+
+        let _guard = CONTROLLER_TEST_LOCK.lock().await;
+        crate::install_rustls_crypto_provider();
+        let mut server_config = ServerConfig::default();
+        server_config.relay = Some(RelayConfig::new(([127, 0, 0, 1], 0)));
+        let server = Server::spawn(server_config).await.expect("local relay");
+        let relay: RelayUrl = format!("http://{}/", server.http_addr().unwrap())
+            .parse()
+            .unwrap();
+        let endpoint = Endpoint::builder(presets::N0)
+            .relay_mode(RelayMode::Custom(RelayMap::from(relay.clone())))
+            .clear_address_lookup()
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .alpns(vec![CODUX_REMOTE_ALPN.to_vec()])
+            .bind()
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), endpoint.online())
+            .await
+            .expect("host relay online");
+        // No IP in the ticket and no host address publication: Iroh must use
+        // the relay to establish QUIC and learn NAT traversal candidates.
+        let addr = EndpointAddr::new(endpoint.id()).with_relay_url(relay.clone());
+        assert!(addr.ip_addrs().next().is_none());
+        let host = test_host_on_endpoint(endpoint, Arc::new(|_| None));
+        let (controller, mut messages) = tokio::time::timeout(
+            Duration::from_secs(5),
+            connect_test_controller(addr, &relay, "relay-bootstrap"),
+        )
+        .await
+        .expect("relay bootstrap must establish a usable connection");
+        assert_controller_ping(&controller, &mut messages).await;
+        let connection = controller
+            .connection
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .clone();
+        let mut events = connection.path_events();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if connection
+                    .paths()
+                    .iter()
+                    .any(|path| path.is_selected() && path.remote_addr().is_ip())
+                {
+                    break;
+                }
+                events
+                    .next()
+                    .await
+                    .expect("connection must remain live while upgrading");
+            }
+        })
+        .await
+        .expect("relay bootstrap must upgrade the same connection to direct");
+        assert_controller_ping(&controller, &mut messages).await;
+        controller.shutdown().await;
+        host.transport.endpoint.close().await;
+        drop(server);
+    }
+
+    #[tokio::test]
     async fn cold_relay_only_controller_keeps_the_relay_startup_budget() {
         use iroh_relay::server::{
             Access, AccessControl, ClientRequest, RelayConfig, Server, ServerConfig,

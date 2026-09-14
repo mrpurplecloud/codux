@@ -2,6 +2,7 @@ package com.duxweb.codux
 
 import android.app.ForegroundServiceStartNotAllowedException
 import android.content.Intent
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -12,9 +13,48 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
+    private var lanMulticastLock: WifiManager.MulticastLock? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         disableDefaultFocusHighlight(window.decorView)
+    }
+
+    override fun onStart() {
+        // Iroh's raw mDNS sockets need Wi-Fi multicast reception. Acquire
+        // before Flutter starts Dart and its first connection attempt.
+        try {
+            val lock = lanMulticastLock ?: run {
+                val wifi = applicationContext.getSystemService(WIFI_SERVICE) as? WifiManager
+                wifi?.createMulticastLock(LAN_MDNS_TAG)?.apply {
+                    setReferenceCounted(false)
+                    lanMulticastLock = this
+                }
+            }
+            if (lock == null) {
+                Log.w(LAN_MDNS_TAG, "Wi-Fi service unavailable; LAN mDNS reception unavailable")
+            } else {
+                lock.acquire()
+                Log.i(LAN_MDNS_TAG, "multicast lock acquired")
+            }
+        } catch (error: RuntimeException) {
+            Log.w(LAN_MDNS_TAG, "LAN mDNS multicast acquisition failed", error)
+        }
+        super.onStart()
+    }
+
+    override fun onStop() {
+        // Established QUIC paths use unicast. Do not keep multicast reception
+        // enabled while hidden, including when background keep-alive is on.
+        try {
+            lanMulticastLock?.let {
+                it.release()
+                Log.i(LAN_MDNS_TAG, "multicast lock released")
+            }
+        } catch (error: RuntimeException) {
+            Log.w(LAN_MDNS_TAG, "LAN mDNS multicast release failed", error)
+        }
+        super.onStop()
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -110,6 +150,7 @@ class MainActivity : FlutterActivity() {
     }
 
     private companion object {
+        const val LAN_MDNS_TAG = "CoduxLanMdns"
         const val KEEP_ALIVE_CHANNEL = "codux/background_keepalive"
         const val TAG = "CoduxKeepAlive"
         const val HONOR_MANUFACTURER = "HONOR"
