@@ -517,6 +517,59 @@ void main() {
     },
   );
 
+  test('target-sized baseline repairs input row lost before first resize', () {
+    final controller = RemoteTerminalOutputController(maxBufferChars: 65536);
+    addTearDown(controller.dispose);
+    controller.bindSession('session-1', requireBaseline: true);
+    controller.accept(
+      _terminalBuffer(
+        _hostGridTuiFrames(32),
+        offset: 0,
+        bufferLength: 5,
+        truncated: false,
+        screenData: _hostGridTuiFrames(32),
+      ),
+      activeSessionId: 'session-1',
+    );
+
+    // Baseline arrived before the first measured mobile viewport. The
+    // default consumer screen is 80x24, while the host keyframe is 32 rows.
+    controller.resizeScreen('session-1', cols: 39, rows: 31);
+
+    expect(_screenText(controller, 'session-1'), isNot(contains('>inputbox')));
+    expect(
+      controller.startBufferRequest(
+        'session-1',
+        'measured',
+        requireBaseline: true,
+      ),
+      isTrue,
+    );
+    controller.accept(
+      _terminalBuffer(
+        _hostGridTuiFrames(31),
+        offset: 0,
+        bufferLength: 5,
+        truncated: false,
+        requestId: 'measured',
+        screenData: _hostGridTuiFrames(31),
+      ),
+      activeSessionId: 'session-1',
+    );
+
+    final snapshot = controller.screenSnapshot('session-1');
+    expect(snapshot, isNotNull);
+    expect(snapshot!.rows, 31);
+    expect(
+      snapshot.cells
+          .where((cell) => cell.row == 29)
+          .map((cell) => cell.text)
+          .join(),
+      contains('>inputbox'),
+      reason: 'a matching host keyframe restores content that resize cannot',
+    );
+  });
+
   test('live screen keyframe waits while baseline request is pending', () {
     final controller = RemoteTerminalOutputController(maxBufferChars: 65536);
 
@@ -1131,3 +1184,10 @@ const _activeBufferUpdate = [
   RemoteTerminalOutputEffectKind.markBufferReceived,
   RemoteTerminalOutputEffectKind.ack,
 ];
+
+String _hostGridTuiFrames(int rows) {
+  final buffer = StringBuffer('\x1b[?1049h\x1b[H\x1b[2J');
+  buffer.write('\x1b[${rows - 1};1H> input box');
+  buffer.write('\x1b[$rows;1Hstatus: model-x');
+  return buffer.toString();
+}

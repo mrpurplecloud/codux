@@ -42,10 +42,23 @@ class RemoteTerminalBindingCoordinator {
   final RemoteTerminalViewportSizeProvider? _viewportSize;
   final int _maxCharsLimit;
   final Set<String> _baselineStaleSessionIds = <String>{};
+  // Request geometry, not the mutable render grid. A view may resize its
+  // screen before a baseline arrives; that cannot repair an old-size keyframe.
+  final Map<String, ({int cols, int rows})> _baselineViewportBySession = {};
+
+  ({int cols, int rows})? baselineViewportFor(String sessionId) =>
+      _baselineViewportBySession[sessionId.trim()];
+
+  void removeSession(String sessionId) {
+    final id = sessionId.trim();
+    _baselineStaleSessionIds.remove(id);
+    _baselineViewportBySession.remove(id);
+  }
 
   void reset() {
     _subscriptions.reset();
     _baselineStaleSessionIds.clear();
+    _baselineViewportBySession.clear();
   }
 
   void markSessionBaselineStale(String sessionId) {
@@ -130,6 +143,11 @@ class RemoteTerminalBindingCoordinator {
         replaceActive: replaceActive,
       );
       if (!started) return false;
+      if (viewportSize == null) {
+        _baselineViewportBySession.remove(cleanSessionId);
+      } else {
+        _baselineViewportBySession[cleanSessionId] = viewportSize;
+      }
     }
     CoduxLog.info(
       '[codux-flutter-terminal] subscribe session=$cleanSessionId reason=$reason baseline=$baseline',
@@ -138,6 +156,7 @@ class RemoteTerminalBindingCoordinator {
     if (sent) {
       _subscriptions.markSessionSubscribed(cleanSessionId);
     } else if (baseline) {
+      _baselineViewportBySession.remove(cleanSessionId);
       _outputController.resetSessionTransient(cleanSessionId);
     }
     return sent;
@@ -160,7 +179,7 @@ class RemoteTerminalBindingCoordinator {
     );
     if (sent) {
       _subscriptions.removeSession(cleanSessionId);
-      _baselineStaleSessionIds.remove(cleanSessionId);
+      removeSession(cleanSessionId);
     }
   }
 

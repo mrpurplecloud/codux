@@ -126,6 +126,15 @@ extension _HomePageTerminal on HomeController {
   void _requestTerminalViewportOwnerBaseline(String sessionId) {
     if (!_transportConnected || !_remoteProtocolReady) return;
     if (!_terminalViewportClaimable) return;
+    if (sessionId != _sessionId || !_terminalViewportInteractive) return;
+    // An owner state can arrive before the terminal pane has its first layout.
+    // Do not spend the owner refresh on the host's reported/default grid; the
+    // first measured resize below will request the baseline at mobile size.
+    if (sessionId == _sessionId &&
+        (_terminalViewportController.pendingCols == null ||
+            _terminalViewportController.pendingRows == null)) {
+      return;
+    }
     if (_terminalOutputController.hasActiveBufferRequest(sessionId)) {
       _viewportOwnerRefreshAfterBaseline.add(sessionId);
       return;
@@ -143,6 +152,12 @@ extension _HomePageTerminal on HomeController {
     }
   }
 
+  bool _terminalBaselineNeedsMeasuredViewport(String sessionId) {
+    final target = _terminalBaselineViewportSize(sessionId);
+    if (target == null) return false;
+    return _terminalBindingCoordinator.baselineViewportFor(sessionId) != target;
+  }
+
   ({int cols, int rows})? _terminalBaselineViewportSize(String sessionId) {
     final id = sessionId.trim();
     if (id.isEmpty) return null;
@@ -152,6 +167,10 @@ extension _HomePageTerminal on HomeController {
           ? ''
           : 'remote:${_activeDevice!.deviceId.trim()}';
       if (localOwner.isEmpty || owner != localOwner) return null;
+    }
+    if (_terminalViewportController.pendingCols == null ||
+        _terminalViewportController.pendingRows == null) {
+      return null;
     }
     return _terminalViewportController.pendingSizeFor(id);
   }
@@ -210,7 +229,13 @@ extension _HomePageTerminal on HomeController {
             _terminalBaselineResyncRequestedAt.remove(sessionId);
           }
           _markTerminalBufferReceived(sessionId);
-          if (sessionId != null && effect.baselineScreenKeyframe == false) {
+          if (sessionId != null &&
+              sessionId == _sessionId &&
+              _terminalViewportInteractive &&
+              _terminalBaselineNeedsMeasuredViewport(sessionId)) {
+            _requestTerminalViewportOwnerBaseline(sessionId);
+          } else if (sessionId != null &&
+              effect.baselineScreenKeyframe == false) {
             _requestPendingViewportOwnerRefresh(sessionId);
           } else if (sessionId != null) {
             _viewportOwnerRefreshAfterBaseline.remove(sessionId);
@@ -271,7 +296,7 @@ extension _HomePageTerminal on HomeController {
     _terminalOutputController.removeSession(id);
     _terminalBufferRetry.resetSession(id);
     _terminalInputSender.clearSession(id);
-    _terminalBindingCoordinator.clearSessionBaselineStale(id);
+    _terminalBindingCoordinator.removeSession(id);
     _terminalViewportController.removeSession(id);
     _terminalBaselineResyncRequestedAt.remove(id);
     _viewportOwnerRefreshAfterBaseline.remove(id);
@@ -483,6 +508,7 @@ extension _HomePageTerminal on HomeController {
       rows: rows,
       keyboardVisible: _keyboardVisible,
     );
+    final needsMeasuredBaseline = _terminalBaselineNeedsMeasuredViewport(id);
     // The self-drawn terminal renders the host's grid, so the host PTY must
     // match the mobile viewport. Claim the viewport when the terminal is the
     // active view (rather than waiting for explicit input) so this resize
@@ -498,6 +524,9 @@ extension _HomePageTerminal on HomeController {
       CoduxLog.debug(
         '[codux-flutter-terminal] resize skip duplicate measured=${cols}x$rows keyboard=$_keyboardVisible session=$id',
       );
+      if (needsMeasuredBaseline) {
+        _requestTerminalViewportOwnerBaseline(id);
+      }
       return;
     }
     CoduxLog.info(
@@ -512,6 +541,9 @@ extension _HomePageTerminal on HomeController {
       terminal: terminal,
     );
     _terminalViewportController.markSent(id, resize);
+    if (needsMeasuredBaseline) {
+      _requestTerminalViewportOwnerBaseline(id);
+    }
   }
 
   void _flushPendingTerminalResize({

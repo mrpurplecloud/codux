@@ -1,0 +1,196 @@
+# 任务
+
+ID: mobile-takeover-input-row
+类型：bug
+状态：done
+创建：2026-09-13
+更新：2026-09-14
+一句话描述：移动端接管远程终端后，偶发缺少 TUI 底部输入行。
+
+## 等级
+
+grade：Guarded
+依据：修复跨移动端 viewport ownership、异步 baseline/output 与终端渲染交界；本地根因和声明范围已验证，真实设备事故尚待确认。
+升级触发证据：none
+
+## Active Contract
+
+state：complete
+
+### 目标
+
+移动端接管任一远程 TUI 终端后，底部输入行持续可见且可交互；无需等待新输出、切换项目或真实 resize 才恢复。
+
+### 证据
+
+未修改生产代码 HEAD `c20ed0a1` 的 widget seam 记录 baseline rows `[32, 32]`、首次测量 rows `21`，未收到 rows `21` baseline。批准修订后，校正请求关联的 immediate/delayed widget seam 在替换生产判断前仍失败：`Expected: contains <21> Actual: [32]`。直接 output-controller seam 观察到旧尺寸 keyframe 在默认小 screen 上应用后只剩 status，resize 无法恢复输入行；它不是 HomeController orchestration 的有效 target，已改为验证 target-sized baseline 恢复。稀疏 cells 不含空格，最终断言使用 `>inputbox`，不能将旧空格断言失败单独视为根因证据。以上确定本地可达缺陷；日志时序与之相符，但不能据此宣称真实北真堂事故根因已验证。
+
+因果链：移动端初始 baseline 在 `_terminalViewportController` 尚无测量尺寸时到达；host keyframe 按旧/默认 32 行生成，Rust consumer screen 仍为默认 80x24。keyframe 在小 screen 上应用时，底部 TUI 输入行被后续 status 行覆盖；之后首次测量发送 `terminal.viewport.resize`，`resizeScreen` 只能改变网格尺寸，不能恢复已被覆盖的 keyframe，且没有新的 target-viewport baseline。日志中的 `terminal.buffer` 先于 mount/first resize，符合该链。
+
+first-wrong：baseline screen keyframe 被应用前，consumer 尚未拥有当前移动端 measured viewport；移动端首次 measured resize 后没有复用已有 owner baseline refresh。
+
+历史与共享路径查证：`1076a184` 已修复“其他设备 owner 时 local screen 行数过短”；现有 `RemoteTerminalBindingCoordinator.subscribeSession` 已把 measured `viewportCols/viewportRows` 送入 baseline；desktop host `terminal_buffer_window` 和 headless agent `send_terminal_baseline` 已按该尺寸生成 `screenData`，对应 host viewport tests 已覆盖。缺口位于移动端首次测量后的 reconciliation，不在协议或 host 生成逻辑。
+
+### 授权变更
+
+仅修复“移动端 measured viewport 与 baseline 请求尺寸不一致”这一因果单元：订阅协调器记录成功发起的 baseline 请求携带的 cols/rows；HomeController 在 measured resize 后及 baseline 完成时比较请求尺寸与当前有效目标，不以可变 screen 尺寸判断。复用现有 owner refresh、在途请求和 retry；同尺寸 keyframe 不重复刷新，失去 owner 后不得刷新或抢占。未测量时不消费 owner refresh。
+
+### 范围
+
+owner / invariant：`HomeController` 移动端 terminal viewport/baseline reconciliation；当前 self-drawn Rust screen 若存在，interactive mobile viewport 必须最终由 measured cols 与 baseline target rows 对应的 host keyframe 发布，不能只靠 resize 改变已损坏 screen。
+allowed_files：`apps/mobile/lib/screens/home/state/terminal.dart`、`apps/mobile/lib/services/remote_terminal_binding_coordinator.dart`，对应三个测试文件 `remote_terminal_output_controller_test.dart`、`remote_terminal_binding_coordinator_test.dart`、`widget_test.dart`；按产品规则仅 mobile `pubspec.yaml` 版本及 `docs/version-compatibility.md` 兼容记录。coordinator 是现有请求发起 owner，记录请求尺寸不新增屏幕内容副本或 wire 字段。不得修改 host、agent 或协议生产代码。
+out_of_scope：断连后移动端/桌面端同时掉线本身；用户说明未设计重连后自动启动 agent 恢复最后 session，本次不修自动恢复；现有日志不足判断 agent 原进程为何退出。LAN 首次 relay/二次 direct 路径选择另作连接行为诊断，不并入输入行修复。
+
+### 验证
+
+baseline：未修改代码 red tests 已记录 host keyframe rows `32`、measured rows `21`，及 input row 被 `status:model-x` 覆盖。
+target_check：widget 的 baseline-before-layout 测试同时断言 measured baseline 请求和最终 `> input box`、正确 rows、输入发送；覆盖 baseline 延迟到首次测量后、完成前失去 owner；直接 output-controller 测试改为验证已损坏画面可由 target-sized baseline 恢复，不要求 resize 自行恢复丢失内容。
+nearest_regression_check：`flutter test test/remote_terminal_output_controller_test.dart`、`flutter test test/widgets/self_drawn_terminal_view_test.dart`、`flutter test test/terminal_viewport_controller_test.dart`、`flutter test test/remote_terminal_binding_coordinator_test.dart`；再跑 widget takeover/handed-away tests。普通 shell、失去 viewport 后 placeholder、桌面 owner 输入权限保持原断言。
+broader_check_reason：请求尺寸记录必须覆盖所有 subscribe caller，不能被 live-only、被拒请求、重连/移除残留污染。
+broader_checks：coordinator 测试包含请求拒绝、失败发送、reset/unsubscribe、尺寸 A-B-A；受影响 mobile analyze 与完整 widget 测试。此次不修改 Android 生命周期，无设备安装授权，设备实测仍未完成。
+
+## 当前阶段
+
+phase：fix（完成；生产保持冻结，APK 已构建）
+
+## Stop revision（仅 stopped 时）
+
+stop_evidence：
+- 首次生产修改后运行 target_check，`flutter test test/widget_test.dart --plain-name 'baseline before first viewport resize is refreshed at measured mobile size'` 仍失败：`Expected: contains <21> Actual: [32, 32]`；日志没有 `viewport-owner-refresh`。
+- 失败链已具体化：`SelfDrawnTerminalView._syncGrid` 在调用 `onResize` 前先执行 `resizeScreen(... rows: measuredRows)`；因此 `terminal.dart` 当前通过 `screenSnapshot` 比较尺寸时，判断已看不到原始 32 行 baseline，误判为无需 refresh。
+- `remote_terminal_output_controller_test.dart` 的直接 `resizeScreen` seam 不能验证 `HomeController` 的 baseline orchestration；该层没有 host baseline 请求能力，仍红不代表生产修复路径未覆盖。
+被反驳字段：旧 `target_check` 未通过；旧授权机制“首次 measured resize 后以当前 screen snapshot 判定是否 refresh”被反证为错误 seam。
+current_diff：`apps/mobile/lib/screens/home/state/terminal.dart` 当前新增 35 行；两个测试文件当前新增 185 行；生产 diff 尚未证明有效，未继续叠加修改。
+新版 Active Contract：
+  state：pending
+  目标：移动端接管任一远程 TUI 终端后，底部输入行持续可见且可交互；无需等待新输出、切换项目或真实 resize 才恢复。
+  证据：保留旧 Gate 的 A 级根因。补充证据显示 renderer 在 `onResize` 前已改写本地 screen，故 refresh 判断必须基于测量前仍可观察的 baseline/viewport 状态，不能读取该时点的 post-resize snapshot。
+  授权变更：仅修正 `HomeController` 首次 measured viewport 与已完成 baseline 的 reconciliation；以 measured viewport 与测量前 baseline 状态决定是否复用现有 target-viewport baseline subscription，并保留尚未执行的 refresh intent。不得修改 host、agent、协议 wire、LAN 路由或断线恢复行为。
+  范围：owner / invariant 仍为 `HomeController` 移动端 terminal viewport/baseline reconciliation；allowed_files 仍为 `terminal.dart` 及对应有效回归测试；直接 controller resize 测试不作为该 orchestrator 的 target seam。
+  验证：baseline 保留；target_check 改为有效的 widget/orchestrator seam，必须观察 measured baseline request 与最终 input row；nearest regression 保留原声明清单。
+相对旧版变化：删除“用 post-resize `screenSnapshot` 作为首次 measured baseline 缺口证据”；删除/替换不能覆盖 HomeController 的直接 output-controller target test；其余目标、owner、排除项和 host target baseline 复用结论不变。
+建议处理：保留当前 diff 作为诊断记录，不再沿其叠补丁；用户批准新版 Gate 后，替换无效判断与无效 target seam，再重新运行 target_check。
+approval：approved
+用户批准证据：用户明确“批准新版 Gate，继续修复，前提是不要引入新回归”。
+
+## 批准后机制具体化
+
+现有正确路径：`subscribeSession` 是全部 baseline 请求入口，已有 `_viewportSize` provider 和 Rust router 请求关联/完成信号。请求尺寸放在此入口，成功 start 后记录，拒绝不覆盖，失败发送清除；reset、成功 unsubscribe、session remove 清除。无需在各调用点分别记尺寸。
+HomeController 仅在当前 owner、已有 measured size 时协调；尺寸不匹配且旧请求在途，沿原 owner pending path 等待；`markBufferReceived` 对当前请求尺寸重新判定，匹配 keyframe 沿旧行为消除 pending，不匹配再取一次。键盘目标继续用 `pendingSizeFor` 的 baseline rows。
+方案审查：使用现有请求 owner、完成/重试路径，删除无效 snapshot 比较；请求几何是协调元数据而非新屏幕真源；验证绑定尺寸、输入行、控制权与重复请求。原真实设备事故根因仍需设备确认，本地复现不等于真实北真堂会话已证实。
+
+# Diagnosis
+
+## 现象与复现
+
+环境：用户报告为北真堂项目移动端终端 1；本地 fake transport 配合真实 Rust FFI 确定性复现 baseline-before-measurement 缺陷，不是该真实设备会话的复现。
+步骤：移动端连接远程 host，选择北真堂项目终端 1，执行移动端接管；观察终端底部 TUI 输入行。
+实际：用户报告偶发缺少底部输入行；最小 seam 中 baseline 先按 32 行应用，首次测量为 21 行后输入行仍丢失。
+期望：接管完成后底部输入行稳定显示并可输入。
+频率：intermittent
+结果：failed
+基础设施问题：本地失败不依赖网络或设备；未排除真实事故中的其他因素。
+
+## 真实链
+
+last-known-good：baseline 已带当前 measured `viewportCols/viewportRows` 时，host target keyframe 与 mobile screen 尺寸一致，现有 host viewport tests 通过。
+first-wrong：baseline screen keyframe 应用时 consumer screen 尚未拥有 measured viewport；后续 `terminal.viewport.resize` 没有触发 baseline refresh。
+因果链：initial resource baseline（无 measured size）→ host/default 32-row screenData → consumer 80x24 screen 裁掉 input row → measured 21-row resize 只 reflow 当前损坏 screen → 无 target baseline → input row remains absent。
+观察证据：output-controller red test actual `status:model-x`；widget red test baseline rows `[32, 32]`、measured rows `21`；用户日志先出现 `terminal.buffer received`，数分钟后才出现 `mount`/`first resize`/`viewport.resize`。
+
+## 竞争解释（仅仍有歧义时，最多两个）
+
+1. explanation：接管后的 local screen grid 与 host viewport grid 不一致，底部 TUI 行被裁剪或覆盖。
+   prediction：旧尺寸 keyframe 应用后底部行丢失；resize 无法补回已覆盖内容，target-sized keyframe 可恢复。
+   discriminating_check：当前版本重复接管并对齐 viewport state、resize 和 screen snapshot，比较缺失/正常实例。
+   result：本地 confirmed；widget request geometry 与 output-controller cell-state 检查共同支持，真实设备未确认。
+   state：confirmed
+
+2. explanation：baseline/live output 或 renderer publication 顺序错误，输入行已在 host screen 但未发布到移动端画面。
+   prediction：host/另一订阅者能看到输入行，移动端本地 screen snapshot 落后；重新订阅或新输出改变状态。
+   discriminating_check：对齐 terminal.buffer、output sequence、screen snapshot 与移动端像素结果。
+   result：本地 seam 中不支持此主因；router 已发布 snapshot，target-sized baseline 可恢复。未据此排除真实设备其他 publication 问题。
+   state：rejected
+
+## 根因
+
+statement：移动端 baseline 可能在 measured viewport 建立前应用；`RemoteTerminalOutputController` 使用默认/旧尺寸解析 host screenData，首次 measured resize 只改变当前 screen，`HomeController` 又没有触发现有 target-viewport baseline refresh，导致底部 keyframe 行不可恢复。
+first-wrong condition：baseline screenData 应用前，`pendingCols/pendingRows` 尚未建立；首次 measured resize 后 baseline 请求尺寸仍不匹配当前目标，却没有补取 target-sized baseline。renderer 在 `onResize` 前已改写 snapshot dimensions，因此不能用当前 snapshot 判断旧请求是否匹配。
+evidence_grade：A（本地可达缺陷；不代表真实设备事故已证实）
+evidence_reference：未修改 HEAD widget red、修订机制前 correlated widget red、最终 target-sized output-controller seam；已查证 host/agent viewport baseline 路径；`1076a184` 历史修复；用户日志 ordering 仅为相符证据。
+
+## 其他
+
+excluded：用户说明尚未设计 agent 自动恢复，本次不增加；agent 原进程退出原因未确认。LAN relay/direct 选择未从当前日志证明异常；该片段也未覆盖断连原因。
+missing_information：真实北真堂设备截图、完整缺失窗口日志；不影响本地 A 级 seam 或本次修复授权。真实 LAN 首次 relay/二次 direct 仍另案回答。
+completion：本地修复、声明验证及获授权 APK 构建完成；真实设备验证、安装和部署未执行。
+
+## Guarded fix/design
+
+查证范围：移动端 `terminal.dart`、`RemoteTerminalBindingCoordinator`、`TerminalViewportController`、`RemoteTerminalOutputController`、`SelfDrawnTerminalView`；desktop host `terminal_buffer_window`/baseline viewport；headless agent baseline；相关 mobile renderer/viewport/binding tests；历史 `1076a184`。
+
+复用结论：复用已有 `_requestTerminalViewportOwnerBaseline` → `subscribeSession` → host `viewportCols/viewportRows` → target `screenData` 链。现有链路只缺首次 measured resize 后的触发；不新增 wire 字段、不缓存第二份 screen、不改 host/agent。
+
+owner 与 invariant：`HomeController` 协调当前 measured mobile viewport 与 baseline request；Rust router/self-drawn view 继续作为唯一 screen/render state。coordinator 记录实际发起请求携带的几何参数，HomeController 将其与当前有效 baseline target 比较；不读取可变 snapshot dimensions 作此判断。当前 interactive session 必须最终发布 target-sized baseline；旧请求在途时沿现有 pending path 等待完成再协调。
+
+最小充分机制：在 owned resize 更新 viewport controller 的有效目标后，比较 coordinator 请求尺寸与 measured target；不匹配时调用现有 owner baseline refresh，即使 resize envelope 被 dedup 也执行。owner state 早于首次 layout 时不消耗 refresh；无 measured size 时 provider 返回 null，不将 host reported size 当成本机测量。baseline 完成时重新比较目标，旧请求不匹配则补取，匹配 keyframe 沿原行为清除 pending。键盘打开时继续使用既有 baseline rows 规则；不新增 timer、wire 字段或屏幕副本。
+
+真实备选及排除：
+
+- 在 wire payload 增加 screen cols/rows：可行但跨 desktop/headless/protocol/mobile 扩大契约；现有 subscribe 已携带 target dimensions，非最小修复。
+- Rust router 保存并在 resize 重放旧 keyframe：不能恢复超出旧 screen 的 TUI 行，且会新增第二份 screen/keyframe 状态；不满足 host target rows invariant。
+- 仅扩大 local screen 或调整 renderer bottom window：只能遮盖尺寸错误，不能恢复已被 status 覆盖的 cell；red test 仍失败。
+
+命中影响：异步 baseline request 与 first measured resize 竞态；使用现有 request/backoff/active-request 状态，需保留 superseded refresh intent。未命中：持久化、迁移、公共 API、LAN route、agent session 生命周期、发布配置。
+
+verification_only：真实设备/北真堂截图及完整断连窗口仍只作交付前观察，不作为本地测试门槛。out_of_scope：断线后 agent 自动恢复、LAN relay/direct 首次选择、同时掉线原因。
+
+方案审查：pass。现有正确 baseline path 已优先复用；机制直接解释 A 级 red evidence；范围仅移动端 baseline/screen reconciliation；target 与 nearest regression checks 可执行。
+
+## 能力（仅选中时）
+
+blocker：none
+logical_capability：未选择协议诊断/设计能力；宿主要求的完成前验证核对
+resolved_skill：superpowers:verification-before-completion
+state：complete
+result：核对实际命令、失败修正和未证明范围；遵守用户 Gate，不重复运行代码和环境未变化的测试，不扩实现或交付授权。
+
+## 最终验证与自审
+
+target_check：`flutter test --no-pub test/widget_test.dart --plain-name 'baseline before first viewport resize is refreshed at measured mobile size'`，immediate、delayed、handoff while pending 3/3 通过。断言 measured target、最终输入行、正确会话输入和仅一次匹配 baseline；失去 owner 期间不得补取或抢占。red/green 日志分别为 `/tmp/codux-mobile-gate-red.log`、`/tmp/codux-mobile-gate-green.log`。
+
+nearest_regression_check：`flutter test --no-pub test/remote_terminal_output_controller_test.dart test/widgets/self_drawn_terminal_view_test.dart test/terminal_viewport_controller_test.dart test/remote_terminal_binding_coordinator_test.dart test/widget_test.dart` 首批 95 通过、2 个新增断言失败，日志 `/tmp/codux-mobile-gate-regression.log`。失败分别为稀疏 cells 空格预期错误，以及错误假设现有 resetSessionTransient 清除 active request ID；仅修正测试，未改冻结生产代码。后者改为验证既有 `replaceActive: true` 重试可成功。
+
+修正后 `flutter test --no-pub test/remote_terminal_output_controller_test.dart test/remote_terminal_binding_coordinator_test.dart` 45/45 通过，日志 `/tmp/codux-mobile-gate-unit.log`；其余未改测试首批 52 项通过。合计 97 个声明范围测试分批通过，不称为一次全绿运行。最终测试 lint 修正后，仅复跑 `flutter test --no-pub test/remote_terminal_output_controller_test.dart --plain-name 'target-sized baseline repairs input row lost before first resize'`，1/1 通过，日志 `/tmp/codux-mobile-gate-final-target.log`。
+
+静态检查：`flutter analyze --no-pub lib/screens/home/state/terminal.dart lib/services/remote_terminal_binding_coordinator.dart test/remote_terminal_output_controller_test.dart test/remote_terminal_binding_coordinator_test.dart test/widget_test.dart` exit 0，No issues found，日志 `/tmp/codux-mobile-gate-analyze.log`。修改 Dart 已格式化；最终测试文件 `dart format` 0 changes；`git diff --check` 通过。
+
+自审：全部生产修改直接服务请求尺寸 reconciliation；subscription provider/writer 单一 owner，所有 bind/resubscribe/mount/stale/gap/retry 入口均经 subscribeSession；唯一尺寸读取用于 HomeController 比较。coordinator reset 在 connection reset 调用，成功 unsubscribe 清理，会话删除经 removeSession 清理；拒绝请求、live-only 不覆盖旧几何，发送失败不留下匹配假象。普通 shell、keyboard viewport、handed-away placeholder 和既有 takeover 行为由声明回归覆盖。未引入依赖、wire 变化、隐藏兜底、agent 自动启动或网络机制。
+
+证据绑定反驳：post-resize snapshot 无法证明 baseline 匹配的反证已落实为请求几何比较；通过延迟旧 baseline、失去 owner 后完成、A-B-A 被拒请求、失败发送及清理路径尝试推翻收敛与去重结论，声明测试通过。仅本地 Flutter + Rust FFI 证据，无法证明真实北真堂设备已恢复或完全不存在其他回归。
+
+交付边界：仅 Mobile source version 提升为 `2.0.3-beta.13+62`；Desktop/Agent 未改。兼容矩阵标 pending。APK 构建见下一节；未安装、部署、push 或修改远端；本地提交/tag 的后续授权见下节。未做 Android 生命周期变更。构建前后均为 840 个工作区状态条目，无关文件保留，未清理 scratch/build。
+
+## APK 验证构建（2026-09-14）
+
+用户授权：“构建apk。LAN relay/direct呢？”；仅构建并提供 sideload APK，不安装、不部署、不提交。LAN 问题仅只读核查与解释，不新增网络修改。
+command：`python3 tools/local-delivery.py android`
+environment：当前 main / HEAD `c20ed0a1`，已冻结 Mobile `2.0.3-beta.13+62` 修复；项目 Flutter、Android Studio JBR、Android SDK；无 `--serial`。
+artifact identity：最终副本 `/Users/mac/Downloads/codux-android-2.0.3-beta.13+62-sideload-arm64.apk`，80,897,501 bytes；`com.duxweb.codux.sideload`、versionCode `62`、versionName `2.0.3-beta.13.sideload`、minSdk `26`、targetSdk `36`、ABI `arm64-v8a`。最终副本通过 Build Tools `36.1.0` 的 aapt/apksigner 核验，APK v2 signature 有效；签名证书 SHA-256 `b2f8b6fb3f492f09d68026379e04b98898a56193f88e73c9f15ae5e0a930c00f`。
+SHA-256：`b8b12e75348327806914106eb326fe42c9bc02e8e42173f70d479d1fbba98c39`，最终副本 shasum 与脚本交付 hash 一致。
+result：pass，构建脚本 exit 0，Gradle assembleRelease 62.7s；日志 `/tmp/codux-mobile-apk-build-62.log`。无安装/上传/部署动作，不触发该类 delivery Gate。按 android-development 和 verification-before-completion 核对最终副本，未修改平台配置或增加交付范围。
+
+LAN 只读核查：`iroh_link.rs` 的 acquire_controller_endpoint 复用 endpoint；enable_local_discovery 在 host/controller 开启 mDNS；endpoint.connect 与 relay online 并行；spawn_path_watcher 订阅 PathEvent::Selected 并发布当前路由。Flutter `state/transport.dart` 消费路径更新，`state/connection.dart` 记住成功 direct 地址供后续拨号。故首次先 relay、探测成功后同连接切换 direct 属于正常机制；没有“必须重连才允许 direct”的设计。用户日志仅显示 11:11:22 endpoint reused、dial 22ms、direct 到 10.10.10.18:50685，不能解释未提供的首次连接是否持续 relay 或通知异常。已非阻塞询问首次保持连接是否自动切换；不据现有证据修改网络逻辑。
+
+## 本地提交与 tag（2026-09-14）
+
+用户授权：“刚才的修复打tag，然后开始实现”新的直连优先目标。
+本任务检查点：将已验证的移动端修复及其测试、版本、兼容记录、本任务文件共 8 个文件，在当前 main 上创建本地提交，再创建 annotated tag `mobile-v2.0.3-beta.13`；不含无关改动，不推送。tag 必须指向含该修复的提交，而非原 HEAD `c20ed0a1`。
+新直连优先工作是独立因果/行为单元，不进入这个修复 tag；网络源码未修改。
+
+## Checkpoint
+
+latest_verified：本地 target 通过；97 项声明回归分批通过；最后测试 lint 修正后的 target 1/1 与 analyze 通过。本次 APK 构建 exit 0，Downloads 最终副本的身份、版本、ABI、签名和 SHA-256 已核验；diff check 通过，工作区状态条目无新增。真实设备未验证。
+contract_state：complete（生产保持冻结）
+active_capability：none
+next_action：APK 已提供；本地提交与 `mobile-v2.0.3-beta.13` tag 按上节授权保存冻结修复，以 Git 引用核对最终提交。设备安装、运行验证与 push 仍未授权。后续直连优先工作独立处理，不扩本任务生产修改。

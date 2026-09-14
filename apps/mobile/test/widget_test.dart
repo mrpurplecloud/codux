@@ -651,6 +651,235 @@ void main() {
     },
   );
 
+  for (final scenario in ['immediate', 'delayed', 'handoff while pending']) {
+    testWidgets(
+      'baseline before first viewport resize is refreshed at measured mobile size: $scenario',
+      (WidgetTester tester) async {
+        final device = await _fakeDevice();
+        final baselineRows = <int>[];
+        final sent = <Map<String, dynamic>>[];
+        final pendingBaselines = <RelayEnvelope>[];
+        int? measuredRows;
+        var viewportGeneration = 1;
+        final fake = _FakeRemoteTransport(
+          device: device,
+          onSent: (transport, envelope) {
+            sent.add(envelope);
+            final type = '${envelope['type'] ?? ''}';
+            if (type == 'host.info') {
+              transport.emitEncrypted(
+                const RelayEnvelope(
+                  type: 'project.list',
+                  payload: {
+                    'selectedProjectId': 'project-1',
+                    'projects': [
+                      {
+                        'id': 'project-1',
+                        'name': 'Project 1',
+                        'path': '/tmp/p1',
+                      },
+                    ],
+                  },
+                ),
+              );
+              transport.emitEncrypted(
+                const RelayEnvelope(
+                  type: 'terminal.list',
+                  payload: {
+                    'active': 'session-1',
+                    'terminals': [
+                      {
+                        'id': 'session-1',
+                        'title': 'Terminal',
+                        'projectId': 'project-1',
+                      },
+                    ],
+                  },
+                ),
+              );
+              // Host state can arrive before the pane's first layout callback.
+              transport.emitEncrypted(
+                const RelayEnvelope(
+                  type: 'terminal.viewport.state',
+                  sessionId: 'session-1',
+                  payload: {
+                    'owner': 'remote:device-1',
+                    'cols': 100,
+                    'rows': _hostGridRows,
+                    'generation': 1,
+                  },
+                ),
+              );
+              transport.emitEncrypted(
+                RelayEnvelope(type: 'host.info', payload: _hostInfoPayload()),
+              );
+              return;
+            }
+            if (_isTerminalBaselineSubscribe(envelope) &&
+                envelope['sessionId'] == 'session-1') {
+              final payload = envelope['payload'];
+              final requestedRows = payload is Map
+                  ? payload['viewportRows']
+                  : null;
+              final rows = requestedRows is int && requestedRows > 0
+                  ? requestedRows
+                  : _hostGridRows;
+              baselineRows.add(rows);
+              final baseline = RelayEnvelope(
+                type: 'terminal.output',
+                sessionId: 'session-1',
+                payload: {
+                  'data': _tuiFrames(rows),
+                  'screenData': _tuiFrames(rows),
+                  'buffer': true,
+                  'tail': true,
+                  'offset': 0,
+                  'bufferLength': 5,
+                  'outputSeq': baselineRows.length,
+                  'requestId': (payload as Map)['requestId'],
+                },
+              );
+              if (scenario != 'immediate' && measuredRows == null) {
+                pendingBaselines.add(baseline);
+              } else {
+                transport.emitEncrypted(baseline);
+              }
+              return;
+            }
+            if (type == RemoteMessageType.terminalViewportClaim &&
+                (envelope['payload'] as Map?)?['intent'] == 'force') {
+              transport.emitEncrypted(
+                RelayEnvelope(
+                  type: RemoteMessageType.terminalViewportState,
+                  sessionId: 'session-1',
+                  payload: {
+                    'owner': 'remote:device-1',
+                    'cols': 100,
+                    'rows': _hostGridRows,
+                    'generation': ++viewportGeneration,
+                  },
+                ),
+              );
+            }
+            if (type == RemoteMessageType.terminalViewportResize) {
+              final payload = envelope['payload'];
+              final rows = payload is Map && payload['rows'] is int
+                  ? payload['rows'] as int
+                  : _hostGridRows;
+              measuredRows = rows;
+              viewportGeneration++;
+              transport.emitEncrypted(
+                RelayEnvelope(
+                  type: 'terminal.viewport.state',
+                  sessionId: 'session-1',
+                  payload: {
+                    'owner': 'remote:device-1',
+                    'cols': (payload as Map)['cols'],
+                    'rows': rows,
+                    'generation': viewportGeneration,
+                  },
+                ),
+              );
+            }
+          },
+        );
+
+        await tester.pumpWidget(
+          CoduxFlutterApp(
+            initialDevices: [device],
+            transportFactory: (_) => fake,
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Mac'));
+        await tester.pumpAndSettle(const Duration(milliseconds: 300));
+        await tester.pump(const Duration(milliseconds: 300));
+        if (find
+            .byKey(const ValueKey('remote-terminal-body'))
+            .evaluate()
+            .isEmpty) {
+          await tester.tap(find.text('Mac').first);
+          await tester.pumpAndSettle(const Duration(milliseconds: 300));
+          await tester.pump(const Duration(milliseconds: 300));
+        }
+
+        expect(measuredRows, isNotNull);
+        expect(measuredRows!, lessThan(_hostGridRows));
+        expect(baselineRows, contains(_hostGridRows));
+        if (scenario != 'immediate') {
+          expect(pendingBaselines, hasLength(1));
+          expect(
+            baselineRows,
+            hasLength(1),
+            reason: 'keep the in-flight baseline',
+          );
+          if (scenario == 'handoff while pending') {
+            fake.emitEncrypted(
+              RelayEnvelope(
+                type: RemoteMessageType.terminalViewportState,
+                sessionId: 'session-1',
+                payload: {
+                  'owner': 'desktop',
+                  'cols': 100,
+                  'rows': _hostGridRows,
+                  'generation': ++viewportGeneration,
+                },
+              ),
+            );
+            await tester.pumpAndSettle();
+          }
+          fake.emitEncrypted(pendingBaselines.single);
+          await tester.pumpAndSettle();
+          if (scenario == 'handoff while pending') {
+            expect(
+              baselineRows,
+              hasLength(1),
+              reason: 'completion must not take the new owner away',
+            );
+            expect(
+              tester
+                  .widget<RemoteTerminalPane>(find.byType(RemoteTerminalPane))
+                  .handedAway,
+              isTrue,
+            );
+            await tester.tap(find.byKey(const ValueKey('terminal-take-over')));
+            await tester.pumpAndSettle();
+          }
+        }
+        expect(baselineRows, contains(measuredRows));
+        expect(
+          baselineRows.where((rows) => rows == measuredRows),
+          hasLength(1),
+          reason:
+              'matching keyframes do not trigger repeated baseline downloads',
+        );
+
+        final pane = tester.widget<RemoteTerminalPane>(
+          find.byType(RemoteTerminalPane),
+        );
+        final snapshot = pane.outputController.screenSnapshot(pane.sessionId!);
+        expect(snapshot, isNotNull);
+        expect(
+          _snapshotGridText(snapshot!),
+          contains('> input box'),
+          reason: 'measured viewport must receive a matching TUI keyframe',
+        );
+        expect(snapshot.rows, measuredRows);
+        pane.onSendKey('x');
+        await tester.pumpAndSettle();
+        expect(
+          sent.where(
+            (e) =>
+                e['type'] == RemoteMessageType.terminalInput &&
+                e['sessionId'] == 'session-1' &&
+                (e['payload'] as Map?)?['data'] == 'x',
+          ),
+          isNotEmpty,
+        );
+      },
+    );
+  }
+
   testWidgets('new terminal uses one id for create and active selection', (
     WidgetTester tester,
   ) async {
@@ -2875,8 +3104,7 @@ String _tuiFrames(int rows) {
 String _snapshotGridText(TerminalScreenSnapshot snapshot) {
   final rows = <int, Map<int, (String, int)>>{};
   for (final cell in snapshot.cells) {
-    rows
-        .putIfAbsent(cell.row, () => {})[cell.col] = (
+    rows.putIfAbsent(cell.row, () => {})[cell.col] = (
       cell.text,
       cell.width < 1 ? 1 : cell.width,
     );

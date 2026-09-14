@@ -7,6 +7,107 @@ import 'package:codux_flutter/services/remote_terminal_output_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('baseline viewport follows accepted requests, not renderer resizes', () {
+    final output = RemoteTerminalOutputController();
+    addTearDown(output.dispose);
+    ({int cols, int rows})? viewport;
+    final sent = <RelayEnvelope>[];
+    final coordinator = _coordinator(
+      output: output,
+      sent: sent,
+      viewportSize: (_) => viewport,
+    );
+    bool subscribe() => coordinator.subscribeSession(
+      sessionId: 'term-1',
+      reason: 'test',
+      capability: TerminalBufferCapability.fallback,
+    );
+    expect(subscribe(), isTrue);
+    expect(coordinator.baselineViewportFor('term-1'), isNull);
+    viewport = (cols: 39, rows: 31);
+    output.resizeScreen('term-1', cols: 39, rows: 31);
+    expect(subscribe(), isFalse, reason: 'a request is already in flight');
+    expect(coordinator.baselineViewportFor('term-1'), isNull);
+    _cache(output, 'term-1');
+    expect(subscribe(), isTrue);
+    expect(sent.last.payload, containsPair('viewportRows', 31));
+    expect(coordinator.baselineViewportFor(' term-1 '), viewport);
+
+    // A-B-A while A is pending: B is rejected; returning to A requires no
+    // geometry repair. A live-only subscribe must not erase A's target.
+    viewport = (cols: 50, rows: 40);
+    expect(subscribe(), isFalse);
+    expect(coordinator.baselineViewportFor('term-1'), (cols: 39, rows: 31));
+    viewport = (cols: 39, rows: 31);
+    coordinator.subscribeSession(
+      sessionId: 'term-1',
+      reason: 'live',
+      capability: TerminalBufferCapability.fallback,
+      baseline: false,
+    );
+    expect(coordinator.baselineViewportFor('term-1'), viewport);
+    expect(coordinator.baselineViewportFor('term-2'), isNull);
+  });
+
+  test('failed baseline send cannot advertise a matching viewport', () {
+    final output = RemoteTerminalOutputController();
+    addTearDown(output.dispose);
+    var accepted = false;
+    final coordinator = _coordinator(
+      output: output,
+      send: (_) => accepted,
+      viewportSize: (_) => (cols: 39, rows: 31),
+    );
+    expect(
+      coordinator.subscribeSession(
+        sessionId: 'term-1',
+        reason: 'failed',
+        capability: TerminalBufferCapability.fallback,
+      ),
+      isFalse,
+    );
+    expect(coordinator.baselineViewportFor('term-1'), isNull);
+    accepted = true;
+    expect(
+      coordinator.subscribeSession(
+        sessionId: 'term-1',
+        reason: 'retry',
+        capability: TerminalBufferCapability.fallback,
+        replaceActive: true,
+      ),
+      isTrue,
+    );
+    expect(coordinator.baselineViewportFor('term-1'), (cols: 39, rows: 31));
+  });
+
+  test('baseline viewport is cleared on unsubscribe, removal and reset', () {
+    final output = RemoteTerminalOutputController();
+    addTearDown(output.dispose);
+    var accept = true;
+    final coordinator = _coordinator(
+      output: output,
+      send: (_) => accept,
+      viewportSize: (_) => (cols: 39, rows: 31),
+    );
+    for (final id in ['term-1', 'term-2', 'term-3']) {
+      coordinator.subscribeSession(
+        sessionId: id,
+        reason: 'test',
+        capability: TerminalBufferCapability.fallback,
+      );
+    }
+    accept = false;
+    coordinator.unsubscribeSession('term-1', reason: 'failed');
+    expect(coordinator.baselineViewportFor('term-1'), isNotNull);
+    accept = true;
+    coordinator.unsubscribeSession('term-1', reason: 'retry');
+    expect(coordinator.baselineViewportFor('term-1'), isNull);
+    coordinator.removeSession('term-2');
+    expect(coordinator.baselineViewportFor('term-2'), isNull);
+    coordinator.reset();
+    expect(coordinator.baselineViewportFor('term-3'), isNull);
+  });
+
   test('session baseline subscription starts correlated buffer request', () {
     final sent = <RelayEnvelope>[];
     final output = RemoteTerminalOutputController();
@@ -284,11 +385,13 @@ RemoteTerminalBindingCoordinator _coordinator({
   RemoteTerminalOutputController? output,
   List<RelayEnvelope>? sent,
   RemoteTerminalSend? send,
+  RemoteTerminalViewportSizeProvider? viewportSize,
 }) {
   var counter = 0;
   final messages = sent ?? <RelayEnvelope>[];
   return RemoteTerminalBindingCoordinator(
     outputController: output ?? RemoteTerminalOutputController(),
+    viewportSize: viewportSize,
     send:
         send ??
         (envelope) {
