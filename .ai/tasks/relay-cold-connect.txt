@@ -1,0 +1,171 @@
+# 任务
+
+ID: relay-cold-connect
+类型：bug
+状态：done
+创建：2026-09-13
+更新：2026-09-13
+一句话描述：消除共享控制端冷连接在已有可用 LAN 路径时串行等待 relay 的延迟，保留慢 relay、复用与错误语义。
+
+## 等级
+
+grade：Guarded
+依据：修改共享连接入口，涉及异步拨号、relay 就绪及端点池并发契约；所有客户端使用同一层。
+升级触发证据：none
+
+## 初版 Contract（已停止，仅保留反证上下文）
+
+state：stopped
+
+### 目标
+
+LAN 主机可达时，冷连接不等待 relay 注册；relay 不可达时本地集成连接应在 2 秒内完成控制/终端流握手及认证消息往返；真实 .16/.18 LAN 探针恢复到毫秒级而非 4–12 秒。保留 relay-only 慢启动、端点复用、活连接资源和失败信号。
+
+### 证据
+
+未修改 HEAD f548104e03c2b322c0cb4234c23d1fda39f241de；本会话真实产品入口复现：.16 控制端到 .18 冷连 4386 ms（online 4365 ms、dial 12 ms），复用 59/18 ms；仅诊断进程 relay 不可达时冷连 12052 ms（online 12028 ms、dial 16 ms），复用 18 ms。.18 控制端到 .16 冷连 12115 ms（online 12047 ms、dial 40 ms），复用 18/19 ms。
+first-wrong：acquire_controller_endpoint 在 endpoint.bind 和 mDNS 可用后、首次 endpoint.connect 前 await endpoint.online，且等待发生在共享池锁内；已知可用直连路径无法开始竞争。
+因果链：可用 LAN 地址 -> 创建 Iroh 端点 -> 串行等待公网 relay -> 等待结束才拨号 -> 几毫秒实际握手前多付 4–12 秒。
+A 级：/tmp/codux-lan-product-headless-20260913.log、/tmp/codux-lan-product-relay-down-20260913.log、/tmp/codux-desktop-product-test-20260913.jsonl。最小自动回归已确认旧版红灯、当前 target 绿灯；自审另证实同一预算归属的复用失败路径回归，见停止记录。
+
+### 授权变更
+
+仅一个因果单元：共享控制端的 relay 就绪与首次拨号排序。acquire_controller_endpoint 只完成绑定、mDNS、Router 和池发布；connect 立即启动一个 Iroh connect future，与现有 12 秒 online 预算并行。连接先成功则继续流握手；online 先完成则继续轮询同一未完成的 connect future，再沿用现有重试阶梯。若预热期间拨号已明确失败，保留错误日志、让原 online 预算完成后进入既有阶梯。无需后台任务、池内就绪标志、直连特判或调用端 opt-in。拨号耗尽的退休判定读取端点当时实际 relay 状态，避免冻结早先状态。保留主机启动发布逻辑。更新相关注释；按产品独立版本规则更新受影响三端版本和兼容记录。
+
+### 范围
+
+owner / invariant：codux-remote-transport 控制端连接入口是拨号、预算与就绪的唯一 owner；端点已可拨号即允许路径竞争，relay 缓慢就绪不能阻塞成功 LAN，也不能被误判不可达；已发布活连接与共享 Router 生命周期不变。
+allowed_files：crates/codux-remote-transport/src/iroh_link.rs（实现及现有 tests 模块）；crates/codux-remote-transport/Cargo.toml（仅 dev-dependency 启用已用 Iroh relay 的本地测试服务）；apps/mobile/lib/services/remote_transport.dart（仅更新冷启动预算注释）；apps/desktop/Cargo.toml（beta.14）、apps/agent/Cargo.toml（beta.13）、apps/mobile/pubspec.yaml（beta.11+60）、Cargo.lock（生成）、docs/version-compatibility.md（待发布组合与已测范围）。任务状态只记本文件。
+out_of_scope：主机启动/配对 ticket 发布时序、TUN/Surge/Clash 持久配置、移动端轮询/耗电、relay 服务、多 relay 冗余、重连退避、安装/部署、提交、其他任务。用户现有 dial_probe.rs 与两个任务文件保留不改。
+
+### 验证
+
+baseline：同 HEAD 的现有传输库 61 项与 Flutter 27 项已通过；本会话真实 LAN 冷连接日志为上述 A 级基线。新增最小失败用例先在旧代码运行。
+target_check：实际共享产品入口在 relay 不可达、LAN 可达时 2 秒内完成控制/终端流与认证消息往返；再用现有产品探针从真实 LAN 两个方向对照冷连接。
+nearest_regression_check：cargo test -p codux-remote-transport --lib --offline；新增本地 relay server 延迟控制端就绪 9 秒并禁用主机 IP transport，证明超过原无 relay 8 秒短阶梯后仍成功中继及消息往返；并发冷连接与取消不得阻塞另一可用 LAN 连接或停止活连接；现有阶梯、池退休、Router/blob、握手错误用例全部通过。target 用例命令 cargo test -p codux-remote-transport --lib cold_direct_controller_does_not_wait_for_relay --offline。
+broader_check_reason：共享入口由 desktop、mobile FFI、headless controller/smoke 消费，需受影响入口构建/集成检查；不扩到无关产品行为。
+broader_checks：cargo check -p codux -p codux-agent -p codux-protocol-ffi --offline；Flutter remote_transport_test 与既有路由/状态/地址测试；本机 agent smoke transport（若现有 CLI 可直接以验证构建执行）；重建用户现有探针，以隔离无权限测试身份在真实 .16/.18 LAN 验证流就绪时延。手机不可用时明确未做设备 UI 验收，不安装或部署任何产物。格式检查仅改动 Rust 文件及 diff --check。
+
+## 当前阶段
+
+phase：complete
+
+现象与复现：两台 Mac 同 LAN、保持全局 TUN，使用未修改产品连接入口；正常及诊断 relay 不可达均成功复现，基础设施问题已分离。
+last-known-good：可用本地地址正确，端点绑定和 mDNS 已完成；同进程复用无需重新等 relay，18–59 ms 即成功。
+first-wrong：共享池在首次拨号前等待 endpoint.online。
+根因：控制端将仅用于公网可达性的 relay 注册就绪当作所有地址拨号的串行前置步骤。
+evidence_grade：A
+excluded：LAN UDP 不通（实际直连/握手已成功）；必需业务认证耗时（等待在握手前已测得）；仅由 mDNS 缺失引起（指定有效 LAN 地址仍等待）。
+missing_information：无根因阻塞；手机自身 UI 全流程仍需设备接入，不把 Mac 结果冒充手机证据。
+diagnosis_completion：complete
+
+现有正确路径查证：
+- endpoint_builder 使用 Iroh 1.0.2；已核查 Iroh 自有后台 relay、地址竞争和连接 future 的取消，未重建这些职责。
+- 同一文件 acquire_controller_endpoint 池化端点、Arc<Router> 活连接持有、generation 限定退休，保留这些 owner。
+- connect 当前在 online 后读实际 relay 状态选 4/6/8 秒阶梯或 4/4 秒无 relay 阶梯。直接删等待会让冷 relay 在就绪前走短阶梯，必须验证该回归。
+- 758cedcf 已修复慢 relay 下反复销毁端点；87640833 明确 relay 路由语义与共享边界，不能退回到多层补偿或缓存 relay 状态。
+- callers：共享 lib::connect_controller；desktop/runtime remote factory/controller；mobile codux-protocol-ffi transport_exports；agent smoke 与 host 内控制入口。acquire_controller_endpoint 生产调用仅共享 connect。
+
+## Guarded Fix
+
+examined_existing_paths：已完整核查 Iroh Endpoint 后台网络与自有 connect 地址竞争；ControllerEndpoint/SharedControllerEndpoint 现有池、generation、Arc<Router>；758cedcf 保持慢 relay 端点、87640833 relay 路由语义；现有直连及消息/Blob 测试。Iroh relay 1.0.2 已在锁文件，提供本地 server + AccessControl，可用纯测试依赖制造慢 relay，不依赖公网或新增产品注入接口。
+reuse_decision：extend-existing 共享 connect 拨号循环；复用 Iroh path race / online、原 DialSchedule、池与 Router，不建另一套调度器。
+decision_evidence：旧代码新增 cold_direct_controller_does_not_wait_for_relay 已失败，原因为 2 秒截止仍卡在 online；/tmp/codux-relay-cold-red.log。原 warm path 18–59 ms 和历史慢 relay 修复要求保持既有池、预算、错误与所有权。
+owner：共享 RemoteIrohControllerTransport::connect 的拨号阶段。
+invariant：本地可达路径即刻竞争；慢公网就绪保有原预算；同一在途 connect 不因 relay 就绪而被取消重启；连接结果仍经两流 ACK；取消仅释放当前 future，不关闭其他持有者的端点/Router。
+why_minimal_and_sufficient：移除 acquisition 内的阻塞，使用 tokio::select 与原 future/timeout 顺序，无额外 task、flag、配置、平台分支。仅在拨号阶段组织现有职责。
+alternatives：直接删除等待会使冷 relay 被分到 8 秒无 relay 阶梯，缩短原 12+18 秒可达性预算，排除；按缓存 LAN 地址特判会漏掉 mDNS 后发现的地址，泄漏路径选择职责，排除；后台预热状态/任务重复 Iroh 生命周期，排除。
+contract / concurrency / compatibility / rollback：生产无公共签名/协议/数据格式变化；改变初始化与拨号并发，验证取消、同池复用与慢 relay；流 ACK、timeout 阶梯和 Router 所有权保留；源码变更可按本任务 diff 回退，不触及原用户变动。依赖变更仅测试用已采用 relay 版本，锁文件随 Cargo 更新。
+verification_only：真实连接路径/设备边界、现有端点退休与 blob 生命周期、跨三端构建；这些风险不授权修其他问题。
+out_of_scope：与 Active Contract 一致，尤其不更改主机发布候选的 online 等待、不调移动轮询和 TUN。
+existing_path_check：pass；新增 select 仅消除原串行前置关系，没有重做 Iroh 地址竞争/后台 relay 或添加第二池。
+owner_and_evidence：pass；直接作用于 A 级 first-wrong。
+semantic_scope：pass；一个因果单元，声明的额外文件仅测试支持、版本和说明。
+verification_power：pass；原实现红灯、新本地慢 relay 可达对照、真实产品双向 LAN 与现有主路径覆盖。
+result：pass
+
+## 初版停止记录与验证（历史）
+
+stop_evidence：/tmp/codux-relay-reuse-budget-review.log，新增 reused_offline_controller_does_not_restart_relay_startup_budget 实测失败。复用端点已度过 12 秒启动期，relay 仍不可达、目标 UDP 不响应；新实现再次 online 等待 12003 ms，最终错误在 20.010 秒返回，违反原 4+4 秒失败预算（测试允许额外 1 秒调度余量）。只在现有 tests 模块补了这项自审证据，生产实现从 target 通过后未再改动。
+旧版同例对照：隔离目录 /tmp/codux-relay-budget-baseline-20260913-0930，HEAD 原实现仅附加这一个测试，生产前缀字节一致（SHA-256 89945712f1d477a2c0d937c30aa5c9875128dde5ab318dda0354052efe9fd9f6），没有新增或替换依赖版本。用例通过，复用后的两次拨号 4001/4002 ms，约 8 秒返回；日志 /tmp/codux-relay-reuse-budget-baseline.log。总用例 32.96 秒包含 setup 的两段 12 秒，断言计时只含复用拨号。因此确认是本次修改引入，不是 pre-existing。
+被反驳字段：原授权变更把每次 connect 的 timeout(IROH_ONLINE_TIMEOUT, online()) 称为“现有启动预算”，但原预算仅在新建池端点时支付一次；原 invariant / verification 对“保留复用与失败语义”的通过结论不成立。原 LAN 串行根因未被反驳。
+当前生产 diff：移除 acquisition 内 online；connect 与 relay 并行、保留同一在途 future 和旧阶梯；失败时现读 relay 状态；三端独立版本、移动注释及兼容记录；只有原 allowed_files。当前方案禁止交付。无提交、安装、部署、代理配置变化。
+
+已通过验证：
+- target：1 passed，0.85 秒；旧代码同用例 2 秒截止失败。/tmp/codux-relay-cold-target.log、/tmp/codux-relay-cold-red.log。
+- 传输 64 passed，10.96 秒，包含慢 relay 9 秒接纳、仅中继实际路径、并发取消及既有流 ACK/Router/blob/退休用例。/tmp/codux-relay-regression.log。随后增加第 65 项失败用例，不能再把整个当前测试集称为通过。
+- Flutter 五个已声明文件 41 passed。/tmp/codux-relay-flutter.log。
+- cargo check -p codux -p codux-agent -p codux-protocol-ffi --offline 通过；agent 验证构建及 smoke transport 收到实际 host.info 测试消息。/tmp/codux-relay-build-check.log、/tmp/codux-relay-agent-build.log、/tmp/codux-relay-agent-smoke.log。
+- 现有用户探针重新构建，未改源码。/tmp/codux-relay-probe-build.log。
+- .16 控制端 -> .18：真实 relay 冷连 66 ms、复用 17/12 ms（旧冷连 4386 ms）；仅探针 relay 不可达冷连 43 ms、复用 16/15 ms（旧冷连 12052 ms）。/tmp/codux-relay-fixed-headless.log、/tmp/codux-relay-fixed-headless-relay-down.log。
+- .18 控制端 -> .16：真实 relay 冷连 42 ms、复用 19/18 ms（旧冷连 12115 ms）；仅探针 relay 不可达冷连 32 ms、复用 23/20 ms。/tmp/codux-relay-fixed-desktop.jsonl。两方向均报告 path=direct。探针 SHA-256 bb1526f03c00eb7003f0f725e664599c3161c38ecfb9265a82b2b84c06a783a6；.18 临时文件经同摘要验证后已删除。
+- 真实 LAN 证据仅覆盖传输及两流握手；无权限诊断身份未执行业务命令。没有手机设备/UI验收。已装产品未替换，兼容表仍 pending。
+- rustfmt --check 与 git diff --check 通过；已枚举共享工厂、acquisition、退休及测试 helper 所有调用点。Cargo.lock 仅新增 8 个测试依赖包及声明产品版本，无已有依赖版本替换。现有用户改动保留；状态共 835 条，已排除检查原 .scratch/、private/tmp/ 大量未跟踪文件噪声。
+
+自审三问：生产修改直接服务原 LAN 根因，无协议/公开签名/持久数据变化；无新增后台任务或隐藏回退；但失败预算归属改变形成真实相邻回归，验收不完整。
+证据绑定反驳：一次自审从“复用端点是否重复支付启动时间”切入，上述实测推翻当前设计充分性。不能靠缩短 timeout、加冷/热标志或另一个调用端补偿修复。
+
+## Active Contract
+
+state：complete
+approval：approved；用户明确回复“继续修复吧。以后如何避免同类错误”。授权恢复本修订内生产修改，不含提交、安装、部署或代理配置修改。
+
+### 目标
+
+保留已证明的 LAN 冷连接不等 relay；慢 relay-only 仍可在原启动与重试预算内成功；同一池端点的 relay 启动预算仅属于其一次生命周期，复用不重新计时。度过启动期且 relay 离线的端点，失败仍遵循 4+4 秒阶梯。
+
+### 证据
+
+原始双向 LAN A 级日志和 target 红/绿结果证明并行拨号必要；新失败测试证明相对 timeout 放在每次 connect 会重复启动期。旧实现 acquisition 的一次等待与 warm path 原阶梯为正确参考；隔离 HEAD 同用例通过，4001/4002 ms 两次拨号，约 8 秒返回。Iroh 继续独占网络就绪、后台注册及路径竞争；需要的是共享预算起点，不是第二份 relay 就绪状态。
+
+### 授权变更
+
+替换每次 connect 新建的相对 12 秒启动预算：由池端点创建时确定一个不可变 monotonic relay_startup_deadline，随该端点取得并由共享 connect 使用 timeout_at；复用只消耗同一截止时间剩余的额度。保留已通过的同一个在途 connect future 与 relay 并行、原 4/6/8 和 4/4 阶梯、generation 退休及 Arc<Router> 所有权。期限是该端点生命周期的时间元数据，绝不缓存在线状态；在线与退休继续读实际 Iroh 状态。更新预算注释使含义一致。
+
+### 范围
+
+owner / invariant：池端点拥有其唯一一次 relay 启动截止时间；共享 connect 使用剩余时间组织等待与拨号，Iroh 拥有就绪事实。删除当前每次连接重建相对启动预算的做法，不增加补偿分支、后台任务、直连特判、cold/hot 标志或平台选项。
+allowed_files：与旧 Gate 相同。实际机制修订集中于 iroh_link.rs 的共享端点、acquisition 返回值、connect 和同一 tests 模块；移动注释仅按预算意义更新。无新增生产文件、依赖、公开 API、配置或版本再升级。
+out_of_scope：与旧 Gate 相同；尤其不改主机发布 online、TUN、移动轮询、部署和其他用户工作。
+diff 处置：保留有红/绿及真实 LAN 证据的并行拨号；替换错误预算归属，不在其外围叠加热连接特判。保留失败测试作为同根因防回归。
+修改前方案审查：pass。已再次核查 Iroh 1.0.2 online() 读取当前 home_relay_status，不提供启动计时；共享池是端点创建唯一 owner。以同一 immutable deadline 替换每次调用重开的 timeout，不复制 Iroh 网络后台或在线状态。声明 private 字段的构造/返回/解构点一起修改；错误、两流 ACK、generation、Router 与旧阶梯继续复用。没有新增依赖、生产文件、后台任务或第二套调度器。
+
+### 验证
+
+baseline：上述已完成结果，新增同例当前红灯 20.010 秒；旧 HEAD 隔离对照绿灯，约 8 秒返回。
+target_check：reused_offline_controller_does_not_restart_relay_startup_budget 失败返回 <=9 秒且仍为 Err；cold_direct_controller_does_not_wait_for_relay 在 2 秒内连接并有消息往返。
+nearest_regression_check：传输库全部 65 项；慢 relay-only >8 秒仍成功；同池并发取消与资源存活。新增期限调用契约只涉及现有私有字段，枚举全部构造/析构匹配点。
+broader_checks：修订后重跑原已声明的三端 cargo check、agent transport smoke、Flutter 专项、已建探针双向 LAN 与格式检查；原因是最终生产代码改变，需要最终代码证据。仍不做手机 UI 成功声明。
+
+## 最终验证与自审
+
+结果：本地修复与声明验证完成。共享端点创建时设定唯一 monotonic relay_startup_deadline；所有 acquisition 复用同一值，connect 使用 timeout_at，Iroh 保持在线事实与路径竞争的 owner。没有新增后台任务、冷/热标志、平台开关、公开接口或持久化变化。初版重复等待机制已被替换。
+
+最终证据：
+- 复用离线端点失败 target：1 passed，online 等待 0 ms，两次拨号 4002/4001 ms，恢复约 8 秒；先前初版为 20.010 秒。/tmp/codux-relay-revised-reuse-target.log。测试总 20.84 秒包含 12 秒 setup，不把 setup 计入连接失败时限。
+- 冷 LAN target：1 passed，整个测试 0.70 秒，包含连接与消息往返。/tmp/codux-relay-revised-lan-target.log。
+- 传输库：65 passed，0 failed，30.97 秒，含上述两项、慢 relay-only、共享并发取消及既有握手/Router/blob/错误测试。/tmp/codux-relay-revised-regression.log。
+- Flutter 五个声明文件：41 passed。/tmp/codux-relay-revised-flutter.log。
+- 当前 macOS 的 desktop / agent / mobile FFI cargo check 通过；agent 验证构建、transport smoke 实际 host.info 消息接收通过；现有探针重建通过。/tmp/codux-relay-revised-build-check.log、/tmp/codux-relay-revised-agent-build.log、/tmp/codux-relay-revised-agent-smoke.log、/tmp/codux-relay-revised-probe-build.log。未修改用户探针源码。
+- 最终 .16 -> .18：真实 relay 冷连 53 ms、复用 16/21 ms；仅诊断 relay 不可达冷连 48 ms、复用 14/16 ms。/tmp/codux-relay-revised-headless.log、/tmp/codux-relay-revised-headless-relay-down.log。
+- 最终 .18 -> .16：真实 relay 冷连 53 ms、复用 16/16 ms；仅诊断 relay 不可达冷连 32 ms、复用 15/16 ms。/tmp/codux-relay-revised-desktop.jsonl。全部报告 path=direct；开始时 .16 TUN=true、.18 Mode=proxy / enhanced-mode=On。校验后已删除本次 .18 临时目录 /tmp/codux-product-audit.3h49kd；探针 SHA-256 03c807b60a12cf4743465b2655e40c3c345cc58482485c62acda08dd6708ce72。
+- rustfmt --check 与 git diff --check 通过；最终 git status --short --untracked-files=all 835 条，与本轮开始一致，无暂存内容。保留 826 条初始用户工作区变化及原探针、其他任务；本任务共 8 个既有文件变更及 1 个任务文件。源码 target 通过后保持冻结，生产前缀 SHA-256 a1f22205011518e450defeb832cc966bc215bc55021477d8dbb99ddd7b0b9cfe 未变。
+
+自审三问：所有生产变更均服务于共享控制端 LAN 冷连接和同一启动预算归属；不存在第二个修复目标或调用端补偿；target、最近回归与声明消费者检查均通过。生产依赖版本未替换；8 个新增锁包仅用于真实本地 relay 测试服务。
+本轮一次证据绑定反驳：尝试以“复用获取时重建期限、取消导致另一个连接重新预热”推翻方案；全构造/返回/解构枚举确认 deadline 仅初始化一次，复用返回值复制既有期限，connect 不重建；真实复用失败 target 和同池并发取消测试均通过。generation 与 Arc<Router> 路径保留。当前证据未反驳已批准的不变量，不扩展到未经复现的新机制。
+界限：真实 LAN 测量使用无权限隔离身份，仅证明传输和两流握手；无手机设备/UI 验收。构建检查不冒充 Android/iOS 设备检查。三端版本分别为 desktop beta.14、agent beta.13、mobile beta.11+60；兼容组合保留 pending。未安装、部署、提交、发布或改变 TUN 配置。既有 block v0.1.6 future-incompatibility、测试字段/用户探针未使用项 warning 未纳入修复。
+
+## 本次事故的防回归措施
+
+机械防护：保留四个真实 socket 用例，覆盖 cold LAN + relay 不响应、慢 relay-only、同池并发拨号取消、已过启动期的离线池端点复用失败。最后一项直接断言共享产品入口的完整失败时间 <=9 秒；仅验证 DialSchedule 的 4+4 常量无法发现外层重新等待。测试保持旧实现同例绿灯、初版修复红灯、修订绿灯的证据链。
+以后改动等待/重试的层级时，修改前明确资源生命周期、执行次数、预算起止与取消归属；特别核对 per-endpoint 与 per-call 是否发生转换。先固定原本成功和失败的可观察结果，再改时序。共享入口承担这项职责，不让平台或调用方记住额外开关。
+范围：措施留在本项目的真实事故测试及当前任务证据，不据此扩写全局技能、审批流程或跨项目规则。
+
+## Checkpoint
+
+Git 授权与预检：用户明确要求“提交，push to lan”。目标为 main 到 lan/main；lan=mac@10.10.10.21:/Users/mac/git_repo/codux.git。fetch 后远端比本地 HEAD f548104e 落后 2 个既有提交，无分叉；正常快进推送，不 force。仅提交本任务 8 个既有变更文件和本任务记录，其他用户改动不暂存。生产代码与已验证版本一致，复用上述验证结果。此次仅源码提交/同步，不包含安装、部署或产品产物发布。
+
+latest_verified：修订 target 与完整声明验证全部通过。复用失败约 8 秒，最终双向 LAN 冷连 32–53 ms、复用 14–21 ms；传输 65、Flutter 41、三端 cargo check、agent smoke 均通过。最终格式、状态与调用点审查通过；已记录项目内真实网络防回归用例与预算生命周期检查。手机 UI 未实测，兼容组合仍 pending。
+contract_state：complete
+active_capability：none
+next_action：按用户明确授权提交本任务并快进推送 lan/main，以实际 Git 提交及远端引用核对操作结果。不自动安装或部署；产品交付仍需另行授权及对应 Gate。
