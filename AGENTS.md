@@ -13,6 +13,17 @@ These rules supplement global agent instructions for this repository.
   `docs/version-compatibility.md`. Equal version numbers never imply
   compatibility.
 
+## Local Delivery
+
+- Reuse `tools/local-delivery.py` for local macOS desktop packaging, Android
+  sideload delivery, and existing macOS headless service upgrades. Commands and
+  verification boundaries are in `tools/LOCAL-DELIVERY.md`; do not recreate
+  one-off deployment scripts for these paths.
+- Local Android delivery targets `com.duxweb.codux.sideload` and uses Android
+  Studio SDK ADB. A different package requires an explicit user request.
+- Apply the product versioning rules before building. Delivery scripts read
+  source versions; they do not increment versions on every rebuild.
+
 ## State-Machine Convergence
 
 Apply this section only when reproduced evidence or an accepted contract shows
