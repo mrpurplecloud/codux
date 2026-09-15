@@ -351,7 +351,7 @@ fn remote_terminal_buffer_window_tail_includes_target_viewport_keyframe() {
         .screen_snapshot(&session_id)
         .expect("screen snapshot after viewport baseline");
     assert_eq!(snapshot.cols, 72);
-    assert_eq!(snapshot.rows, 18);
+    assert_eq!(snapshot.rows, 32);
 
     fs::remove_dir_all(support_dir).ok();
 }

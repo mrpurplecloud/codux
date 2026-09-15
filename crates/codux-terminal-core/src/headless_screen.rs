@@ -520,11 +520,7 @@ impl TerminalScreenEngine {
     }
 
     fn resize(&mut self, cols: usize, rows: usize) {
-        self.send(TerminalScreenCommand::Resize {
-            cols,
-            rows,
-            clear_exposed_rows: true,
-        });
+        self.send(TerminalScreenCommand::Resize { cols, rows });
     }
 
     fn set_scrollback(&mut self, scrollback: usize) {
@@ -620,7 +616,6 @@ enum TerminalScreenCommand {
     Resize {
         cols: usize,
         rows: usize,
-        clear_exposed_rows: bool,
     },
     ScrollLines(i32),
     SetScrollback(usize),
@@ -1122,11 +1117,7 @@ impl TerminalScreenWorker {
                 TerminalScreenCommand::SetQueryColors(colors) => {
                     self.set_query_colors(colors);
                 }
-                TerminalScreenCommand::Resize {
-                    mut cols,
-                    mut rows,
-                    mut clear_exposed_rows,
-                } => {
+                TerminalScreenCommand::Resize { mut cols, mut rows } => {
                     // Layout settling queues resizes back-to-back, and every
                     // column change reflows the whole scrollback. Collapse a
                     // consecutive run of resizes into the final one; ordering
@@ -1136,12 +1127,9 @@ impl TerminalScreenWorker {
                             TerminalScreenCommand::Resize {
                                 cols: next_cols,
                                 rows: next_rows,
-                                clear_exposed_rows: next_clear_exposed_rows,
                             } => {
                                 cols = next_cols;
                                 rows = next_rows;
-                                clear_exposed_rows =
-                                    clear_exposed_rows || next_clear_exposed_rows;
                             }
                             other => {
                                 deferred = Some(other);
@@ -1149,19 +1137,7 @@ impl TerminalScreenWorker {
                             }
                         }
                     }
-                    let previous_rows = self.rows;
                     self.resize(cols, rows);
-                    // A shrink+regrow reflows rows that were hidden by the
-                    // smaller grid back into the viewport. A TUI that repaints
-                    // only the status rows it owns then writes over the stale
-                    // transcript row and leaves its tail behind. Blank the
-                    // newly exposed rows (scrollback stays) so the SIGWINCH
-                    // repaint starts from empty rows.
-                    if clear_exposed_rows && rows > previous_rows {
-                        self.term
-                            .grid_mut()
-                            .reset_region(Line(previous_rows as i32)..Line(rows as i32));
-                    }
                 }
                 TerminalScreenCommand::ScrollLines(lines) => self.scroll_lines(lines),
                 TerminalScreenCommand::SetScrollback(scrollback) => self.set_scrollback(scrollback),
@@ -2452,36 +2428,6 @@ mod tests {
         assert_eq!(snapshot.cols, 30);
         assert_eq!(snapshot.rows, 10);
         assert!(snapshot.data.contains("ready"));
-    }
-
-    #[test]
-    fn resize_shrink_regrow_clears_stale_visible_rows() {
-        let mut screen = HeadlessTerminalScreen::new(20, 6, 1000);
-        for line in 0..8 {
-            screen.process(format!("history-{line}\r\n").as_bytes());
-        }
-        screen.process(b"\x1b[6;1Hstale-tail");
-        let before = screen.snapshot_at_offset_request(0).snapshot();
-
-        screen.resize(20, 3);
-        // Barrier: the engine coalesces back-to-back resizes, but a real
-        // shrink and regrow are separated by layout/output work.
-        let _ = screen.snapshot();
-        screen.resize(20, 6);
-        screen.process(b"\x1b[6;1HWorking");
-        let after = screen.snapshot_at_offset_request(0).snapshot();
-
-        let row6: String = (0..20)
-            .filter_map(|col| {
-                after
-                    .cells
-                    .iter()
-                    .find(|cell| cell.row == 5 && cell.col == col)
-                    .map(|cell| cell.text.clone())
-            })
-            .collect();
-        assert_eq!(row6.trim_end(), "Working");
-        assert!(after.total_lines >= before.total_lines);
     }
 
     #[test]

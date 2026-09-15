@@ -215,7 +215,7 @@ fn session_terminal_baseline_auto_claims_and_targets_only_subscribed_split() {
         .expect("background viewport state");
     assert_eq!(active_state.owner, "remote:phone-a");
     assert_eq!(active_state.cols, 72);
-    assert_eq!(active_state.rows, 18);
+    assert_eq!(active_state.rows, 32);
     assert_eq!(background_state.cols, 100);
     assert_eq!(background_state.rows, 32);
 
@@ -341,7 +341,7 @@ fn terminal_viewport_auto_claim_respects_explicit_desktop_owner() {
         .expect("viewport state");
     assert_eq!(state.owner, "remote:device-1");
     assert_eq!(state.cols, 72);
-    assert_eq!(state.rows, 18);
+    assert_eq!(state.rows, 32);
 
     terminals
         .claim_viewport(&session_id, "desktop")
@@ -412,7 +412,7 @@ fn terminal_viewport_auto_claim_respects_explicit_desktop_owner() {
         .expect("viewport state after forced claim");
     assert_eq!(state.owner, "remote:device-1");
     assert_eq!(state.cols, 72);
-    assert_eq!(state.rows, 18);
+    assert_eq!(state.rows, 32);
 
     fs::remove_dir_all(support_dir).ok();
 }
@@ -618,7 +618,7 @@ fn terminal_resize_without_owner_claims_remote_viewport_for_compatibility() {
         .expect("viewport state");
     assert_eq!(state.owner, "remote:device-1");
     assert_eq!(state.cols, 80);
-    assert_eq!(state.rows, 24);
+    assert_eq!(state.rows, 32);
 
     fs::remove_dir_all(support_dir).ok();
 }

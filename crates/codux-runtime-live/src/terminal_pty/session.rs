@@ -776,18 +776,25 @@ impl TerminalPtySessionHandle {
     ) -> Result<Option<TerminalViewportState>> {
         let owner = terminal_viewport_owner(owner);
         let cols = cols.max(20);
-        let rows = rows.max(8);
-        // The current owner drives the FULL grid. Ownership is a HANDOFF token:
-        // whoever is actively using the session (the desktop, or a remote device
-        // it was handed off to) holds it, and the PTY reflows to THAT device's
-        // size so the session fits whoever is driving it -- terminal handoff, not
-        // simultaneous mirroring. A non-owner cannot resize (rejected just
-        // below); it pauses and shows the owner's last frame instead of trying to
-        // mirror a mismatched grid.
+        let requested_rows = rows.max(8);
+        // Ownership is a handoff token, but the host owns the ROW count for
+        // remote viewers. The mobile client already renders the host's row
+        // count and pans when the host grid is taller than its viewport; a
+        // remote viewport request therefore drives only columns. Rows may grow
+        // once if a larger remote viewer attaches, but owner handoffs never
+        // shrink the PTY under a stateful TUI (which reflows history into the
+        // re-exposed rows and leaves stale status output behind). The local
+        // desktop owner still drives both dimensions so a local window resize
+        // keeps working.
         let mut viewport = self.viewport.lock();
         if viewport.state.owner != owner {
             return Ok(None);
         }
+        let rows = if owner.as_str() == terminal_viewport_local_owner() {
+            requested_rows
+        } else {
+            requested_rows.max(viewport.state.rows)
+        };
         viewport.expires_at = Instant::now() + TERMINAL_VIEWPORT_LEASE_TTL;
         if viewport.state.cols == cols && viewport.state.rows == rows {
             return Ok(Some(viewport.state.clone()));
