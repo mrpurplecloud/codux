@@ -520,7 +520,11 @@ impl TerminalScreenEngine {
     }
 
     fn resize(&mut self, cols: usize, rows: usize) {
-        self.send(TerminalScreenCommand::Resize { cols, rows });
+        self.send(TerminalScreenCommand::Resize {
+            cols,
+            rows,
+            clear_exposed_rows: true,
+        });
     }
 
     fn set_scrollback(&mut self, scrollback: usize) {
@@ -616,6 +620,7 @@ enum TerminalScreenCommand {
     Resize {
         cols: usize,
         rows: usize,
+        clear_exposed_rows: bool,
     },
     ScrollLines(i32),
     SetScrollback(usize),
@@ -1117,7 +1122,11 @@ impl TerminalScreenWorker {
                 TerminalScreenCommand::SetQueryColors(colors) => {
                     self.set_query_colors(colors);
                 }
-                TerminalScreenCommand::Resize { mut cols, mut rows } => {
+                TerminalScreenCommand::Resize {
+                    mut cols,
+                    mut rows,
+                    mut clear_exposed_rows,
+                } => {
                     // Layout settling queues resizes back-to-back, and every
                     // column change reflows the whole scrollback. Collapse a
                     // consecutive run of resizes into the final one; ordering
@@ -1127,9 +1136,12 @@ impl TerminalScreenWorker {
                             TerminalScreenCommand::Resize {
                                 cols: next_cols,
                                 rows: next_rows,
+                                clear_exposed_rows: next_clear_exposed_rows,
                             } => {
                                 cols = next_cols;
                                 rows = next_rows;
+                                clear_exposed_rows =
+                                    clear_exposed_rows || next_clear_exposed_rows;
                             }
                             other => {
                                 deferred = Some(other);
@@ -1137,7 +1149,19 @@ impl TerminalScreenWorker {
                             }
                         }
                     }
+                    let previous_rows = self.rows;
                     self.resize(cols, rows);
+                    // A shrink+regrow reflows rows that were hidden by the
+                    // smaller grid back into the viewport. A TUI that repaints
+                    // only the status rows it owns then writes over the stale
+                    // transcript row and leaves its tail behind. Blank the
+                    // newly exposed rows (scrollback stays) so the SIGWINCH
+                    // repaint starts from empty rows.
+                    if clear_exposed_rows && rows > previous_rows {
+                        self.term
+                            .grid_mut()
+                            .reset_region(Line(previous_rows as i32)..Line(rows as i32));
+                    }
                 }
                 TerminalScreenCommand::ScrollLines(lines) => self.scroll_lines(lines),
                 TerminalScreenCommand::SetScrollback(scrollback) => self.set_scrollback(scrollback),
@@ -1939,8 +1963,10 @@ fn terminal_snapshot_data(
         }
         output.push_str("\x1b[0m");
     }
+    // A hidden cursor still anchors subsequent relative PTY output. Painting
+    // the cells must not leave that output at the last painted cell instead.
+    output.push_str(&format!("\x1b[{};{}H", cursor.row + 1, cursor.col + 1));
     if cursor.visible {
-        output.push_str(&format!("\x1b[{};{}H", cursor.row + 1, cursor.col + 1));
         output.push_str("\x1b[?25h");
     }
     output
@@ -2322,6 +2348,33 @@ mod tests {
     }
 
     #[test]
+    fn keyframe_restores_hidden_cursor_position_before_live_output() {
+        for alternate in [false, true] {
+            let mut host = HeadlessTerminalScreen::new(40, 10, 100);
+            if alternate {
+                host.process(b"\x1b[?1049h");
+            }
+            host.process(b"\x1b[10;1Hfooter\x1b[6;1HWorking 01\x1b[?25l");
+            let baseline = host.snapshot_at_offset_request(0).snapshot();
+            assert_eq!((baseline.cursor.row, baseline.cursor.col), (5, 10));
+            assert!(!baseline.cursor.visible);
+
+            let mut client = HeadlessTerminalScreen::new(40, 10, 100);
+            client.replace_visible_with_keyframe(baseline.data.as_bytes());
+            let restored = client.snapshot();
+            assert_eq!(restored.cells, baseline.cells);
+            assert_eq!(restored.cursor, baseline.cursor);
+
+            // Hidden is a display property, not permission to lose the write
+            // position. A TUI's next relative update must replace row 6.
+            let live = b"\r\x1b[2KWorking 02";
+            host.process(live);
+            client.process(live);
+            assert_eq!(client.snapshot().cells, host.snapshot().cells);
+        }
+    }
+
+    #[test]
     fn alt_screen_keyframe_reconstructs_into_fresh_screen() {
         // The desktop re-attach path (subscribe_output) replays a session's
         // screen keyframe to rebuild an alt-screen TUI. Verify the alacritty
@@ -2399,6 +2452,36 @@ mod tests {
         assert_eq!(snapshot.cols, 30);
         assert_eq!(snapshot.rows, 10);
         assert!(snapshot.data.contains("ready"));
+    }
+
+    #[test]
+    fn resize_shrink_regrow_clears_stale_visible_rows() {
+        let mut screen = HeadlessTerminalScreen::new(20, 6, 1000);
+        for line in 0..8 {
+            screen.process(format!("history-{line}\r\n").as_bytes());
+        }
+        screen.process(b"\x1b[6;1Hstale-tail");
+        let before = screen.snapshot_at_offset_request(0).snapshot();
+
+        screen.resize(20, 3);
+        // Barrier: the engine coalesces back-to-back resizes, but a real
+        // shrink and regrow are separated by layout/output work.
+        let _ = screen.snapshot();
+        screen.resize(20, 6);
+        screen.process(b"\x1b[6;1HWorking");
+        let after = screen.snapshot_at_offset_request(0).snapshot();
+
+        let row6: String = (0..20)
+            .filter_map(|col| {
+                after
+                    .cells
+                    .iter()
+                    .find(|cell| cell.row == 5 && cell.col == col)
+                    .map(|cell| cell.text.clone())
+            })
+            .collect();
+        assert_eq!(row6.trim_end(), "Working");
+        assert!(after.total_lines >= before.total_lines);
     }
 
     #[test]

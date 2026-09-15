@@ -1,0 +1,10 @@
+{
+  "change_id": "weak-network-remote-session-resilience",
+  "created_at": "2026-09-13T00:00:00Z",
+  "status": "proposed",
+  "capabilities": [
+    "remote-session-resilience"
+  ],
+  "updated_at": "2026-09-13T00:00:00Z",
+  "implementation": "deferred-until-budget-approved"
+}

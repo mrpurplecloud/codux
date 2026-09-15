@@ -1,5 +1,96 @@
 use super::*;
 
+/// A baseline is replayed into the PTY-sized client grid. Overscan rows must
+/// not displace the current screen or collapse a permission prompt at its edge.
+#[cfg(unix)]
+#[test]
+fn remote_baseline_replays_current_screen_without_losing_recent_rows() {
+    let manager = TerminalManager::new();
+    let (session, output) = manager
+        .attach_or_create_with_context(
+            TerminalPtyConfig {
+                shell: Some("/bin/sh".to_string()),
+                command: Some(
+                    "i=0; while [ $i -lt 16 ]; do echo history-$i; i=$((i+1)); done; \
+                     printf 'Permission required\\r\\nCommand: test\\r\\nScope: isolated\\r\\nChoose one:\\r\\n1. Approve\\r\\n2. Reject\\r\\nWaiting for input\\r\\n> input'; sleep 30"
+                        .to_string(),
+                ),
+                cols: Some(40),
+                rows: Some(8),
+                ..Default::default()
+            },
+            None,
+            Arc::new(|_| true),
+        )
+        .expect("spawn terminal");
+    let ready = recv_until_contains(&output, "> input", Duration::from_secs(10));
+    let baseline = session.baseline_snapshot(200_000);
+    let mut client = codux_terminal_core::RemotePtySession::<()>::new(200_000);
+    client.resize_screen(40, 8);
+    client.replace_from_baseline(
+        &baseline.data,
+        Some(&baseline.screen.data),
+        Some(&baseline.screen.wrapped_rows),
+        Some(baseline.buffer_length),
+        Some(baseline.buffer_end),
+        Some(1),
+    );
+    let live = client.screen_snapshot();
+    client.scroll_screen_pixels(8.0, 1.0);
+    let history = client.screen_snapshot();
+    client.scroll_screen_pixels(-8.0, 1.0);
+    let returned = client.screen_snapshot();
+    manager
+        .kill_and_wait(session.id(), Duration::from_secs(2))
+        .expect("close test terminal");
+
+    assert!(
+        ready.contains("> input"),
+        "terminal never finished printing"
+    );
+    let rows = |snapshot: &codux_terminal_core::TerminalScreenSnapshot| {
+        (0..snapshot.rows)
+            .map(|row| {
+                let mut text = String::new();
+                for cell in snapshot.cells.iter().filter(|cell| cell.row == row as i32) {
+                    text.push_str(&" ".repeat((cell.col as usize).saturating_sub(text.len())));
+                    text.push_str(&cell.text);
+                }
+                text
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        rows(&live),
+        [
+            "Permission required",
+            "Command: test",
+            "Scope: isolated",
+            "Choose one:",
+            "1. Approve",
+            "2. Reject",
+            "Waiting for input",
+            "> input"
+        ],
+        "baseline must preserve every current-screen row, not only the input line"
+    );
+    assert_eq!(
+        rows(&history),
+        [
+            "history-8",
+            "history-9",
+            "history-10",
+            "history-11",
+            "history-12",
+            "history-13",
+            "history-14",
+            "history-15"
+        ]
+    );
+    assert_eq!(rows(&returned), rows(&live));
+    assert_eq!((baseline.screen.cols, baseline.screen.rows), (40, 8));
+}
+
 /// Full screen capacity is history plus visible grid. The screen owns that
 /// budget; a baseline must not reinterpret its history budget as total rows and
 /// hide one viewport from the oldest end.
@@ -47,7 +138,7 @@ fn remote_baseline_reports_full_screen_capacity() {
 
     // A phone subscribes only now, long after the output was produced: the
     // history it can reach must not depend on when it showed up.
-    let baseline = session.baseline_snapshot(200_000, true);
+    let baseline = session.baseline_snapshot(200_000);
 
     assert!(
         baseline.screen.total_lines > SCROLLBACK_LINES,

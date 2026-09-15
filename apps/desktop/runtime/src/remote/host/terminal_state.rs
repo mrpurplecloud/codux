@@ -414,29 +414,17 @@ impl RemoteHostRuntime {
             .unwrap_or(false)
     }
 
+    #[cfg(test)]
     pub(super) fn next_terminal_output_seq(&self, session_id: &str) -> TerminalSequence {
-        self.terminal_output_seq_by_session
-            .lock()
-            .map(|mut sequences| {
-                let next = sequences.get(session_id).copied().unwrap_or(0) + 1;
-                sequences.insert(session_id.to_string(), next);
-                next
-            })
-            .unwrap_or(0)
+        self.terminal_output_pipeline.next_sequence(session_id)
     }
 
     pub(super) fn current_terminal_output_seq(&self, session_id: &str) -> TerminalSequence {
-        self.terminal_output_seq_by_session
-            .lock()
-            .ok()
-            .and_then(|sequences| sequences.get(session_id).copied())
-            .unwrap_or(0)
+        self.terminal_output_pipeline.current_sequence(session_id)
     }
 
     pub(super) fn clear_terminal_output_seq(&self, session_id: &str) {
-        if let Ok(mut sequences) = self.terminal_output_seq_by_session.lock() {
-            sequences.remove(session_id);
-        }
+        self.terminal_output_pipeline.reset_sequence(session_id);
     }
 
     pub(super) fn record_terminal_output_ack(
@@ -557,6 +545,10 @@ impl RemoteHostRuntime {
         let device_id = device_id.map(str::to_string);
         let envelope = envelope.clone();
         crate::async_runtime::spawn(async move {
+            runtime
+                .terminal_output_pipeline
+                .wait_for_pending_batch(&session_id)
+                .await;
             let session_id_for_log = session_id.clone();
             if let Err(error) = crate::async_runtime::spawn_blocking(move || {
                 let _ = owner.run(|| {
@@ -791,30 +783,17 @@ impl RemoteHostRuntime {
         if viewers.is_empty() {
             return;
         }
-        let should_spawn = {
-            let Ok(mut batches) = self.terminal_output_batches.lock() else {
-                return;
-            };
-            let batch =
-                batches
-                    .entry(session_id.clone())
-                    .or_insert_with(|| RemoteTerminalOutputBatch {
-                        data: String::new(),
-                        buffer_length,
-                        buffer_end,
-                        viewers: HashSet::new(),
-                    });
-            let was_empty = batch.data.is_empty();
-            batch.data.push_str(&text);
-            batch.buffer_length = buffer_length;
-            batch.buffer_end = batch.buffer_end.max(buffer_end);
-            batch.viewers.extend(viewers);
-            was_empty
-        };
+        let should_spawn = self.terminal_output_pipeline.queue(
+            &session_id,
+            text,
+            buffer_length,
+            buffer_end,
+            viewers,
+        );
         if should_spawn {
             let runtime = Arc::clone(self);
             crate::async_runtime::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(REMOTE_TERMINAL_OUTPUT_BATCH_MS)).await;
+                wait_for_remote_terminal_output_batch().await;
                 runtime.flush_terminal_output_batch(&session_id);
             });
         }
@@ -829,18 +808,14 @@ impl RemoteHostRuntime {
     }
 
     pub(super) fn flush_terminal_output_batch(&self, session_id: &str) {
-        let batch = self
-            .terminal_output_batches
-            .lock()
-            .ok()
-            .and_then(|mut batches| batches.remove(session_id));
+        let batch = self.terminal_output_pipeline.take(session_id);
         let Some(batch) = batch else {
             return;
         };
         if batch.data.is_empty() || batch.viewers.is_empty() {
             return;
         }
-        let output_seq = self.next_terminal_output_seq(session_id);
+        let output_seq = batch.output_seq;
         let payload = terminal_live_output_payload(
             batch.data,
             batch.buffer_length,

@@ -60,6 +60,10 @@ use codux_runtime_live::{
         finish_terminal_create_viewer_lifecycle, is_terminal_kind,
         prepare_terminal_create_lifecycle, rollback_terminal_create_viewer_lifecycle,
     },
+    remote_terminal_output::{
+        RemoteTerminalOutputPipeline, terminal_live_baseline_window,
+        wait_for_remote_terminal_output_batch,
+    },
 };
 use codux_terminal_core::{
     RemoteSequenceGuard, TerminalDriver, TerminalSequence, TerminalSessionHandle,
@@ -77,7 +81,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const REMOTE_TERMINAL_OUTPUT_BATCH_MS: u64 = 32;
 const REMOTE_TERMINAL_BUFFER_BASELINE_TTL: Duration = Duration::from_secs(60);
 const REMOTE_TERMINAL_STALE_OUTPUT_SEQ_LAG: TerminalSequence = 8;
 /// How often the live-output flush re-asserts the authoritative viewport owner
@@ -105,13 +108,6 @@ struct RemoteTerminalLayoutScope {
     project_id: String,
     worktree_id: String,
     layout_order: usize,
-}
-
-pub(crate) struct RemoteTerminalOutputBatch {
-    data: String,
-    buffer_length: usize,
-    buffer_end: usize,
-    viewers: HashSet<String>,
 }
 
 pub(crate) struct RemoteTerminalBufferBaseline {
@@ -193,9 +189,8 @@ pub struct RemoteHostRuntime {
     // Arc so protocol dispatch, output fan-out, and the viewport-owner resolver
     // all use one authoritative subscription state.
     pub(crate) resource_subscriptions: Arc<RuntimeSubscriptionRouter>,
-    pub(crate) terminal_output_seq_by_session: Mutex<HashMap<String, TerminalSequence>>,
+    pub(crate) terminal_output_pipeline: RemoteTerminalOutputPipeline,
     pub(crate) terminal_output_ack_by_viewer: Mutex<HashMap<(String, String), TerminalSequence>>,
-    pub(crate) terminal_output_batches: Mutex<HashMap<String, RemoteTerminalOutputBatch>>,
     pub(crate) terminal_buffer_baselines: Mutex<HashMap<String, RemoteTerminalBufferBaseline>>,
     pub(crate) remote_project_scope_by_device: Mutex<HashMap<String, String>>,
     pub(crate) terminal_event_subscriptions: Mutex<HashSet<String>>,
@@ -331,9 +326,8 @@ impl RemoteHostRuntime {
             agent_worktree_host: Mutex::new(None),
             authorization,
             resource_subscriptions,
-            terminal_output_seq_by_session: Mutex::new(HashMap::new()),
+            terminal_output_pipeline: RemoteTerminalOutputPipeline::default(),
             terminal_output_ack_by_viewer: Mutex::new(HashMap::new()),
-            terminal_output_batches: Mutex::new(HashMap::new()),
             terminal_buffer_baselines: Mutex::new(HashMap::new()),
             remote_project_scope_by_device: Mutex::new(HashMap::new()),
             terminal_event_subscriptions: Mutex::new(HashSet::new()),

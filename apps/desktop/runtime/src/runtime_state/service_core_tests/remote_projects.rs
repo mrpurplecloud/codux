@@ -17,6 +17,10 @@ struct FakeHostCatalog {
     subscribers: Vec<crate::remote::TestHostRoute>,
     /// Every envelope a controller sent, for asserting outbound identity.
     sent: Vec<serde_json::Value>,
+    /// Host-authoritative terminal records shared with every controller.
+    terminals: Vec<serde_json::Value>,
+    /// Where a committed terminal-list snapshot fans out.
+    terminal_subscribers: Vec<crate::remote::TestHostRoute>,
     reject_adds: bool,
     fail_host_info_send: bool,
     shares_catalog: bool,
@@ -59,6 +63,23 @@ impl FakeHostCatalog {
         }))
         .unwrap();
         for subscriber in &self.subscribers {
+            subscriber(&message);
+        }
+    }
+
+    fn terminal_snapshot(&self) -> serde_json::Value {
+        json!({ "terminals": self.terminals.clone() })
+    }
+
+    /// Publish the authoritative terminal list to every project-terminal
+    /// subscriber, mirroring the headless host broadcast after `terminal.create`.
+    fn publish_terminals(&self) {
+        let message = serde_json::to_vec(&json!({
+            "type": codux_protocol::REMOTE_TERMINAL_LIST,
+            "payload": self.terminal_snapshot(),
+        }))
+        .unwrap();
+        for subscriber in &self.terminal_subscribers {
             subscriber(&message);
         }
     }
@@ -129,13 +150,24 @@ impl codux_remote_transport::RemoteTransport for FakeHostTransport {
                 );
             }
             Some(codux_protocol::REMOTE_RESOURCE_SUBSCRIBE) => {
-                catalog.subscribers.push(Arc::clone(&self.route));
-                let snapshot = catalog.snapshot();
-                route(
-                    codux_protocol::REMOTE_PROJECT_LIST,
-                    snapshot,
-                    request_id.as_ref(),
-                );
+                if payload.get("resource").and_then(serde_json::Value::as_str)
+                    == Some(codux_protocol::REMOTE_RESOURCE_TERMINALS)
+                {
+                    catalog.terminal_subscribers.push(Arc::clone(&self.route));
+                    route(
+                        codux_protocol::REMOTE_TERMINAL_LIST,
+                        catalog.terminal_snapshot(),
+                        request_id.as_ref(),
+                    );
+                } else {
+                    catalog.subscribers.push(Arc::clone(&self.route));
+                    let snapshot = catalog.snapshot();
+                    route(
+                        codux_protocol::REMOTE_PROJECT_LIST,
+                        snapshot,
+                        request_id.as_ref(),
+                    );
+                }
             }
             Some(codux_protocol::REMOTE_PROJECT_LIST) => {
                 let snapshot = catalog.snapshot();
@@ -442,6 +474,59 @@ fn host_baseline_creates_projections_with_desktop_ids() {
             .iter()
             .any(|tracked| tracked.id == project.id)
     );
+
+    drop(service);
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
+fn remote_project_connection_subscribes_to_terminal_list() {
+    let (service, support_dir, catalog) =
+        remote_project_service("remote-terminal-subscribe", empty_state());
+    catalog
+        .lock()
+        .unwrap()
+        .projects
+        .push(catalog_project("p-host-1", "Alpha", "/srv/alpha"));
+    wait_for_projects(&service, 1);
+
+    let local_project_id = service.project_list().projects[0].id.clone();
+    let host_project_id =
+        host_project_id_of(&support_dir, &local_project_id).expect("host project id");
+
+    wait_until(&service, "terminal resource subscription", || {
+        catalog.lock().unwrap().sent.iter().any(|envelope| {
+            envelope.get("type").and_then(serde_json::Value::as_str)
+                == Some(codux_protocol::REMOTE_RESOURCE_SUBSCRIBE)
+                && envelope["payload"]["resource"] == codux_protocol::REMOTE_RESOURCE_TERMINALS
+                && envelope["payload"]["projectId"] == host_project_id
+                && envelope["payload"]["baseline"] == true
+        })
+    });
+
+    // Another client creates terminal 2 on the host; the host publishes its
+    // authoritative list and the desktop layout must converge.
+    catalog.lock().unwrap().terminals.push(json!({
+        "id": "host-terminal-2",
+        "projectId": host_project_id,
+        "worktreeId": host_project_id,
+        "title": "Terminal 2",
+        "isRunning": true
+    }));
+    catalog.lock().unwrap().publish_terminals();
+
+    let layout_key = crate::terminal_layout::terminal_layout_storage_key(
+        &local_project_id,
+        &local_project_id,
+    );
+    wait_until(&service, "terminal layout sync", || {
+        let layout = crate::terminal_layout::TerminalLayoutService::new(support_dir.clone())
+            .load(Some(&layout_key));
+        layout
+            .top_panes
+            .iter()
+            .any(|pane| pane.terminal_id == "host-terminal-2")
+    });
 
     drop(service);
     fs::remove_dir_all(support_dir).ok();

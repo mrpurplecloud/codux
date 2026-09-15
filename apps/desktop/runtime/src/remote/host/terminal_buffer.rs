@@ -6,14 +6,13 @@ impl RemoteHostRuntime {
         session_id: &str,
         device_id: Option<&str>,
         offset: usize,
-        mut options: TerminalBaselineOptions,
+        options: TerminalBaselineOptions,
     ) {
         self.register_terminal_viewer(session_id, device_id);
-        if !options.tail
-            || (options.viewport.is_some()
-                && !self.apply_terminal_baseline_viewport(session_id, device_id, options.viewport))
-        {
-            options.viewport = None;
+        if options.tail {
+            // Resize is owner-gated. Baseline capture always describes the
+            // actual live grid, including when this request is refused.
+            self.apply_terminal_baseline_viewport(session_id, device_id, options.viewport);
         }
         let fallback_request_id = options.request_id.clone();
         let chunk_chars = options.chunk_chars;
@@ -161,37 +160,13 @@ impl RemoteHostRuntime {
     ) -> Result<RemoteTerminalBufferWindow, anyhow::Error> {
         let max_chars = options.max_chars.max(1);
         if options.tail {
-            // Read the sequence before the snapshot so the baseline never claims
-            // to include a later live frame. The absolute history watermark then
-            // removes any prefix that the atomic snapshot already covered.
-            let output_seq = self.current_terminal_output_seq(session_id);
-            let baseline = self.terminals.baseline_snapshot(
+            return terminal_live_baseline_window(
+                &self.terminals,
+                &self.terminal_output_pipeline,
                 session_id,
                 max_chars,
-                options.viewport.is_some(),
-            )?;
-            let (screen_data, screen_wrapped_rows) = (!baseline.screen.data.is_empty())
-                .then(|| {
-                    (
-                        Some(baseline.screen.data),
-                        Some(baseline.screen.wrapped_rows),
-                    )
-                })
-                .unwrap_or_default();
-            return Ok(RemoteTerminalBufferWindow {
-                data: baseline.data,
-                screen_data,
-                screen_wrapped_rows,
-                offset: baseline.offset,
-                total_characters: baseline.buffer_length,
-                buffer_end: Some(baseline.buffer_end),
-                truncated: false,
-                output_seq: Some(output_seq),
-                request_id: options.request_id,
-                tail: true,
-                has_previous: baseline.offset > 0,
-                baseline_failed: false,
-            });
+                options.request_id,
+            );
         }
 
         let request_id_for_window = options.request_id.clone();

@@ -259,9 +259,9 @@ fn viewport_state_marks_stale_output_per_viewer() {
     runtime.register_terminal_viewer(&session_id, Some("phone-b"));
     runtime.record_terminal_output_ack(&session_id, Some("phone-a"), Some(20));
     runtime.record_terminal_output_ack(&session_id, Some("phone-b"), Some(11));
-    if let Ok(mut sequences) = runtime.terminal_output_seq_by_session.lock() {
-        sequences.insert(session_id.clone(), 20);
-    }
+    runtime
+        .terminal_output_pipeline
+        .set_sequence_for_test(&session_id, 20);
     transport.take_messages();
     runtime.handle_terminal_event(TerminalEvent::Viewport {
         session_id: session_id.clone(),

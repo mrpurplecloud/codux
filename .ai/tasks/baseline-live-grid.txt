@@ -1,0 +1,213 @@
+# 任务
+
+ID: baseline-live-grid
+类型：bug
+状态：active
+更新：2026-09-14
+grade：Guarded
+一句话描述：host baseline 混入滚动预绘制行，移动端恢复时覆盖当前屏下半部。
+
+## 最新停止事件（2026-09-14 20:41，真机业务窗口仍有覆写）
+
+用户在做原业务窗口最终对照时发现仍覆写：`/private/var/folders/25/bw3hzyt10pd5nbz2ptykl2fw0000gn/T/codux/clipboard-images/terminal-paste-64785-1789443661296.png`。截图显示真实业务 Codex TUI 的状态区多行互相覆盖：`Working 1m 29s / esc to interrupt / Time: 1d 0h 27m`、`Goal paused`、`Working · 42明恢复所需步骤`、`Pursuing goal` 等行叠在同一屏，另有多处 `Working` 残片。桌面与移动端 fixture 底部四行曾通过；该真机覆写说明受控 fixture 未覆盖真实 TUI 的 scroll-region / 状态区相对重绘。
+
+关联时间线：桌面 runtime log 20:40:43–20:41:34 记录北真堂 session `gpui-term-14c0d620-...` 频繁 project switch、viewport owner 在 desktop / mobile `荣耀Magic V3` 之间切换，尺寸在 `99x41`、`82x29`、`48x41` 间变化；用户在同一分钟截图。当前不能据此断言唯一根因，需真实 PTY baseline 与后续输出采样，或可复现同一 scroll-region/状态区重绘的受控 TUI。
+
+state：stopped；阶段=只读诊断。生产代码保持冻结（本轮无新增生产修改）；此前“beta19 动态接管验收通过”的结论对本业务覆写不再成立。下一步需要用户明确授权的北真堂 baseline + 最多 30 秒后续输出采样（本机 /tmp，不上传、不重启、不输入业务命令、不确认权限），或明确批准独立诊断设备配对；在获得授权前不启动采样、不改生产代码、不提交/交付。
+
+用户选择：2026-09-14 用户回复“还是选1吧”，授权只采样北真堂 baseline + 最多 30 秒后续 PTY 输出到本机 /tmp，不上传、不重启、不输入业务命令、不确认权限。选项 2 的非交付探针 `/private/tmp/codux-tui-status-probe` 结果：`scroll-region-origin-status: baseline_equal=false, resumed_equal=false`；`saved-cursor-status` 与 `relative-status` 本次相等。该探针只证明 synthetic scroll-region 可复现同类偏离，不能替代真实业务字节。
+
+采样入口复核（只读）：`TerminalPtySession::subscribe_output` 与 `CaptureReader` 都只存在于 host 进程内；`CODUX_TERMINAL_CAPTURE` 在 session 创建时读取，当前 headless host 进程未设置，无法在不重启的情况下启用。外部 SSH 只能看到 PID/TTY，不能读取已有 PTY master 或宿主内存。因此当前“不重启 + 真实北真堂字节”的唯一可行路径是临时诊断设备按正式 pairing 接入，只 `terminal.subscribe` 北真堂、不发 viewport/resize/input、30 秒后取消订阅并关闭，然后撤销该临时设备；这会新增一份远端设备凭据并可能轮换当前未使用的配对二维码，属于采样授权之外的安全状态变更，等待用户明确批准。若用户改为允许重启 headless host，可在 `/tmp` 设置 `CODUX_TERMINAL_CAPTURE` 后重启并捕获新会话原始字节；但会结束现有 PTY/Agent，需要单独授权。
+
+用户改选 B（2026-09-14）：用户回复“b”，授权重启 headless host 并在 `/tmp` 设置 `CODUX_TERMINAL_CAPTURE`，接受结束现有 PTY/Agent。已执行：备份 `~/Library/LaunchAgents/com.codux.host.plist.bak.1789444028`，加入 `EnvironmentVariables.CODUX_TERMINAL_CAPTURE=/tmp/codux-capture`，`launchctl bootout/bootstrap gui/501/com.codux.host` 重启；`launchctl print` 与 `ps eww` 确认新 PID `77076` 环境含 `CODUX_TERMINAL_CAPTURE=/tmp/codux-capture`，`codux status` running、配对/身份/配置未变。`/tmp/codux-capture` 已建，当前为空（尚无新会话）。下一步：用户重新打开北真堂并复现覆写，host 会为每个新 session 写 `terminal-<session>.ans` + `.idx`；随后只读复制到本机 `/tmp` 分析，采样完成后按需移除 env 并重启恢复。
+
+真实字节结果（2026-09-14 21:0x，只读）：北真堂 capture `terminal-gpui-term-14c0d620-...ans` 615400 bytes / 4736 读块，时间 20:49:50–20:57:28；已复制到 `/private/tmp/codux-capture-beizhentang.{ans,idx}`。字节包含 alt-screen `?1049h`、scroll-region `ESC[1;0r`、`?2026` 同步更新，未见 `?6h` origin mode。桌面 log 记录的基线时间点为 20:54:37.56、20:56:38.65、20:57:03.22；按捕获 elapsed 生成 `/private/tmp/codux-resizes.txt` 尺寸时间线，非交付探针 `/private/tmp/codux-replay-baseline-probe` 全量重放真实字节，并在每个基线点用当前 serializer + 生产 200000 字符 history 窗口重建 baseline 后继续消费后续真实字节。三个点均为 `full_equal=true`、`baseline_equal=true`、`cursor_equal=true`，未复现 parser/baseline 偏离。另对重放后的 host 可见屏逐块扫描：elapsed 295514–296174（≈20:54:45）host 自身有 3 行含 Working（row35 transcript、row37 状态行、row40 footer），但彼此分行、无重叠；elapsed 429180 附近有 2 行。该 capture 未出现整屏“同一行叠字”，但在 takeover 基线后（elapsed 287587，约 20:54:37.6）host 可见屏 row35 已是融合残留 `"thrkingt."`，随后变为 `"•thrkingt.6"`，同时 row37 为 `•Working(30s • esc to interrupt)`、row40 为 footer `Working 5`；client 重放与 host 完全一致。这与用户描述的“切回桌面后 Working 换到另一行继续、旧 Working 行残留”一致，并证明残留发生在 host 权威屏/TUI resize-redraw 路径，而不是 Codux 的 baseline 序列化或 client parser。capture env 仍启用；用户额度耗尽无法继续截图。下一步可在已有真实字节上做无额度实验：对比 resize 时保留旧屏 vs clear 的 host 屏，核对该融合行的来源；并检查 PTY resize/SIGWINCH 与 TUI 重绘顺序，再决定是否需要产品侧在 takeover/resize 时强制完整重绘。
+
+离线 resize 实验（2026-09-14，只读探针）：`/private/tmp/codux-trace-row35-probe` 逐块重放真实字节并追踪 row35。默认 resize（保留旧屏）下，20:54:37.554 regrow 后 row35 从旧 transcript 行 `"the rest."` 变成 `"thrkingt."` / `"•Workingt.6"` 并持续残留 `t.`；`CLEAR_ON_RESIZE` 与 `VISIBLE_CLEAR_ON_RESIZE`（resize 时 `ESC[2J ESC[H`）均消除该残留，稳定为 `•Working43`。最终 scrollback：default `total_lines=1412`，visible-clear `total_lines=1688`（保留/更完整），full-clear `total_lines=42`（丢弃 scrollback）。first-wrong 候选：host `HeadlessTerminalScreen::resize` 保留 shrink 前的可见行；regrow 后 TUI 的局部状态行写入落在旧 transcript 行上，形成残留。候选最小修复：PTY resize 时清空可见 grid 但保留 scrollback，让 TUI 的 SIGWINCH 重绘从空白开始；需用户批准新版 Gate 后再改生产代码。修复前红测与 nearest regression 计划：构造 shrink(41→29)→grow(29→41) 后局部 `•Working` 写入的 host 屏回归，断言无 `t.` 残留且 scrollback 保留；复跑 codux-terminal-core resize/scrollback 与 runtime-live viewport 专项。
+
+## 修订版 Active Contract（resize 暴露行残留；用户已批准）
+
+state：locked（2026-09-14；用户“同意修”“开始最小修复吧”批准；首次生产修改已完成）
+目标：PTY grid 从较小行数 grow 回较大行数时，先前被 shrink 隐藏的旧可见行不得重新暴露；TUI 的 SIGWINCH 局部重绘必须从空白行开始，不得留下 `Working`/状态行残片。scrollback 与既有可见内容（在较小 grid 内仍可见的行）保持不变。
+证据：真实 capture 重放中 row35 `"the rest."` → `"thrkingt."` → `"•Workingt.6...43"` 与用户“切回桌面旧 Working 行残留”一致；只读探针确认 `CLEAR_ON_RESIZE` / `VISIBLE_CLEAR_ON_RESIZE` 消除残留，full-clear 丢失 scrollback（`total_lines=42` vs default `1412`）。
+授权变更：只修改共享 `HeadlessTerminalScreen` 的 resize 语义：`Resize` 命令携带 `clear_exposed_rows`；engine 在 `rows > previous_rows` 时对新增暴露的 `Line(previous_rows)..Line(rows)` 调用 `grid_mut().reset_region(...)`（保留 scrollback），其余行为不变。不做全屏 clear、不改 client/mobile、不改 TUI、不新增协议。
+范围：owner=`HeadlessTerminalScreen::resize` 的可见 grid 语义；invariant=resize grow 后不得暴露 shrink 前隐藏行/残留，scrollback 保留。allowed_files=`crates/codux-terminal-core/src/headless_screen.rs`（含 tests）；用户批准最小修复后增加本地构建版本元数据 `apps/desktop/Cargo.toml`、`apps/agent/Cargo.toml`、`Cargo.lock`、`docs/version-compatibility.md`。out_of_scope=Codex TUI、mobile/desktop UI、协议、commit/tag/push/公网发布。
+Guarded Fix 证据：existing_path_check=pass（复用既有 `reset_region` / keyframe 清理路径）；why_minimal=pass（只清新增暴露行，不碰全屏/scrollback；`alt_screen_content_survives_resize_roundtrip`、`resize_bursts_settle_on_final_dimensions`、`narrowing_the_grid_keeps_the_scrolled_back_content` 均保持通过）；alternatives=full visible clear 已被现有测试否决（会丢内容），full clear 丢 scrollback；real-byte 验证=pass。
+验证：新回归 `resize_shrink_regrow_clears_stale_visible_rows` 在未修改库上红（`Workingail` 残留；探针 `/private/tmp/codux-resize-stale-probe` 实测 `after row6="Workingail"`），修复后绿。`cargo test -p codux-terminal-core`：143 passed / 0 failed（`/private/tmp/codux-terminal-core-resize-fix3.log`）。真实 capture 重放：row35 grow 后稳定为 `•Working6`…`•Working43`，无 `t.` 残留。nearest regression：`cargo test -p codux-runtime-live` 349 passed / 21 failed / 1 ignored，全部失败为 sandbox `failed to open PTY: Operation not permitted`，pre-existing 环境限制；`cargo test -p codux-runtime remote::controller` 72 passed/4 ignored；`remote::host::tests::terminal*` 失败同样为 PTY 权限，pre-existing。
+待办：桌面/headless 版本 bump 与本地构建已完成；设备复测与部署尚未执行。构建：headless `cargo build --locked --release -p codux-agent` -> `target/release/codux-agent` `2.0.3-beta.18`，SHA256 `bc2c24aebabb9e32d25f961779a67a47d6e5380cccbee6d8a2ffe357bcd0ac9b`；desktop `cargo build --locked --release -p codux` + app-only 打包 -> `release-artifacts/baseline-live-grid-beta20/local/Codux.app`，plist/executable 均 `2.0.3-beta.20`，`codesign --verify --deep --strict` 通过，executable SHA256 `b30d8aa584ab4bf9483c96b5fabcd8109b63a2b75ccd08bcaa5e377c0846b10b`；mobile 未改。版本记录更新在 `docs/version-compatibility.md`。本轮未 deploy/commit/tag/push；headless LaunchAgent 的 `CODUX_TERMINAL_CAPTURE=/tmp/codux-capture` 仍开启，需在部署或单独清理时移除。
+
+## 最新验收 checkpoint（2026-09-14，beta19 桌面动态接管）
+
+状态：桌面 controller 动态接管 headless fixture 的视觉复核通过；独立终端列表同步 bug 已修复并验证（见 `.ai/tasks/desktop-terminal-list-sync.txt`，状态 done）。当前桌面 `/Applications/Codux.app`=2.0.3-beta.19（20:15:32 startup log），headless=2.0.3-beta.17，Honor=2.0.3-beta.14.sideload/code63。
+证据：beta19 runtime log 20:16:16 记录 VGBridge `top=2` 与 session `5ad693ff...` 的 `hosted_attach layout=48x41`；20:16:18–20:16:24 desktop 取得 owner，generation 22–24；20:22:44 `terminal_output delivered=true bytes=8537`。用户在桌面终端 2 运行 `/tmp/f.py`，延迟截图 `/private/tmp/codux-fixture-desktop.png` 显示 `SIZE=48x41F-041`、GRID 行、RIGHT-EDGE 在最右列、INVERSE/BACKGROUND 仅作用目标文字、中文连续、Working 00795、底部 PERMISSION/FOOTER/INPUT-ROW 完整；未发现 Working 覆写、反色泄漏或中文错位。截图后已停止 fixture。
+复核解释：用户观察到 Mobile 接管后最后可见 GRID=021、desktop 接管后最后可见 GRID=033。fixture `working_row = rows - 5`，随后覆盖底部 8 行（CJK/inverse/background/Working/PERMISSION/Allow/FOOTER/INPUT-ROW），因此最后可见 GRID = rows - 8：Mobile 29 行→21，desktop 41 行→33，符合 fixture 设计，不是缺行；底部四行已二次确认完整。
+结论：本任务已声明的 Mobile→headless、Mobile→desktop host、desktop→headless 桌面动态接管三项动态夹具验收均已通过；剩余仅为用户授权的交付动作（commit/tag/push、原业务窗口最终对照）尚未执行。
+
+## 最新验证 checkpoint（2026-09-14，beta18 桌面接管）
+
+状态：设备验收进行中；本轮无新增生产修改，无 commit/tag/push。活动产物实测：桌面 `/Applications/Codux.app`=2.0.3-beta.18（plist + 18:20:54 startup log）；headless `mac@10.10.10.18`=`codux 2.0.3-beta.17`（`codux version`）；Honor=2.0.3-beta.14.sideload/code63。
+已验：用户在桌面 Codux 切到北真堂远程项目后，session `gpui-term-14c0d620-…-5923f746…` 由桌面端渲染，layout 150x41；截图 `/private/tmp/codux-verify-desktop-final-window.png`（裁剪 `/private/tmp/codux-verify-desktop-terminal-crop.png`）显示 Codex TUI 正文、CJK、错误/状态行与底部输入提示完整；未见 Working 覆写、反色泄漏、中文大间距或窄列。手机 `/private/tmp/codux-verify-mobile-final.png` 正确显示“终端已在桌面端接管/接力到此设备”。桌面 runtime log 18:29–18:33 记录 owner 在 remote phone 与 desktop 间切换，桌面 generation 31/32、PTY 150x41，未发现 resize 卡住。
+补充已验（2026-09-14 18:40–18:50）：Mobile→headless 动态 fixture 在 Mac Studio headless beta17 上复跑通过：VGBridge 新终端 2 运行 `/tmp/f.py`（同 `codux-shared-path-device-fixture.py`），截图 `/private/tmp/codux-fixture-mobile-1.png`、`-3.png` 显示 Working 递增 00045→00060、inverse/background 仅作用目标文字、RIGHT-EDGE 在最右列、CJK 连续、底部四行完整。Mobile→desktop host 动态通过：手机重连 `MPC MBP 10.10.10.16:60756 直连 16ms`，在本地项目 markdown 新建终端 2 运行 `/tmp/f.py`，截图 `/private/tmp/codux-mpc-fixture-final-1.png`、`-3.png` 显示 Working 00023→00051、inverse/background/CJK/RIGHT-EDGE/底部四行正确。
+未覆盖：desktop 作为 controller 对 headless 的**动态**接管视觉复核，需要桌面 Codux 切到 VGBridge/北真堂的受控终端标签；本会话无 macOS Accessibility 权限，不能代点侧栏/标签。此前只完成真实业务 Codex 静态接管截图（`codux-verify-desktop-final-window.png`）。2026-09-14 19:xx 发现独立阻塞：桌面 VGBridge 左侧终端列表只有 1 个，手机创建的 headless 终端 2（session `5ad693ff-…`）未同步到桌面布局；已按独立任务 `.ai/tasks/desktop-terminal-list-sync.txt` 记录并停在只读诊断，不在本任务内修复。完成该同步及动态接管前不称修复完成、不交付。
+
+## 当前停止事件（最新，覆盖下方历史frozen状态）
+
+最新用户授权：用户“允许”批准仅北真堂会话baseline及最多30秒后续输出采样，保存在本机/tmp；可能含正文/命令/路径。不上传、不重启、不输入业务命令、不确认权限；生产新机制仍未批准。此前“2918”后用户中断，未执行采样动作。用户补充“上次改动之前桌面还没有接管后卡住的问题”：尺寸卡住按本次交付回归追踪，不能归为既有问题，也不能未经证据与渲染异常拆成独立根因；对照交付前后baseline及尺寸恢复链。
+
+采样入口调查结果：尚未采样。SSH只执行ps -p 72126及codux --help，现有headless进程仍72126。CLI无活动会话采样命令；CaptureReader::new只在会话建立时读取CODUX_TERMINAL_CAPTURE，不能无重启临时启用。现有dial_probe使用本机remote-controllers.json的桌面deviceId；iroh_link.rs::bind_peer_alias_under_ownership会用新连接替换同deviceId旧连接并以superseded connection关闭，故未运行该探针、未读取凭据、更未发送其hostlog模式中的terminal.input。AgentWorktreeControl现有loopback接口用于worktree命令，未找到活动终端采样接口；新runtime-stdio会新建TerminalManager，不可读既有会话，未启动。
+可行的低干扰候选：独立临时诊断设备通过正式pairing接入，terminal.subscribe仅指定北真堂且不发viewport/resize/input，30秒后取消订阅并关闭，撤销该临时设备配对。源码subscribe_session只注册viewer和发送baseline；正式配对会新增远端设备凭据并轮换当前未使用的配对二维码，属于采样授权之外的安全状态变更，等待用户明确批准；没有执行。新配对不会复用当前桌面/手机身份。若后续获批，须确认observer未取得viewport及清理目标只为自建诊断ID；不扩大到其他会话。不以读到源代码代替运行验证。
+
+state：stopped；阶段=只读根因调查。用户新增截图terminal-paste-61957-1789392848344.png显示Working覆盖正文，并报告Mobile反白异常、desktop从Mobile接管后仍为手机宽度。用户指出Mobile连接desktop正常，要求对照该路径并继续ADB调查。当前/Applications/Codux.app已实测beta.17、运行PID61957；main/HEAD未变，现有生产diff及832项untracked保留。旧隔离动态测试不证明真实Agent渲染正确，停止全部生产修改及发布，不叠加新补丁；只读诊断和已授权隔离验证继续。先核对活动二进制，再比较headless/desktop host的PTY输出、baseline、viewport尺寸所有权和客户端消费，定位first-wrong；新增机制需修订Gate并获明确批准。verification-before-completion本阶段结束，结果=交付验收未通过；当前唯一协议能力=Superpowers:systematic-debugging，state=active，blocker=多轮局部测试未覆盖真实双端故障，需要正常路径对照及因果证据。android-development仅约束ADB身份/前台边界，不同步规则，不改Android源或业务权限。
+
+### 停止调查补充证据（上下文恢复）
+
+折叠屏新增回归：用户报告展开后仍停窄屏宽度；与desktop接管卡住、Working渲染异常共同调查共享baseline/viewport链，未经证据不拆根因。最新ok仅承接只读调查，不授权新配对或生产机制。上轮ADB只读确认Honor包仍beta.14.sideload/code63/PID28450；系统同时列内屏2156x2344与外屏1060x2376，当时前台微信非Codux，未截图/点击/切前台。wm size的1060x2376不能证明未发生展开。run-as报package not debuggable；筛选logcat无匹配也不能证明无resize。已请求用户将Codux置于展开屏并回复“已展开”，尚无该确认。
+移动端源码：Manifest已有screenSize/smallestScreenSize/screenLayout/density等configChanges；SelfDrawnTerminalView按LayoutBuilder变化post-frame发onResize，home先recordMeasured再经activation/claimable/owner等gate发送。TerminalViewportController同一_sentBySession同时用于发送去重和host报告；pad effective workspaceMode与controller模式可能不同，仅为待验证路径，未当根因。Mobile源码diff为空。desktop的element布局路径可补发resize，故View漏transition仍不足以解释卡住。
+非交付探针/tmp/codux_fold_layout_probe_test.dart覆盖同widget 320/640/320宽度和真实本地screen/viewport提案，尚未跑成功。恢复后已读/tmp/codux-fold-layout-probe.log：Flutter在/opt/homebrew/share/flutter/bin/cache写engine.stamp.tmp及engine.realm被沙箱拒绝，属于启动环境限制，不是产品测试失败。计划仅正常权限运行该隔离测试；不安装、不连接远端。main/HEAD/唯一worktree复核不变，13 tracked修改及832 untracked保留。state继续stopped。
+
+恢复后结果：正常权限运行flutter test --no-pub --reporter expanded /tmp/codux_fold_layout_probe_test.dart成功，1 passed。日志/tmp/codux-fold-layout-probe.log记录narrow=22x26、wide=45x26、callbacks=3，回窄屏断言22x26通过；真实SelfDrawnTerminalView、RemoteTerminalOutputController本地Rust screen和TerminalViewportController提案均随320/640/320布局正确更新。这只覆盖本机widget控制实验，未覆盖HomeController发送gate、实际transport、host确认、Android展开事件；不能宣布真机正常。
+再次只读ADB查询，内屏2156x2344无focus，外屏1060x2376仍为微信前台；未截图或输入。默认沙箱ADB监听5037被拒绝，正常权限同一只读查询成功，不计产品失败。父布局RemoteTerminalPane使用当前constraints，PadWorkspaceMainPane展开terminalBody，已查部分路径未见固定窄屏宽度；pad有效mode与controller发送gate仍待真实状态确认。RemotePtySession::replace_from_baseline不显式写cols/rows；不能仅靠baseline数据存在断言它重置了宽度。下一动作改为等待用户“已展开”，确认Codux前台后对照实际布局、resize发送和host确认。此前真实会话采样尚未执行，独立诊断配对仍无明确授权。生产修改、部署、发布继续停止；不把上述widget绿测当桌面/折叠屏问题已修复。
+
+最新手机日志21:45:58–21:46:06只有terminal.output收包/消费及ACK等元数据，缺payload、sequence、cursor；不能据此判定重复发送、丢包或渲染正确。
+本机runtime-rust.log北真堂viewport对照：06:31:25桌面取得owner，generation35/39x30，随后generation36/150x41；06:33:40桌面取得owner，generation41/39x30，未见后续桌面尺寸，06:34:00释放为desktop，generation42仍39x30。当前假设=Model异步消费viewport事件后View丢失transition，尚需完整链复现，不当作已证明唯一原因。
+非交付探针/tmp/codux-keyframe-boundary-probe.rs及同名.log：当前codux-terminal-core构建后直接使用HeadlessTerminalScreen和RemotePtySession，40x10、隐藏cursor。直接连续解析控制全部正确；普通相对移动/保存恢复cursor续写正确；活动反白/背景色、半截ESC[1或ESC[7、末列pending-autowrap在baseline初始格子相等后续写偏离；scroll-region+origin初始即偏离。证明当前共享baseline衔接不完整，不证明原业务截图逐项归因；不得逐项补mode flag后宣布完成。构建/探针exit0仅表示诊断执行成功，结果含6个失败场景。
+桌面beta.17/PID61957及可执行SHA256=51a00577e3f6eda5b6dae7ce811380cd8383cb367ed8457b044f72097cfbd893已核对活动路径/inode；不再归因未升级。Headless beta.16/PID72126、手机beta.14.sideload/code63/PID28450上阶段已核实。本轮恢复仅复查仓库main/HEAD及唯一worktree未变，13个tracked修改、832项untracked保留。
+安全边界：此前SSH导出headless最近1MB日志遭auto-review拒绝，未导出、未绕过；若需真实PTY采样，须单独说明范围/目的地/敏感风险并获授权。当前仅已有本机元数据及合成探针。未恢复生产修改、部署或发布。
+
+### 最新调查 checkpoint（真实双端router合成复现后）
+
+state=stopped，阶段=只读diagnosis；当前生产diff未增加，未部署/提交/tag/push。systematic-debugging用于正常路径对照及单变量验证；共享baseline修改方案未ready，需真实业务归因及修订Gate批准。
+日志语义已对当前Mobile源码核实：transport.dart:129的envelope在串行receive queue前记录，protocol.dart:38的recv在协议消费阶段记录，同一消息有两个日志点，不等于网络重复。ACK间隔为序号推进4或500ms；terminal.dart:755按router效果发ACK，不能证明最终渲染正确。用户日志缺序号/载荷，不能推算真实带宽、断言丢包或把输出频率当根因。
+尺寸假设收窄：view.rs:262/286的PTY resize仅时间debounce，不缓存同尺寸去重；原“缓存150x41导致跳过”假设无此处证据。View::process_events只比较本次Model消费前后owner/generation，但Model::process_event_wake/process_output_bytes可先消费；该漏transition路径成立。element.rs:99另在本地owner且Model尺寸不同于layout时调resize，通常可以补发，因此漏transition本身尚不足以解释真实39x30卡住。已有pty_binding测试手工调用refresh，未覆盖真实事件/布局调度。未做真实GPUI时序复现，不声称此项根因已确定，不新增恢复flag。
+新临时探针：/tmp/codux-baseline-router-state-probe.rs，二进制同名无扩展，日志同名.log。使用当前codux-terminal-core库的真实RemoteTerminalOutputRouter::accept及accept_for_emulator，desktop mirror严格应用其Replace/Append；32组合覆盖8场景、normal/alt、host keyframe有/无。带host keyframe的16组合，direct连续解析16通过，mobile续写12失败，desktop续写12失败；移除host keyframe的同一组完整同尺寸raw历史，mobile16通过，desktop仍12失败（mirror再次从正确router状态生成并注入keyframe）。初始像素相等多数仍在后续增量偏离。构建/执行exit0表示诊断成功，不能称产品测试通过。没有真实业务字节、没有端到端host或设备实测；host keyframe缺省仅为定位干预，不是生产方案，因为截断历史/跨尺寸重放仍需权威live grid。
+first-wrong范围：HeadlessTerminalScreen::ReplaceVisible用同一个live parser解释synthetic重画ANSI，terminal_snapshot_data修改SGR/CUP；恢复图像不是恢复完整parser/terminal续写状态。两个host共用该路径，尚未证明正常desktop-host与异常headless-host的具体触发条件差异。禁止以若干mode/CUP补丁或直接删keyframe代替完整契约验证。
+下一步：请求用户明确允许仅北真堂会话的baseline及最多30秒后续PTY输出采样，保存在本机/tmp，不上传、不重启、不执行业务输入/权限确认。可能包含终端正文/命令/路径，先获授权；若现有只读机制无法无重启采样，停并另议，不擅自启用生产探针。此前被拒绝的headless日志导出仍未执行。采样用于区分业务重放边界、双端状态与viewport时序，再形成证据绑定的新版Gate；批准前生产保持暂停。
+
+### 正常/异常 host 路径对照 checkpoint（2026-09-14）
+
+用户明确纠正：比较对象是Mobile连接desktop host的正常路径与Mobile连接headless host的异常路径；正常路径没有Working覆写和反白异常。窄屏同时发生于desktop从Mobile接管后、Honor折叠屏展开后，按同一resize/baseline收敛回归调查，不拆成客户端局部补丁。上次相关改动前desktop接管不会卡住，按本次回归处理。
+
+Honor已展开且Codux前台；Android Activity/window实际2156x2344，截图/tmp/codux-fold-expanded-inner.png显示UI占满内屏，但终端内容仍按窄列换行。desktop runtime-rust.log同一session记录15:44:22 generation78/39x30及15:45:10 generation79/82x29，证明展开resize已到host并成功，不是Android窗口或resize发送卡住；错误在resize成功后的screen/baseline收敛。隔离Flutter真实SelfDrawnTerminalView控制测试/tmp/codux_fold_layout_probe_test.dart仍为320/640/320对应22/45/22列且1 passed，只排除widget基础布局不响应，未覆盖真实host链。
+
+真实实现差异：desktop host以REMOTE_TERMINAL_OUTPUT_BATCH_MS=32聚合PTY output，并在terminal_state.rs通过spawn+spawn_blocking异步处理baseline；headless host对每个TerminalEvent::Output立即分配sequence并fanout，subscribe_session同一调用栈同步执行apply_baseline_viewport、current_seq、baseline_snapshot及发送。两端共享TerminalManager和baseline serializer，差异不在wire形状。desktop client接管的refresh_local_viewport_if_current_owner与Mobile提交1f142389新增的measured-viewport修复都执行resize后请求baseline；后者提交说明真机验证pending，现有测试未覆盖已有会话持续ANSI期间的折叠展开或desktop takeover。
+
+非交付A/B探针/tmp/codux-host-path-order-probe.rs已重跑：使用同一RemoteTerminalOutputRouter，模拟headless在拆分ANSI前半段后同步baseline并让baseline outputSeq覆盖该前半段；模拟desktop在完整resize重绘后异步baseline并批量发送完整输出。partial-inverse、partial-background、partial-cursor-up三例均headless=false、desktop=true，SUMMARY headless_failures=3 desktop_failures=0。该结果与用户正常路径对照一致；它证明当前语义可因baseline切入拆分控制序列而丢失续写前缀，不等同真实端到端时序捕获，也不能把32ms延时本身当根因或修复。
+
+当前first-wrong：TerminalPtySession原子锁只保证单次PTY read的history/screen一致，不保证live keyframe是可继续解析的完整终端checkpoint。headless可在parser处于半截ANSI或TUI resize重绘中间时生成baseline；客户端用该baseline的outputSeq丢弃已覆盖live frame后，只收到控制序列后半段，产生覆写、反白、错位，并可能保留resize瞬间的窄内容。正常desktop路径因批处理和异步snapshot通常越过该窗口。仍需证明共享修复契约；禁止复制32ms延时、Mobile/desktop各加flag、继续补SGR/CUP/mode、全局删除baseline或恢复旧overscan。
+
+state继续stopped；生产diff、部署、提交、tag、push继续暂停。下一步仅形成最小红测：同一已有会话resize期间拆分ANSI/TUI redraw，分别经过headless与desktop host真实handler，再由Mobile及desktop router消费；同时锁住首次测量输入行、live-grid缺行、折叠展开和desktop takeover两个caller。测试先证明正常路径保持正确、异常路径命中同一first-wrong，再提出单一共享owner和新版Active Contract；用户明确批准新版Gate前不改生产代码。
+
+用户新增修复原则：headless共享项目为后加功能，Mobile到headless路径曾独立改动；以Mobile连接desktop host的已正常工作逻辑为行为基准，headless复用同一实现，不复制时序或局部补偿。迁移前先枚举正常路径既有契约及旧缺陷，特别锁住live-grid底部完整、滚动历史、隐藏cursor续写，不能因路径统一恢复旧overscan缺行或其他已修bug。该原则覆盖后续Gate；历史提交只作归因线索，最终范围仍由当前源码、A/B及回归测试决定。
+
+## 前版 Active Contract（已由下方新版替代）
+
+state：stopped（部署后用户报告新渲染异常；原生产diff冻结，允许只读诊断与非交付临时复现；新版Gate批准前不得继续生产修改）
+目标：重新订阅、接管和滚动返回底部后，当前屏每行与权限/输入提示完整；原始历史仍可浏览。
+证据：旧实现 baseline_snapshot 使用 remote_viewport_snapshot_request(0,0,0)，该滚动 API 仍附带上一屏；双屏 keyframe 重放进单屏 grid 时，下半部行被 clamp 覆盖。另一分支 snapshot_request(true) 会继承 host viewer offset。真实 PTY-to-client 和 headless chunked transport-to-router 测试在恢复旧实现时失败、修复后通过。先前4行 fixture 被合法尺寸下限8行影响，已纠正为40x8并重跑旧实现，不将无效 fixture 视为根因证据。
+现有正确路径：snapshot_at_offset_request(0) 导出 live grid、不移动既有 viewer；原始 history 已由 baseline.data 独立提供。复用该路径，保留 output_commit 原子捕获，不改滚动 overscan API。
+授权变更：仅 shared TerminalPtySession baseline 生成契约；移除 use_remote_viewport 分支和全部 caller 参数，headless/desktop resize 权限独立保留。
+范围：owner=TerminalPtySession::baseline_snapshot；invariant=keyframe 仅实际 PTY 尺寸 live grid。allowed_files=crates/codux-runtime-live/src/terminal_pty/{session.rs,manager.rs,tests/viewport.rs}、apps/agent/src/terminals.rs、apps/desktop/runtime/src/remote/host/{terminal_buffer.rs,tests/terminal_buffer.rs}；版本元数据 apps/{agent,desktop}/Cargo.toml、Cargo.lock、docs/version-compatibility.md。Mobile、Iroh、wire、会话自动恢复、用户其他任务/未跟踪文件均不修改。
+验证：真实 PTY 40x8 每行权限画面及历史往返；headless chunked baseline 经真实 client router 重放；desktop observer 请求不得继承或改变 host 滚动位置；受影响 Rust 套件和 Flutter 渲染测试；Honor 真机多屏编号、重新订阅、前后台、滚动到两端；原业务窗口需恢复后对照。
+
+## 最新证据 / checkpoint
+
+生产基线 HEAD=5d3764577e6198f6afbcd89528854ffe23f151a8；main；唯一 worktree 为当前仓库。恢复上下文时未找到该新根因的持久任务记录，本文件补记已观察的源代码/测试证据，不倒填修改前 Gate 完成时间。
+本地验证日志：/tmp/codux-baseline-final-suite.log（1084 passed）、/tmp/codux-controller-e2e-final.log（4 passed）、/tmp/codux-mobile-widget-final.log（9 passed）；仅环境相关 zsh shim 保持 ignored。红测：/tmp/codux-baseline-replay-red-valid.log、/tmp/codux-agent-wire-mutation-red.log。
+用户授权：部署、升级需要的地方；真机验收通过后提交、打tag、push to lan。禁止将构建、空 shell 或模拟权限画面冒充原业务窗口验收。
+交付：现有 tools/local-delivery.py 已升级 mac@10.10.10.18 headless 至2.0.3-beta.15，PID24438；脚本验证运行二进制 inode/身份/配置/配对，旧二进制保留备份。重启结束旧 PTY/Agent，原VGBridge/北真堂当前为 shell。
+桌面：2.0.3-beta.16 app 已构建并验证，/Users/mac/Downloads/Codux-2.0.3-beta.16.app；后续只读观察 /Applications/Codux.app plist 已为beta.16，运行PID55840路径为该app，运行inode未重新核对。当前助手位于该桌面终端中，不盲目重启。
+移动：Honor AD7B024702000799 / Android16 / com.duxweb.codux.sideload 2.0.3-beta.14.sideload code63，APK未改、未重装或清数据。
+真机隔离测试：VGBridge 新建终端2，session=6c50fff3-8ac1-43e4-9dba-db9c40dcfa6b；北真堂新建终端2，session=3240c626-5a0f-4dfc-86e4-55831042ed2a。/tmp/codux-baseline-device-fixture.py 仅输出120行历史及29行编号/模拟权限画面，不执行权限动作。两个项目切换后重新订阅，日志确认新baseline完成；/tmp/codux-accept-after-rebind.png 与 /tmp/codux-beizhen-after-rebind.png 均显示001–026及权限/选项/输入三行完整，逐行OCR亦确认。VGBridge /tmp/codux-accept-return-bottom.png 与 /tmp/codux-accept-foreground.png 确认历史往返和前后台恢复后当前29行完整。历史截图合计覆盖118/120编号，41/42尚未被重叠截图覆盖，不能将采样缺口解读为实际缺行，也不能宣称120行已全部核对。
+最新暂停：手机19:01转分屏，另一应用正在输入；立即停止ADB输入，避免误触。未继续改变分屏、焦点或业务内容；应用专用logcat已停止。两个隔离fixture仍等待输入，终端/临时脚本保留供继续验收；未清理用户终端。
+最终专项复跑：cargo test -p codux-runtime-live remote_baseline_replays_current_screen_without_losing_recent_rows、cargo test -p codux-agent chunked_takeover_baseline_replays_every_current_row_on_client、cargo test -p codux-runtime remote_terminal_buffer_window_tail_ships_keyframe_for_normal_screen 均1 passed/0 failed。日志 /tmp/codux-baseline-final-target-{runtime,agent,desktop}.log。codesign --verify --deep --strict 最终Downloads app通过，--version=2.0.3-beta.16；ssh headless --version=2.0.3-beta.15。
+LAN附带观察：重启后端口变为50469，本次先relay，约59秒后同连接切为10.10.10.18:50469 direct，之后重连直接成功；不归功于本次baseline修复，网络代码未改。
+前阶段能力已结束；当前 blocker=静态验收通过却出现双端动态错位，需要区分host状态、baseline重放与持续增量；logical_capability=Superpowers:systematic-debugging；resolved_skill=superpowers:systematic-debugging；state=complete；result=隐藏光标位置丢失、双端消费路径、正常/备用屏、中文行列错位均稳定复现；原业务截图完整归因仍未证明。无独立Agent审查声明。
+
+## 回归调查 checkpoint（2026-09-14）
+
+用户新证据：桌面北真堂多行Working残留叠字、中文大间距；移动端同样异常；无接管/resize的持续输出期间也出现；此前未见，按本次交付回归处理。截图为terminal-paste-55840-1789384656848.png和terminal-paste-55840-1789384760521.png（系统临时codux/clipboard-images目录）。不将模拟静态画面通过当作业务验收通过。
+已确认first-wrong：crates/codux-terminal-core/src/headless_screen.rs::terminal_snapshot_data 只在cursor.visible时输出CUP，隐藏光标baseline重放后停在最后绘制单元而非host实际cursor；随后相对移动/擦行写到错误行。生产serializer未改。git blame显示该条件原已存在于33c9066e7；这不能排除新版baseline暴露缺陷。
+A/B非交付临时复现：/tmp/codux-hidden-cursor-probe.rs，日志/tmp/codux-hidden-cursor-ab.log。真实HeadlessTerminalScreen，40x10、30行历史、row6 Working、row10 footer；旧overscan初始格子即不等、增量后仅row10 Working；新live-grid初始格子相等，但隐藏光标host=(5,10)/client=(9,11)，增量后row6 Working01和row10 Working03并存。可见光标对照正确；仅在临时keyframe补回真实CUP后初始与增量均相等。已证明该输入下新旧症状差异，不宣称已捕获原业务PTY字节或解释截图全部空白。
+当前diff仍仅此前baseline修复、测试、版本/兼容文档；本次未新增生产修改。main/HEAD与唯一worktree重新核对仍为上述基线；无stage/commit/tag/push。保留其他任务改动和所有无关untracked文件。headless服务/桌面进程/手机业务窗口未因本次诊断重启或输入。
+补充A证据：/tmp/codux-hidden-cursor-consumer-probe.rs、/tmp/codux-hidden-cursor-consumer.log，非交付临时Rust探针直接使用当前编译的RemotePtySession，并按已读emulator_result的history/screen消费方式重放desktop mirror。16组合覆盖正常/备用屏、Working连续相对更新/中文相对定位、可见光标对照、host及mirror临时CUP纠正；Working组合还插入重复baseline。每次初始格子均相等；当前隐藏光标两个消费者均在增量后偏离，可见光标正常；只纠正host时mobile正常而desktop仍错；两个序列化边界都纠正后全部相等。中文期望零基row4 cols12/14/16/18，错误实际row8 cols35/37和row9 cols0/2，证明错误位置可导致行尾拆行与大偏移，但不是原截图原始字节重放。临时探针首次编译误用u64序列，改为项目TerminalSequence后成功；编译错误不作为产品根因证据。
+用户于本轮明确回复“批准”，批准下列修订差异。当前阶段fix；新版Gate ready，先补可执行红测，再修改共享serializer。部署前另核实真实环境与可中断时机；真机验收通过前不提交/tag/push。
+
+## Active Contract（新版，用户已批准）
+
+state：frozen（核心target_check通过，仅继续已声明验证及交付检查）；批准记录=用户“批准”。三条正式红测命中预期失败后，仅将共享serializer末尾CUP移出visible条件；desktop升beta.17、headless升beta.16，mobile不重新交付。日志/tmp/codux-hidden-cursor-red.log：4 passed、3 failed；失败为cursor位置及mobile/desktop真实router续写格子偏移，不是编译或环境错误。/tmp/codux-hidden-cursor-core-green.log：142 passed、0 failed。包含两个实际RemoteTerminalOutputRouter消费者、普通/备用屏、可见/隐藏光标、中文相对定位、Working原位更新与重复baseline；未以静态格子或文字包含断言替代续写。仅撤销rustfmt带来的两个无关格式hunk，未改变其语义。
+
+相对旧版差异：保留原live-grid修复与缺行回归；新增已复现的keyframe隐藏光标续写因果单元，不把整套终端状态迁移或截图所有异常都并入根因。owner从既有baseline调用层扩至共享keyframe serializer；仅修正位置与可见性的错误耦合，不增加客户端恢复机制。
+目标：live-grid baseline后的后续PTY增量保持host格子坐标；Working更新不因重放留下旧行，中文相对写入不因重放错行/错列；当前屏完整和原始历史浏览不退化。截图全部症状消除仍属交付验收，未获证明时不得发布。
+证据：上述两份临时探针提供当前未修serializer红例、可见光标控制、仅恢复CUP的最小干预，以及旧overscan/新live-grid不同失败表现；first-wrong=terminal_snapshot_data隐藏光标时漏输出CUP。真实业务PTY原始流未捕获，不能宣称精确复现所有截图。
+授权变更：删除serializer将CUP绑定cursor.visible的条件依赖，位置统一还原，cursor.visible只控制显示；复用已有CUP及显隐路径。没有新flag、定时器、重试、清屏/重订阅兜底或wire字段。
+范围：owner=crates/codux-terminal-core/src/headless_screen.rs::terminal_snapshot_data；invariant=用于继续消费PTY的live keyframe保留真实光标位置且显隐独立。新增allowed_files=该文件与crates/codux-terminal-core/src/remote_output_router.rs内既有测试区；此前baseline测试文件可扩充动态续写检查，既有生产diff保持原语义。发布版本及兼容文档沿原授权按实际变更产品更新；不改Mobile UI、网络、会话生命周期、PTY信号或用户业务项目，不做无证据parser模式重构。
+验证：先将临时红例转为现有测试中的最小回归，修复前确认失败；cargo test -p codux-terminal-core覆盖隐藏/可见光标、普通/备用屏、Working动态更新、CJK坐标、重复baseline，以及实际RemoteTerminalOutputRouter::accept/accept_for_emulator消费；不能只断言文本存在，需逐格坐标与cursor比较。再跑已有三个缺行专项（runtime-live PTY、agent chunked baseline、desktop observer），以及受影响core/runtime-live/runtime/agent主路径。设备验收在空闲隔离终端中持续输出、接管、重订阅和历史往返；桌面+Honor对照同一host；原业务Working/中文/权限区域实际对照通过后才满足交付条件。不得操作真实权限确认。任何新反证按停止流程处理，不扩机制。
+
+## Guarded Fix 修订审查
+
+examined_existing_paths：headless_screen.rs::snapshot已独立捕获隐藏cursor坐标，但terminal_snapshot_data漏写；stack_scrolled_snapshots同样调用该serializer；RemotePtySession::{replace_from_baseline,reconcile_visible_keyframe,screen_replay_snapshot}与RemoteTerminalOutputRouter::{replace_session_from_baseline,apply_live_to_session,emulator_result}共用此链；apps/desktop/src/terminal/model.rs消费Replace；host两种baseline caller由此前修复统一到live grid。现有alt_screen_keyframe_reconstructs_into_fresh_screen只检查内容，不覆盖隐藏cursor后续增量。历史git blame将错误分支定位到33c9066e7，不能用代码旧来否定新交付暴露症状。
+reuse_decision：extend-existing terminal_snapshot_data末尾CUP恢复；消除显隐条件对位置的控制。不存在第二套正确serializer可替换；不让caller选择安全模式。
+why_minimal_and_sufficient：同一共享实现同时修正host导出和desktop再导出；临时单变量干预已消除该复现的first-wrong和后续格子偏离。不声称补齐所有ANSI解释器状态或修复所有真实截图。
+alternatives：回到旧overscan会重现缺行，且隐藏cursor增量仍错；只修host输出会漏desktop mirror，探针已证明。不选择任何consumer局部兜底。
+实际风险：共享ANSI重放契约和双端二次导出；无wire形状/持久化数据变更。scroll viewport的cursor不可见语义仍保持；验证现有滚动快照与普通输入对照。最终交付需升级含修复serializer且实际执行导出的headless和desktop；mobile未改源码/未重新交付时不借其他产品升级机械升版。
+修改前方案审查：existing_path_check=pass（扩既有CUP路径，无新增重复职责）；owner_and_evidence=pass（16组合及单变量干预）；semantic_scope=pass（仅隐藏cursor续写）；verification_power=pass for已复现因果单元，实际截图及真机仍pending。result=pass；用户已批准修订，允许按此范围修改。
+test-driven-development已complete，产出三条正式红绿回归；当前能力：blocker=双端真机及最终运行产物未验收，不能把构建/核心绿测当交付成功；logical_capability=Superpowers:verification-before-completion；resolved_skill=superpowers:verification-before-completion；state=active；仅核验当前任务证据，不自动提交或发布。
+
+## Delivery Gate
+
+新版已批准、核心及相邻验证完成、生产frozen；release仍暂停等待真机验收。用户最新“ok”明确同意当前重启headless/desktop并操作手机验收，已知headless会结束现有PTY/Agent。headless可用已验证备份回退，desktop旧app保留，mobile未变。执行顺序=先headless及手机验收，再安全切换desktop；当前进程树实证codex57706经zsh56893属于desktop55840，退出desktop会中断当前助手，切换前必须保存此任务checkpoint。真机通过前不提交/tag/push；旧版本tag未创建。lan远端旧检查仅作历史证据，执行获授权发布前须复核。
+
+## 最新 checkpoint（headless部署与旧APK隔离验收后）
+
+当前阶段=设备交付/验收进行中；生产frozen，根因修复只有共享serializer末尾CUP移出visible条件，未增加恢复机制。三条正式红绿回归和实际双端router测试已保存。共享caller复核：terminal_snapshot_data仅snapshot和stack_scrolled_snapshots两处调用；两类host baseline及manager/session调用均保持前版统一live-grid契约。
+本地测试：/tmp/codux-hidden-cursor-core-green.log 142 passed。/tmp/codux-hidden-cursor-nearest.log agent57 passed，runtime521 passed/1 failed/4 ignored；唯一失败为Finder XPC沙箱拒绝，/tmp/codux-hidden-cursor-files-unsandboxed.log同一测试正常权限1 passed。/tmp/codux-hidden-cursor-runtime-live.log 363 passed/3 failed/1 ignored；三项失败在临时127.0.0.1监听初始化，Operation not permitted；/tmp/codux-hidden-cursor-manager-unsandboxed.log正常权限15 passed包含该三项。无文件模块或控制服务生产改动。当前三条原缺行专项均在上述日志明确ok。四项opt-in Iroh和一项环境相关zsh未在本轮执行；此前证据不充作本轮结果。
+构建：tools/local-delivery.py desktop exit0，最终/Users/mac/Downloads/Codux-2.0.3-beta.17.app；codesign --verify --deep --strict exit0、Identifier=com.duxweb.codux、ad-hoc、arm64、--version=2.0.3-beta.17。可执行文件SHA256=51a00577e3f6eda5b6dae7ce811380cd8383cb367ed8457b044f72097cfbd893。headless cargo build --locked --release -p codux-agent exit0，target/release/codux-agent --version=2.0.3-beta.16，arm64，SHA256=a1bd0082ee6efdffad58b63a9c68ba16dfeb2547fd76225da7dcc6dbd61c5537。日志/tmp/codux-hidden-cursor-{desktop-delivery,agent-build}.log。
+部署：python3 tools/local-delivery.py headless mac@10.10.10.18 exit0；/tmp/codux-hidden-cursor-headless-delivery.log确认运行beta.16、PID72126、executable inode verified，配置/配对/host身份未变，旧二进制备份/Users/mac/.local/bin/codux.backup-703a56c5acc9。重启按用户授权结束旧PTY/Agent。桌面尚未替换或重启：plutil复核/Applications/Codux.app为beta.16，Downloads产物为beta.17。先前实测当前助手codex57706经zsh56893属于Codux55840；重启会中断当前会话。/Users/mac/Downloads/Codux-2.0.3-beta.16-before-cursor-fix.app此前确认不存在，尚未创建备份/切换脚本或安排延迟重启，操作前需重查。
+手机：Honor AD7B024702000799，com.duxweb.codux.sideload实测仍beta.14.sideload/code63，未安装或清数据。外屏display=4630946324137792644、1060x2376；ADB使用/Users/mac/Library/Android/sdk/platform-tools/adb。先确认Codux前台才输入。VGBridge隔离终端2 session=97829cc7-ffa2-433c-af26-2e6024b0f6a8正在运行/tmp/codux-hidden-cursor-device-fixture.py；120编号历史、30行当前屏、隐藏cursor持续相对更新Working/CJK、模拟权限文本，绝不执行权限动作；业务终端1未输入，旧业务Agent未自动恢复。normal-screen已验，--alt尚未真机验。
+手机证据：/tmp/codux-hidden-cursor-phone-dynamic-running.png（Working00189）及after-rebind.png（00393）当前30行完整；/tmp/codux-hidden-cursor-device.log在20:34:27.229记录该隔离session新baseline完成。/tmp/codux-hidden-cursor-phone-return-bottom.png（01562）及ime-before-restore.png（02554）确认持续输出及返回底部后无Working旧行、CJK连续、底部四行完整。history.png与history-2至11.png经/tmp/codux-baseline-ocr处理，/tmp/codux-hidden-cursor-history-ocr.txt与history-ocr-overlap.txt合并编号覆盖120/120、missing=[]，此前缺号为截图采样间隔，不是数据丢失。OCR仅证编号，不作为中文字形精确证据。live-final.png截图时还在滚动距底部5行的位置，不把该中间态称缺行或底部验收成功。
+手机恢复：临时En模式已用Shift恢复“中”，/tmp/codux-hidden-cursor-ime-restored.png确认；默认Rime输入法未改，键盘已隐藏。20:48:33执行短暂Home再am start回Codux，日志有inactive/resumed及mount-foreground baseline订阅；仅证明短暂前后台恢复，非长时间后台存活。/tmp/codux-hidden-cursor-phone-foreground-final.png（Working03116）30行及底部提示完整，中文未出现散列，Working未出现旧行残留。键盘显示期间截图不作为全行可见通过证据。Codux PID28450专用logcat session30128已Ctrl-C停止，exit130；fixture保留运行供桌面验收。ADB沙箱本机socket拒绝后获准正常权限重跑，非产品失败；OCR使用获准本机Vision读取测试截图。链路观察保持direct，不归功本次修复。
+自审：新增生产改动均绑定隐藏cursor续写，无wire/持久化变更，无客户端补偿；显隐对照和两种screen证明未为续写强制显示cursor。反驳检查使用可见cursor控制、host-only诊断干预、desktop真实再序列化路径，覆盖“只修host即足够”和“静态格子相等即正确”两项错误结论。仍未捕获原业务PTY字节，不能宣称截图全归因或已消除真机异常。
+APK解释：本次修改共享ANSI生成器，headless导出和desktop mirror二次导出执行该路径；Mobile现有accept路径解析host修正后的CUP并读取格子，不走desktop accept_for_emulator二次ANSI导出。源码未变不能单独证明兼容，旧APK设备证据仅覆盖上述隔离场景；不需为其他产品升级机械重建/升版移动端。
+状态复核：main/HEAD未变，无stage/commit/tag/push；832项untracked和无关desktop-takeover-input任务变更保留，未清理。verification-before-completion仍active；android-development仅用于设备身份/前台边界，未同步规则或改Android源。下一步安全切换desktop至Downloads beta.17，保存旧app并核对新活动进程；重启授权已有，无需重复申请，但不能同时启动同profile两实例。随后桌面与Honor同host动态接管/重订阅及原业务Working/CJK/权限窗口对照。原业务Agent未恢复，现有隔离fixture不能代替该验收；未通过前不提交/tag/push。最终更新兼容文档仍pending的组合证据，再执行用户原授权main提交、独立产品tag、push lan并复核远端ref。
+
+## Active Contract（host路径统一，用户已批准）
+
+state：active；批准证据=用户先确认“应该按这个方向修复，先在共享层复用（不要引回已修复bug），再看是否还有异常”，随后明确要求“按刚才定的顺序修好为止”。该批准覆盖本节范围，不扩大到真实业务输入、权限确认、配对变更、提交、tag或push。
+
+目标：以Mobile连接desktop host的正常行为为基准，让desktop host和headless host复用同一remote terminal输出/baseline收敛owner；消除Working覆写、反白、折叠屏展开后仍窄、desktop接管后仍窄。先统一路径并设备复测；若仍有异常，回到first-wrong证据，不叠加客户端补偿。
+
+证据：headless终端服务最初由348300b0独立实现；c0c70a96只共享协议router，提交说明明确保留desktop的output batching和baseline cache为host-specific。当前desktop对PTY output批处理并异步生成baseline，headless每个Output立即分配outputSeq且同步生成baseline。真实同client A/B中拆分inverse/background/CUP均headless失败、desktop通过。新增单变量探针/tmp/codux-path-isolation进一步确认：immediate 3/3失败，async-late 3/3通过，仅batch但早期baseline仍3/3失败；因此不能只搬32ms batching，owner必须同时覆盖pending bytes、baseline调度边界、outputSeq和bufferEnd。
+
+保留契约：TerminalPtySession::baseline_snapshot继续使用snapshot_at_offset_request(0)，不得恢复remote_viewport overscan；原始history、viewer离开/重订阅后的scrollback完整；terminal_snapshot_data继续独立恢复真实cursor位置与显隐；正常/备用屏及Mobile/desktop两个consumer续写不退化。上述现有生产diff和红绿测试保留，不重写为新机制。
+
+授权变更：新增或扩展codux-runtime-live内单一remote terminal output/baseline协调实现，迁移desktop现有批处理、sequence和异步baseline调度语义；headless改用同一实现并删除私有即时sequence/output及同步baseline路径。host仅保留viewer/subscription、transport发送、desktop layout/callback owner和viewport权限适配。不得在两端复制timer/flag，不新增Mobile补偿、wire字段、parser mode补丁、重订阅/清屏fallback。
+
+allowed_files：crates/codux-runtime-live/src/{lib.rs,remote_terminal_output.rs,remote_terminal_dispatch.rs及同模块测试}；apps/agent/src/{host.rs,terminals.rs}；apps/desktop/runtime/src/remote/host/{mod.rs,terminal_state.rs,terminal_buffer.rs,terminal_dispatch.rs,tests/terminal_buffer.rs,tests/terminal_viewport.rs}；既有回归所在crates/codux-runtime-live/src/terminal_pty/{session.rs,manager.rs,tests/viewport.rs}、crates/codux-terminal-core/src/{headless_screen.rs,remote_output_router.rs}仅允许保留/扩充测试和此前已批准修复，不另改parser生产语义；版本元数据apps/{agent,desktop}/Cargo.toml、Cargo.lock、docs/version-compatibility.md。Mobile源码、Iroh、持久化数据、业务项目和其他未跟踪文件不改。
+
+验证：先补headless真实handler红测和desktop正常路径控制，覆盖existing session、resize、拆分ANSI、TUI redraw、baseline/live交错；共享层测试锁住合批、sequence、baseline边界及多viewer。再跑live-grid底部8行、全历史往返、隐藏cursor普通/备用屏动态续写、两个consumer、首次测量输入行。最后构建desktop/headless，Honor展开/折叠、desktop接管、Mobile连接desktop控制、两客户端连接headless动态Working/反白/历史/底部对照。真实业务窗口未通过前不得称完成或发布。
+
+## 最新 checkpoint（共享输出路径统一后）
+
+实现：新增`crates/codux-runtime-live/src/remote_terminal_output.rs`，`RemoteTerminalOutputPipeline`统一desktop/headless的32ms output batching、per-session sequence、pending bytes、bufferEnd、viewer集合、live baseline snapshot及pending batch/baseline边界。desktop/headless私有batching/sequence已删除并调用共享owner。正常desktop行为保持：baseline无pending时立即返回；撞上既有pending batch时仅等待batch被取走，使用`Notify`及`Notified::enable()`防丢唤醒。desktop `reset_sequence()`继续保留已排队batch；headless session clear使用完整`clear()`。agent baseline payload使用`window.output_seq`，首次读取仅作失败fallback。曾加入的desktop固定32ms baseline延迟已撤销。
+
+红绿：移除固定延迟后，headless `refresh_baseline_does_not_split_pending_ansi_output`稳定失败且inverse状态丢失，desktop控制通过；加入共享pending-batch barrier后，headless与desktop split-ANSI均连续20/20通过。`cargo test -p codux-terminal-core` 142 passed；`cargo test -p codux-runtime-live` 370 passed/1 ignored；`cargo test -p codux-agent` 58 passed；`cargo test -p codux-runtime` 523 passed/4 ignored；Mobile终端/viewport/render专项62 passed。最终交付前仍需重跑desktop受影响全量。
+
+版本：desktop源码`2.0.3-beta.18`，headless源码`2.0.3-beta.17`；Mobile源码保持`2.0.3-beta.14+63`。Honor已安装包实测`versionName=2.0.3-beta.14.sideload`、`versionCode=63`，未改、未重建、未重装或清数据。用户再次确认“mobile现在还是beta14”。`docs/version-compatibility.md`与`Cargo.lock`已按desktop/headless变更更新。
+
+产物/部署：`/Users/mac/Downloads/Codux-2.0.3-beta.18.app`已构建验证，SHA256=`9cf0ba77c82ef4dc79cd6715cdfb6f22319d0a3b0c7d8f7712c2f12138382d46`；`/Applications/Codux.app`尚未安全替换或重启。Mac Studio `mac@10.10.10.18` headless已运行`2.0.3-beta.17`，PID99954，executable inode verified，配置/配对/host identity未变，备份`/Users/mac/.local/bin/codux.backup-a1bd0082ee6e`。
+
+当前真机：Honor已展开并连接Mac Studio headless direct `10.10.10.18:51515`，进入VGBridge空shell；尚未执行本轮共享路径统一后的完整动态fixture验收。下一步在headless新建隔离终端运行受控持续输出，验Working/inverse/hidden cursor/CJK/live-grid底部/120行历史、折叠展开、前后台和重订阅；随后Mobile切desktop host作零行为变化控制，再安全切换desktop beta.18并验desktop接管。不得执行权限确认。若仍异常，找first-wrong，不改Mobile、不新增补偿。
+
+状态：main/HEAD=`5d3764577e6198f6afbcd89528854ffe23f151a8`；未commit/tag/push。用户既有改动及约832个untracked文件保留。生产实现完成但交付未完成；真机及desktop切换验收前不得称修复完成。
+
+本轮Honor验收：展开内屏Activity=`2156x2344`，Mobile仍`2.0.3-beta.14.sideload`/code63。VGBridge新建终端2运行`/tmp/codux-hidden-cursor-device-fixture.py`；29行live grid、隐藏cursor Working续写、中文、权限模拟文字及底部4行完整。10张历史截图经本机Vision OCR合并覆盖`DYNAMIC-HISTORY-001..120`，missing=[]；返回底部后Working继续单行更新。切到终端1再回终端2、退出到host列表再连Mac Studio、短暂Home/恢复均重新收敛，无旧Working行、反白或中文错位。
+
+样式/resize验收：Mac Studio `/tmp/codux-shared-path-device-fixture.py`与本地SHA256均`033686182c9aeb6d0bd5559ecd524b810da9ddc19a6d4fe78010b2a8c90928c5`，只输出显示内容，不执行权限动作。终端3持续拆分inverse ANSI前缀，显示inverse/background/CJK/Working/right-edge/底部；展开报告`82x29`且RIGHT-EDGE位于最右列。终端2/3连续切换5次后样式仍仅作用于目标文字，Working从00138至00492，未见覆写或样式泄漏。fixture首行未清除旧短文本，截图显示`SIZE=82x29F-029`；`82x29`及right-edge仍可判读，此残留来自测试fixture自身，不是产品输出。
+
+用户物理折叠后Activity已从`2156x2344`切到`1060x2376`，证明Android窗口切屏事件生效；外屏当前被系统闹钟`com.hihonor.deskclock/...LockAlarmFullActivity`抢占，截图全黑。未关闭闹钟或向其他应用输入；等待用户手动退出闹钟并恢复Codux后核验终端是否从82列自动收窄，再要求重新展开核验82列恢复。
+
+desktop最终回归：沙箱内`cargo test -p codux-runtime`为522 passed/1 failed/4 ignored；唯一失败`file_commands_delegate_to_runtime_files_layer`是Finder XPC `-1728`环境拒绝。正常macOS权限精确重跑同测试1 passed。`/Applications/Codux.app`当前plist beta.17、PID61957；Downloads beta.18待切换。助手进程62998经zsh62451属于Codux61957，重启会中断当前会话；切换前本checkpoint已保存。
+
+折叠/展开完成：用户手动物理折叠后Android Activity为`1060x2376`，fixture从`82x29`自动收窄到`39x30`且RIGHT-EDGE移到外屏最右列；系统闹钟曾短暂抢占前台，未代用户关闭，用户手动恢复Codux后检查。用户再手动物理展开，Activity恢复`2156x2344`，fixture自动恢复`82x29`且RIGHT-EDGE回到内屏最右列。两次resize期间Working持续递增、中文连续、inverse/background仅作用目标文字、底部完整。窄屏症状本轮未复现。
+
+desktop切换准备：当前beta17已完整备份到`/Users/mac/Downloads/Codux-2.0.3-beta.17-before-shared-path.app`，plist beta17且`codesign --verify --deep --strict`通过。beta18已暂存`/Applications/Codux-beta18-staged.app`，plist beta18且codesign通过；暂存与Downloads可执行SHA256一致=`7e5b43754414c160cd1511f1723bd4ab777ec72908eca0359e0afddb6c6ba802`。下一步原子改名切换`/Applications/Codux.app`、终止旧PID61957、启动beta18；随后恢复本任务，验证活动进程路径/版本，再做desktop接管和Mobile连接desktop控制。未完成前不commit/tag/push。

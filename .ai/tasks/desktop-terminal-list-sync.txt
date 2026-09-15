@@ -1,0 +1,56 @@
+# 任务
+
+ID: desktop-terminal-list-sync
+类型：bug
+状态：done
+创建：2026-09-14
+更新：2026-09-14
+grade：Guarded
+依据：修改跨 desktop controller 与 runtime_state 远程项目同步；复用跨端 `resource.subscribe` / `terminal.list` 契约，影响所有 remote host 项目的终端列表；多文件、跨模块、共享协议语义。
+一句话描述：其他客户端在 headless host 新建的终端不会出现在桌面控制端同一远程项目的终端列表。
+
+## Active Contract
+
+state：complete（2026-09-14；五项 Gate、target_check、nearest_regression_check、设备列表同步与桌面动态接管截图均通过；未 commit/tag/push，未要求移入 history）
+
+### 目标
+
+桌面控制端连接/重连并打开任一 remote host 项目后，左侧终端列表与 host 权威 running 终端集合收敛；其他客户端新建的终端会出现在桌面列表并可被桌面选中/接管；既有终端布局、顺序、本地持久化字段不被本地旧布局覆盖。不改变移动端和 host 的终端行为。
+
+### 证据
+
+- A 级复现：Honor 在 Mac Studio headless 的 VGBridge 项目新建终端 2（session `5ad693ff-b899-4c05-897f-c89cce5a4542`），手机终端列表显示 2 项；桌面打开同一远程项目时，`~/Library/Application Support/Codux/runtime-rust.log` 记录 `[terminal-restore] use runtime layout cache project=21a0a42a... top=1` 与 `[task-terminal-list] rows=1`；host 上该 session 为 running。
+- first-wrong：桌面 controller 的项目目录同步只订阅 host 的 `projects` resource；对 remote project 没有订阅 `terminals` resource，也没有在项目已持久化时主动全量刷新 `terminal.list`。Host 的 `terminal.list` 基线/广播不会进入桌面布局 reconciliation，桌面只保留本地旧 layout。
+- 因果链：手机 `terminal.create` → host 创建 running terminal 并广播/应答 `terminal.list` → 桌面未订阅 terminals 且打开项目时只读本地 layout → 桌面 `rows=1`。
+- last-known-good：手机连接同一 host 时终端列表正确；桌面 runtime `apply_hosted_workspace_update` 已具备把 `terminal.list` 收敛到 `TerminalLayoutService` 的路径；host 的 project-scoped terminal subscription 已有实现与测试。
+
+### 授权变更
+
+仅新增 desktop controller 的 project-scoped `resource.subscribe`（`resource=terminals`、`baseline=true`，fire-and-forget），并在 remote project catalog 基线完成/目录变更后对当前 remote projections 调用；复用 host 现有 project terminal subscription 与现有 `terminal.list` apply/layout reconciliation。不新增 wire 类型，不修改 host/mobile，不新增客户端补偿机制。
+
+### 范围
+
+- owner / invariant：desktop controller 的 remote terminal-list subscription + runtime remote project terminal list reconciliation；桌面 remote project 终端列表以 host 权威 running set 收敛，同时保留既有 layout 顺序和本地字段。
+- allowed_files：`apps/desktop/runtime/src/remote/controller.rs`、`apps/desktop/runtime/src/runtime_state/service_remote_projects.rs`、`apps/desktop/runtime/src/runtime_state/service_core_tests/remote_projects.rs`；用户“先修好这个新bug，再继续验收”授权后增加本地验收构建所需的 `apps/desktop/Cargo.toml`、`Cargo.lock`、`docs/version-compatibility.md`。
+- out_of_scope：host 广播语义、mobile、terminal output/baseline、viewport ownership、`baseline-live-grid` 修复、commit/tag/push/公网发布。
+- delivery_metadata（用户授权继续验收）：本任务只改 desktop source，desktop 升 `2.0.3-beta.19`，mobile 保持 `2.0.3-beta.14+63`，headless 保持 `2.0.3-beta.17`；构建产物仅用于本地验收，替换 `/Applications/Codux.app` 前另行确认（当前助手运行在该 app 内，切换会中断会话）。
+
+### Guarded Fix 证据与修改前审查
+
+- existing_path_check：host `handle_resource_subscribe` / `handle_terminal_subscribe` 的 project scope 已会应答 `terminal.list` 并注册 subscriber；agent `resource_subscribe` 同样支持；desktop runtime `apply_hosted_workspace_update` 已有 layout reconciliation；controller 已有 `list_terminals` request。复用结论：扩展现有 subscription + apply 路径，无新增重复职责。
+- why_minimal_and_sufficient：只发一条已有 `resource.subscribe` 消息并按现有 remote project 同步时机调用；host 仍负责权威 list，runtime 仍负责 layout 收敛。
+- alternatives：none。全局 terminals subscribe 在 agent 侧没有 project baseline 保证；仅打开项目时做一次 `terminal.list` 刷新不能覆盖项目保持打开期间其他客户端新建终端，无法证明 live invariant。
+- 实际影响：无 wire shape 变更；无持久化迁移；resource subscription 幂等；rollback 只需移除新增方法与两处调用。并发/兼容：fire-and-forget 发送；重连会重跑目录同步并重新订阅；重复订阅由 host side 幂等吸收。
+- verification_only 风险 / out_of_scope：无；不修改 host/mobile/layout 顺序语义。
+- 修改前方案审查：existing_path_check=pass；owner_and_evidence=pass；semantic_scope=pass；verification_power=pass。result=pass；state=locked。
+
+### 验证
+
+- baseline red：新增 `remote_project_connection_subscribes_to_terminal_list`，在未修改 production 前稳定超时失败：“timed out waiting for terminal resource subscription”。
+- target_check：修复后同一测试通过：`/private/tmp/codux-terminal-list-green.log`，1 passed。
+- nearest_regression_check：`cargo test -p codux-runtime remote::controller` 72 passed / 4 ignored（`/private/tmp/codux-terminal-list-controller.log`）；`cargo test -p codux-runtime runtime_state::app_runtime_ready_tests` 79 passed / 1 failed，唯一失败是 PTY `Operation not permitted` 环境限制，已用 `git stash` 验证原代码同样失败，pre-existing；两个 `remote::host::tests::projects::remote_project_select_*` 失败也在未修改代码上复现，pre-existing。
+- app build（用户确认只需 APP、不需要 DMG）：`release-artifacts/terminal-list-local/local/Codux.app` 已由标准 `package-gpui.mjs` 的 macOS app 阶段产出；`codesign --verify --deep --strict` 通过；plist 与 executable 均 `2.0.3-beta.19`；executable SHA256 `87aa859ac8f443d0c963f672dcd85cbfcb99edb5d1d4adb997bccc4fe716304d`。官方 `local-delivery.py desktop` 的 DMG 阶段在沙箱内因 `create-dmg` 失败/挂起，按用户指示不重试 DMG，直接使用已签名的 `.app` 做本地验收。未安装/未替换 `/Applications/Codux.app`。
+- 切换准备：当前 agent bash 对 `/Applications` 无写权限（`touch` 返回 `Operation not permitted`），`launchctl submit` 也被拒绝；已准备 `/private/tmp/codux-switch-beta19.sh`（语法已验证）。该脚本在用户 Terminal.app 中运行，会备份 beta18、原子替换 `/Applications/Codux.app`、重启 beta19，并写日志 `/private/tmp/codux-beta19-switch.log`。切换会结束当前 Codux/agent 会话。
+- 设备 target_check（2026-09-14 20:16，beta19）：pass。beta19 startup 20:15:32；runtime log 20:16:16 记录 VGBridge `terminal-restore ... top=2`，并出现 session `5ad693ff...` 的 `pending_view`、`hosted_attach layout=48x41` 与 `terminal_output buffer=true delivered=true`；20:16:18–20:16:24 desktop 取得 owner，generation 22–24，size 48x41。用户确认桌面 VGBridge 左侧已有终端 2 且桌面已接管。
+- 动态渲染复核（2026-09-14 20:26，beta19）：pass。桌面终端 2 运行 `/tmp/f.py`（headless PID 67903），用户延迟截图 `/private/tmp/codux-fixture-desktop.png`；画面显示 `SIZE=48x41F-041`、GRID 行、`RIGHT-EDGE` 在最右列、`INVERSE-CHECK` / `BACKGROUND-CHECK` 样式仅作用目标文字、中文连续、`Working 00795`、底部 PERMISSION / Allow / FOOTER / INPUT-ROW 完整。截图后已停止 headless fixture；未发现 Working 覆写、反色泄漏或中文错位。
+- 自审：新增 production change 直接服务本任务目标；复用 host 现有 subscription 与 runtime 现有 `terminal.list` apply 路径，未新增 wire/持久化/兜底机制；target_check 与最近回归均有可观察证据。未 commit/tag/push。

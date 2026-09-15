@@ -20,7 +20,8 @@ use codux_protocol::{
     REMOTE_MEMORY_EXTRACT, REMOTE_MEMORY_READ, REMOTE_MEMORY_RESULT, REMOTE_PAIRING_CONFIRMED,
     REMOTE_PAIRING_REJECTED, REMOTE_PAIRING_REQUEST, REMOTE_PROJECT_ADD, REMOTE_PROJECT_EDIT,
     REMOTE_PROJECT_LIST, REMOTE_PROJECT_REMOVE, REMOTE_PROJECT_UPDATED, REMOTE_RESOURCE_PROJECTS,
-    REMOTE_RESOURCE_SUBSCRIBE, REMOTE_TERMINAL_BUFFER, REMOTE_TERMINAL_BUFFER_MAX_CHARS,
+    REMOTE_RESOURCE_SUBSCRIBE, REMOTE_RESOURCE_TERMINALS, REMOTE_TERMINAL_BUFFER,
+    REMOTE_TERMINAL_BUFFER_MAX_CHARS,
     REMOTE_TERMINAL_CLOSE, REMOTE_TERMINAL_CLOSED, REMOTE_TERMINAL_CREATE, REMOTE_TERMINAL_CREATED,
     REMOTE_TERMINAL_INPUT, REMOTE_TERMINAL_LIST, REMOTE_TERMINAL_OUTPUT, REMOTE_TERMINAL_STATUS,
     REMOTE_TERMINAL_VIEWPORT_CLAIM, REMOTE_TERMINAL_VIEWPORT_RELEASE,
@@ -1134,6 +1135,25 @@ impl RemoteController {
             REMOTE_PROJECT_LIST,
             REMOTE_RESOURCE_SUBSCRIBE,
             json!({ "resource": REMOTE_RESOURCE_PROJECTS, "baseline": true }),
+        )
+    }
+
+    /// Subscribe to one remote project's authoritative terminal list. The host
+    /// answers with an unsolicited `terminal.list` that reconciles the desktop
+    /// layout, then pushes the same kind after other clients create or close
+    /// terminals. Fire-and-forget: the reply must flow through the normal
+    /// hosted-workspace update path, not a request waiter.
+    pub fn subscribe_terminal_project(&self, project_id: &str) -> bool {
+        if project_id.trim().is_empty() {
+            return false;
+        }
+        self.fire(
+            REMOTE_RESOURCE_SUBSCRIBE,
+            json!({
+                "resource": REMOTE_RESOURCE_TERMINALS,
+                "projectId": project_id,
+                "baseline": true,
+            }),
         )
     }
 

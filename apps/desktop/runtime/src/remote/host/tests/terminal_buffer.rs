@@ -209,7 +209,11 @@ fn remote_terminal_buffer_window_tail_ships_keyframe_for_normal_screen() {
         .create(
             TerminalPtyConfig {
                 shell: Some("sh".to_string()),
-                command: Some("printf 'old line\\n\\033[2J\\033[Hvisible tui'".to_string()),
+                command: Some(
+                    "i=0; while [ $i -lt 40 ]; do echo history-$i; i=$((i+1)); done; \
+                     printf '\\033[2J\\033[Hvisible tui'"
+                        .to_string(),
+                ),
                 cwd: Some(support_dir.to_string_lossy().to_string()),
                 ..Default::default()
             },
@@ -240,6 +244,32 @@ fn remote_terminal_buffer_window_tail_ships_keyframe_for_normal_screen() {
         "keyframe must carry the current screen: {screen_data:?}"
     );
     assert!(window.tail);
+
+    // An observer requesting a baseline without a resize must get the live
+    // keyframe even while another viewer is browsing host-side history.
+    let live_keyframe = window.screen_data;
+    terminals
+        .scroll_screen_lines(&session_id, 6)
+        .expect("scroll host history");
+    let before = terminals
+        .screen_snapshot(&session_id)
+        .expect("scrolled host");
+    assert_eq!(before.display_offset, 6);
+    let window = runtime
+        .terminal_buffer_window(&session_id, 0, buffer_options(64, Some("request-2"), true))
+        .expect("observer baseline");
+    assert_eq!(
+        window.screen_data, live_keyframe,
+        "observer baseline must stay at the live grid"
+    );
+    assert_eq!(
+        terminals
+            .screen_snapshot(&session_id)
+            .unwrap()
+            .display_offset,
+        before.display_offset,
+        "baseline must not move the existing viewer's scroll position"
+    );
 
     fs::remove_dir_all(support_dir).ok();
 }
@@ -494,6 +524,149 @@ fn remote_terminal_live_output_is_data_only_without_screen_keyframe() {
         live.get("screenData").is_none(),
         "live terminal output must not carry a screen keyframe"
     );
+
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn desktop_refresh_baseline_does_not_split_pending_ansi_output() {
+    let support_dir = temp_support_dir("codux-desktop-split-baseline");
+    write_paired_remote_settings(&support_dir);
+    let terminals = Arc::new(TerminalManager::new());
+    let runtime = Arc::new(RemoteHostRuntime::new_with_ai_history_and_terminals(
+        support_dir.clone(),
+        Default::default(),
+        Arc::clone(&terminals),
+    ));
+    let transport = Arc::new(CapturingTransport::default());
+    runtime.set_transport_for_test(transport.clone());
+    let session_id = "desktop-split-baseline";
+    let (session, output) = terminals
+        .attach_or_create_with_context(
+            TerminalPtyConfig {
+                terminal_id: Some(session_id.to_string()),
+                shell: Some("/bin/sh".to_string()),
+                command: Some(
+                    "stty -echo; \
+                     printf '\\033[?25l\\033[2J\\033[10;1Hfooter\\033[6;1HWorking 01'; \
+                     read first; printf '\\033[7'; \
+                     read second; printf 'm\\r\\033[2KWorking 02'; \
+                     read hold"
+                        .to_string(),
+                ),
+                cwd: Some(support_dir.to_string_lossy().to_string()),
+                cols: Some(40),
+                rows: Some(10),
+                ..Default::default()
+            },
+            None,
+            Arc::new(|_| true),
+        )
+        .expect("create controlled terminal");
+
+    let wait_for_output = |needle: &[u8]| {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut bytes = Vec::new();
+        while Instant::now() < deadline && !bytes.windows(needle.len()).any(|w| w == needle) {
+            if let Ok(chunk) = output.recv_timeout(Duration::from_millis(20)) {
+                bytes.extend(chunk);
+            }
+        }
+        assert!(
+            bytes.windows(needle.len()).any(|window| window == needle),
+            "terminal did not emit expected bytes: {needle:?}"
+        );
+    };
+    let request_baseline = |request_id: &str| {
+        runtime.handle_resource_subscribe(&RemoteEnvelope {
+            kind: REMOTE_RESOURCE_SUBSCRIBE.to_string(),
+            device_id: Some("phone-a".to_string()),
+            session_id: None,
+            request_id: None,
+            seq: None,
+            payload: json!({
+                "resource": REMOTE_RESOURCE_TERMINALS,
+                "sessionId": session_id,
+                "baseline": true,
+                "maxChars": 200_000,
+                "requestId": request_id,
+            }),
+        });
+    };
+    let take_until_request = |request_id: &str| {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut frames = Vec::new();
+        let mut complete = false;
+        while Instant::now() < deadline && !complete {
+            for (_, data) in transport.take_messages() {
+                let text = String::from_utf8(data).expect("utf8 transport");
+                let envelope = runtime
+                    .service()
+                    .parse_incoming_envelope(&text)
+                    .expect("parse outgoing envelope");
+                if envelope.kind != REMOTE_TERMINAL_OUTPUT {
+                    continue;
+                }
+                complete |= envelope.payload["requestId"] == request_id;
+                frames.push(json!({
+                    "type": envelope.kind,
+                    "sessionId": envelope.session_id,
+                    "payload": envelope.payload,
+                }));
+            }
+            if !complete {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert!(complete, "baseline request did not complete: {request_id}");
+        frames
+    };
+
+    wait_for_output(b"Working 01");
+    let mut client = codux_terminal_core::RemoteTerminalOutputRouter::new(200_000, 200_000);
+    client.bind_session(session_id, true);
+    client.resize_screen(session_id, 40, 10);
+    assert!(client.start_buffer_request(session_id, "initial", true, true, true));
+    request_baseline("initial");
+    for frame in take_until_request("initial") {
+        client.accept(&frame, Some(session_id));
+    }
+
+    session.write(b"\n").expect("release ANSI prefix");
+    wait_for_output(b"\x1b[7");
+    std::thread::sleep(Duration::from_millis(5));
+    assert!(client.start_buffer_request(session_id, "refresh", true, true, true));
+    request_baseline("refresh");
+    session.write(b"\n").expect("release ANSI suffix");
+    wait_for_output(b"Working 02");
+    let mut frames = take_until_request("refresh");
+    std::thread::sleep(Duration::from_millis(50));
+    for (_, data) in transport.take_messages() {
+        let text = String::from_utf8(data).expect("utf8 transport");
+        let envelope = runtime
+            .service()
+            .parse_incoming_envelope(&text)
+            .expect("parse outgoing envelope");
+        if envelope.kind == REMOTE_TERMINAL_OUTPUT {
+            frames.push(json!({
+                "type": envelope.kind,
+                "sessionId": envelope.session_id,
+                "payload": envelope.payload,
+            }));
+        }
+    }
+    for frame in frames {
+        client.accept(&frame, Some(session_id));
+    }
+
+    let host = serde_json::to_value(terminals.screen_snapshot(session_id).unwrap()).unwrap();
+    let actual: Value =
+        serde_json::from_str(&client.screen_snapshot_json(session_id).unwrap()).unwrap();
+    let _ = terminals.kill_and_wait(session.id(), Duration::from_secs(2));
+
+    assert_eq!(actual["cells"], host["cells"]);
+    assert_eq!(actual["cursor"], host["cursor"]);
 
     fs::remove_dir_all(support_dir).ok();
 }

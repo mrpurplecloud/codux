@@ -12,6 +12,7 @@ pub mod ai_runtime;
 pub mod ai_runtime_state;
 pub mod host_metrics;
 pub mod remote_terminal_dispatch;
+pub mod remote_terminal_output;
 pub mod runtime_paths;
 pub mod terminal_pty;
 pub mod wrapper_helper;

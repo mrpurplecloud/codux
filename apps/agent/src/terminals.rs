@@ -26,6 +26,10 @@ use codux_runtime_live::remote_terminal_dispatch::{
     finish_terminal_create_viewer_lifecycle, prepare_terminal_create_lifecycle,
     rollback_terminal_create_viewer_lifecycle,
 };
+use codux_runtime_live::remote_terminal_output::{
+    RemoteTerminalOutputPipeline, terminal_live_baseline_window,
+    wait_for_remote_terminal_output_batch,
+};
 use codux_runtime_live::terminal_pty::{TerminalManager, TerminalPtyConfig};
 use codux_runtime_live::terminal_pty::{
     TerminalViewportState, terminal_viewport_local_owner, terminal_viewport_remote_device_id,
@@ -48,36 +52,29 @@ struct BaselineViewport {
 }
 
 /// Shared multi-client state for headless terminals: which devices view each
-/// session (`subscriptions`) and the per-session output sequence (`output_seq`,
-/// shared across viewers so every device sees the same `outputSeq`).
-#[derive(Clone, Default)]
+/// session (`subscriptions`) and the shared output pipeline.
+#[derive(Clone)]
 pub struct TerminalFanout {
     subscriptions: Arc<RemoteTerminalSubscriptions>,
     project_id_by_session: Arc<Mutex<HashMap<String, String>>>,
-    output_seq: Arc<Mutex<HashMap<String, i64>>>,
+    output: RemoteTerminalOutputPipeline,
     output_ack: Arc<Mutex<HashMap<(String, String), i64>>>,
+    runtime: tokio::runtime::Handle,
 }
 
 impl TerminalFanout {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn next_seq(&self, session_id: &str) -> i64 {
-        let mut map = self
-            .output_seq
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
-        let next = map.get(session_id).copied().unwrap_or(0) + 1;
-        map.insert(session_id.to_string(), next);
-        next
+    pub fn new(runtime: tokio::runtime::Handle) -> Self {
+        Self {
+            subscriptions: Arc::default(),
+            project_id_by_session: Arc::default(),
+            output: RemoteTerminalOutputPipeline::default(),
+            output_ack: Arc::default(),
+            runtime,
+        }
     }
 
     fn current_seq(&self, session_id: &str) -> i64 {
-        self.output_seq
-            .lock()
-            .map(|map| map.get(session_id).copied().unwrap_or(0))
-            .unwrap_or(0)
+        self.output.current_sequence(session_id)
     }
 
     fn add_viewer(&self, session_id: &str, device_id: &str) {
@@ -183,9 +180,7 @@ impl TerminalFanout {
         if let Ok(mut projects) = self.project_id_by_session.lock() {
             projects.remove(session_id);
         }
-        if let Ok(mut output_seq) = self.output_seq.lock() {
-            output_seq.remove(session_id);
-        }
+        self.output.clear(session_id);
         if let Ok(mut acks) = self.output_ack.lock() {
             acks.retain(|(session, _), _| session != session_id);
         }
@@ -524,9 +519,10 @@ fn viewport_state_payload(
     // The driver-level event only knows the owner id; the friendly name lives in
     // the paired-device store. Resolve it here so controllers can label the
     // "handed off" placeholder instead of falling back to "phone"/"tablet".
-    let owner_label = state.owner_label.clone().or_else(|| {
-        terminal_viewport_remote_device_id(&state.owner).and_then(device_name_for)
-    });
+    let owner_label = state
+        .owner_label
+        .clone()
+        .or_else(|| terminal_viewport_remote_device_id(&state.owner).and_then(device_name_for));
     eprintln!(
         "[DEBUG-takeover-label] agent.viewport.payload session={session_id} owner={} owner_label={}",
         state.owner,
@@ -554,6 +550,28 @@ fn device_name_for(device_id: &str) -> Option<String> {
         .find(|device| device.id == device_id)
         .map(|device| device.name)
         .filter(|name| !name.trim().is_empty())
+}
+
+fn flush_agent_terminal_output(
+    transport: &TransportSlot,
+    fanout_state: &TerminalFanout,
+    session_id: &str,
+) {
+    let Some(batch) = fanout_state.output.take(session_id) else {
+        return;
+    };
+    let viewers = batch.viewers.into_iter().collect::<Vec<_>>();
+    let envelope = json!({
+        "type": REMOTE_TERMINAL_OUTPUT,
+        "sessionId": session_id,
+        "payload": terminal_live_output_payload(
+            batch.data,
+            batch.buffer_length,
+            batch.buffer_end,
+            batch.output_seq,
+        ),
+    });
+    fanout(transport, &viewers, envelope, true);
 }
 
 fn handle_agent_terminal_event(
@@ -584,18 +602,21 @@ fn handle_agent_terminal_event(
             if text.is_empty() {
                 return true;
             }
-            let next = fanout_state.next_seq(&session_id);
-            let envelope = json!({
-                "type": REMOTE_TERMINAL_OUTPUT,
-                "sessionId": session_id,
-                "payload": terminal_live_output_payload(text, buffer_length, buffer_end, next),
-            });
-            fanout(
-                transport,
-                &fanout_state.viewers(&session_id),
-                envelope,
-                true,
+            let should_schedule = fanout_state.output.queue(
+                &session_id,
+                text,
+                buffer_length,
+                buffer_end,
+                fanout_state.viewers(&session_id),
             );
+            if should_schedule {
+                let transport = Arc::clone(transport);
+                let fanout = fanout_state.clone();
+                fanout_state.runtime.spawn(async move {
+                    wait_for_remote_terminal_output_batch().await;
+                    flush_agent_terminal_output(&transport, &fanout, &session_id);
+                });
+            }
         }
         TerminalEvent::Viewport {
             session_id,
@@ -695,47 +716,33 @@ fn send_terminal_baseline(
         .and_then(Value::as_str)
         .map(str::to_string);
     let viewport = baseline_viewport(payload);
-    let use_viewport = apply_baseline_viewport(driver, session_id, device_id, viewport);
+    // A rejected resize still gets a baseline of the actual host grid; it
+    // must not select a different keyframe format or assume the requested size.
+    apply_baseline_viewport(driver, session_id, device_id, viewport);
     let output_seq = fanout_state.current_seq(session_id);
-    let baseline = driver
-        .baseline_snapshot(session_id, max_chars, use_viewport)
-        .ok();
-    let baseline_failed = baseline.is_none();
-    let (data, offset, buffer_length, buffer_end, screen_data, screen_wrapped_rows) = baseline
-        .map(|baseline| {
-            let (screen_data, screen_wrapped_rows) = (!baseline.screen.data.is_empty())
-                .then(|| {
-                    (
-                        Some(baseline.screen.data),
-                        Some(baseline.screen.wrapped_rows),
-                    )
-                })
-                .unwrap_or_default();
-            (
-                baseline.data,
-                baseline.offset,
-                baseline.buffer_length,
-                baseline.buffer_end,
-                screen_data,
-                screen_wrapped_rows,
-            )
-        })
-        .unwrap_or_default();
-    let window = RemoteTerminalBufferWindow {
-        data,
-        screen_data,
-        screen_wrapped_rows,
-        offset,
-        total_characters: buffer_length,
-        buffer_end: Some(buffer_end),
+    let window = terminal_live_baseline_window(
+        driver,
+        &fanout_state.output,
+        session_id,
+        max_chars,
+        request_id.clone(),
+    )
+    .unwrap_or_else(|_| RemoteTerminalBufferWindow {
+        data: String::new(),
+        screen_data: None,
+        screen_wrapped_rows: None,
+        offset: 0,
+        total_characters: 0,
+        buffer_end: Some(0),
         truncated: false,
         output_seq: Some(output_seq),
         request_id,
         tail: true,
-        has_previous: offset > 0,
-        baseline_failed,
-    };
-    for payload in terminal_buffer_payloads(&window, output_seq, chunk_chars) {
+        has_previous: false,
+        baseline_failed: true,
+    });
+    let baseline_output_seq = window.output_seq.unwrap_or(output_seq);
+    for payload in terminal_buffer_payloads(&window, baseline_output_seq, chunk_chars) {
         let mut envelope =
             json!({ "type": REMOTE_TERMINAL_OUTPUT, "sessionId": session_id, "payload": payload });
         envelope["deviceId"] = json!(device_id);
@@ -745,12 +752,44 @@ fn send_terminal_baseline(
     }
 }
 
+fn spawn_terminal_baseline(
+    driver: Arc<TerminalManager>,
+    transport: TransportSlot,
+    fanout_state: TerminalFanout,
+    device_id: String,
+    session_id: String,
+    payload: Value,
+) {
+    let runtime = fanout_state.runtime.clone();
+    runtime.spawn(async move {
+        fanout_state
+            .output
+            .wait_for_pending_batch(&session_id)
+            .await;
+        if let Err(error) = tokio::task::spawn_blocking(move || {
+            send_terminal_baseline(
+                &driver,
+                &transport,
+                &fanout_state,
+                &device_id,
+                &session_id,
+                &payload,
+            );
+        })
+        .await
+        {
+            eprintln!("Agent terminal baseline task failed: {error}");
+        }
+    });
+}
+
 /// Adapts the headless agent to the shared remote-terminal router
 /// ([`RemoteTerminalDispatch`]). It borrows the agent's PTY manager, transport
 /// slot and multi-client fan-out state. The arms that are identical to the
 /// desktop host -- signal, output-ack, viewport release/scroll -- are served by
-/// the trait's default methods; the arms below stay agent-shaped (a leaner
-/// per-session model with no terminal-layout persistence or output batching).
+/// the trait's default methods. Terminal output batching, sequence, and baseline
+/// scheduling also use the shared runtime-live pipeline; only layout persistence
+/// and transport adaptation remain host-specific here.
 struct AgentTerminalCtx<'a> {
     driver: &'a Arc<TerminalManager>,
     transport: &'a TransportSlot,
@@ -779,13 +818,13 @@ impl AgentTerminalCtx<'_> {
     ) {
         self.add_viewer(session_id, device_id);
         if baseline {
-            send_terminal_baseline(
-                self.driver,
-                self.transport,
-                self.fanout,
-                device_id,
-                session_id,
-                payload,
+            spawn_terminal_baseline(
+                Arc::clone(self.driver),
+                Arc::clone(self.transport),
+                self.fanout.clone(),
+                device_id.to_string(),
+                session_id.to_string(),
+                payload.clone(),
             );
         }
     }
@@ -1367,6 +1406,12 @@ mod tests {
 
     type TestMessages = Arc<Mutex<HashMap<String, Vec<Value>>>>;
 
+    fn test_fanout() -> TerminalFanout {
+        static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+        let runtime = RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().unwrap());
+        TerminalFanout::new(runtime.handle().clone())
+    }
+
     fn test_transport(device_ids: &[&str]) -> (TransportSlot, TestMessages) {
         let hub = LocalMemoryTransportHub::new();
         let received = Arc::new(Mutex::new(HashMap::<String, Vec<Value>>::new()));
@@ -1414,12 +1459,34 @@ mod tests {
             .collect()
     }
 
+    fn wait_for_message(
+        messages: &TestMessages,
+        device_id: &str,
+        predicate: impl Fn(&Value) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if messages
+                .lock()
+                .unwrap()
+                .get(device_id)
+                .into_iter()
+                .flatten()
+                .any(&predicate)
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("expected transport message was not received for {device_id}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn terminal_create_reconciles_every_connected_device() {
         let (transport, received) = test_transport(&["phone-a", "desktop-a"]);
         let driver = Arc::new(TerminalManager::new());
-        let fanout = TerminalFanout::new();
+        let fanout = test_fanout();
         fanout.add_project_subscriber("project-1", "phone-a");
         let session_id = format!("agent-create-{}", uuid::Uuid::new_v4());
         let payload = json!({
@@ -1456,7 +1523,7 @@ mod tests {
     fn closing_missing_terminal_reconciles_every_connected_device() {
         let (transport, received) = test_transport(&["phone-a", "desktop-a"]);
         let driver = Arc::new(TerminalManager::new());
-        let fanout = TerminalFanout::new();
+        let fanout = test_fanout();
         fanout.set_session_project("session-1", "project-1");
         fanout.add_project_subscriber("project-1", "phone-a");
         let payload = json!({ "sessionId": "session-1" });
@@ -1480,7 +1547,7 @@ mod tests {
     #[test]
     fn project_subscription_does_not_receive_future_session_errors() {
         let (transport, received) = test_transport(&["phone-a", "phone-b"]);
-        let fanout = TerminalFanout::new();
+        let fanout = test_fanout();
         fanout.add_project_subscriber("project-1", "phone-a");
         fanout.add_project_subscriber("project-1", "phone-b");
 
@@ -1502,7 +1569,7 @@ mod tests {
     #[test]
     fn output_without_viewers_is_not_broadcast() {
         let (transport, received) = test_transport(&["phone-a", "phone-b"]);
-        let fanout = TerminalFanout::new();
+        let fanout = test_fanout();
 
         assert!(handle_agent_terminal_event(
             &TerminalManager::new(),
@@ -1526,7 +1593,7 @@ mod tests {
     fn failed_baseline_send_keeps_new_viewer_for_retry() {
         let (transport, _) = test_transport(&[]);
         let driver = Arc::new(TerminalManager::new());
-        let fanout = TerminalFanout::new();
+        let fanout = test_fanout();
         let ctx = AgentTerminalCtx {
             driver: &driver,
             transport: &transport,
@@ -1540,10 +1607,248 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn chunked_takeover_baseline_replays_every_current_row_on_client() {
+        let (transport, received) = test_transport(&["phone-a"]);
+        let driver = Arc::new(TerminalManager::new());
+        let fanout = test_fanout();
+        let ctx = AgentTerminalCtx {
+            driver: &driver,
+            transport: &transport,
+            fanout: &fanout,
+        };
+        let (session, output) = driver.attach_or_create_with_context(
+            TerminalPtyConfig {
+                shell: Some("/bin/sh".to_string()),
+                command: Some(
+                    "i=0; while [ $i -lt 32 ]; do echo history-$i; i=$((i+1)); done; \
+                     printf 'current-0\\r\\ncurrent-1\\r\\ncurrent-2\\r\\ncurrent-3\\r\\ncurrent-4\\r\\npermission-required\\r\\nchoose-yes-no\\r\\n>prompt'; read hold"
+                        .to_string(),
+                ),
+                cols: Some(40),
+                rows: Some(8),
+                ..Default::default()
+            },
+            None,
+            Arc::new(|_| true),
+        ).expect("create isolated terminal");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut text = String::new();
+        while !text.contains(">prompt") && std::time::Instant::now() < deadline {
+            if let Ok(bytes) = output.recv_timeout(Duration::from_millis(100)) {
+                text.push_str(&String::from_utf8_lossy(&bytes));
+            }
+        }
+        ctx.subscribe_session(
+            session.id(),
+            "phone-a",
+            true,
+            &json!({
+                "viewportCols": 40, "viewportRows": 8, "chunkChars": 32,
+                "requestId": "takeover-baseline",
+            }),
+        );
+        wait_for_message(&received, "phone-a", |message| {
+            message["payload"]["requestId"] == "takeover-baseline"
+                && message["payload"]["chunkIndex"].as_u64().unwrap_or(0) + 1
+                    == message["payload"]["chunkCount"].as_u64().unwrap_or(1)
+        });
+        let messages = received
+            .lock()
+            .unwrap()
+            .get("phone-a")
+            .cloned()
+            .unwrap_or_default();
+        let frames: Vec<_> = messages
+            .iter()
+            .filter(|message| message["type"] == REMOTE_TERMINAL_OUTPUT)
+            .collect();
+        let mut client = codux_terminal_core::RemoteTerminalOutputRouter::new(200_000, 200_000);
+        client.bind_session(session.id(), true);
+        client.resize_screen(session.id(), 40, 8);
+        for frame in &frames {
+            client.accept(frame, Some(session.id()));
+        }
+        let snapshot = client.screen_snapshot_json(session.id()).unwrap();
+        let complete = client.has_complete_baseline(session.id());
+        driver
+            .kill_and_wait(session.id(), Duration::from_secs(2))
+            .expect("close test terminal");
+
+        assert!(text.contains(">prompt"), "terminal never finished printing");
+        assert!(frames.len() > 1, "exercise actual chunk reassembly");
+        assert!(complete);
+        let snapshot: Value = serde_json::from_str(&snapshot).unwrap();
+        let rows: Vec<String> = (0..8)
+            .map(|row| {
+                snapshot["cells"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|cell| cell["row"] == row)
+                    .map(|cell| cell["text"].as_str().unwrap())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "current-0",
+                "current-1",
+                "current-2",
+                "current-3",
+                "current-4",
+                "permission-required",
+                "choose-yes-no",
+                ">prompt"
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refresh_baseline_does_not_split_pending_ansi_output() {
+        let (transport, received) = test_transport(&["phone-a"]);
+        let driver = Arc::new(TerminalManager::new());
+        let fanout = test_fanout();
+        let session_id = "split-baseline";
+        fanout.add_viewer(session_id, "phone-a");
+
+        let driver_for_emit = Arc::clone(&driver);
+        let transport_for_emit = Arc::clone(&transport);
+        let fanout_for_emit = fanout.clone();
+        let emit = Arc::new(move |event| {
+            handle_agent_terminal_event(
+                &driver_for_emit,
+                &transport_for_emit,
+                &fanout_for_emit,
+                Some("project-1"),
+                event,
+            )
+        });
+        let (session, output) = driver
+            .attach_or_create_with_context(
+                TerminalPtyConfig {
+                    terminal_id: Some(session_id.to_string()),
+                    shell: Some("/bin/sh".to_string()),
+                    command: Some(
+                        "stty -echo; \
+                         printf '\\033[?25l\\033[2J\\033[10;1Hfooter\\033[6;1HWorking 01'; \
+                         read first; printf '\\033[7'; \
+                         read second; printf 'm\\r\\033[2KWorking 02'; \
+                         read hold"
+                            .to_string(),
+                    ),
+                    cols: Some(40),
+                    rows: Some(10),
+                    ..Default::default()
+                },
+                None,
+                emit,
+            )
+            .expect("create controlled terminal");
+
+        let wait_for_output = |needle: &[u8]| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            let mut bytes = Vec::new();
+            while std::time::Instant::now() < deadline
+                && !bytes.windows(needle.len()).any(|w| w == needle)
+            {
+                if let Ok(chunk) = output.recv_timeout(Duration::from_millis(20)) {
+                    bytes.extend(chunk);
+                }
+            }
+            assert!(
+                bytes.windows(needle.len()).any(|window| window == needle),
+                "terminal did not emit expected bytes: {needle:?}"
+            );
+        };
+        let take_output_frames = || {
+            received
+                .lock()
+                .unwrap()
+                .get_mut("phone-a")
+                .map(std::mem::take)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|message| message["type"] == REMOTE_TERMINAL_OUTPUT)
+                .collect::<Vec<_>>()
+        };
+        let wait_for_request = |request_id: &str| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                let complete = received
+                    .lock()
+                    .unwrap()
+                    .get("phone-a")
+                    .into_iter()
+                    .flatten()
+                    .any(|message| message["payload"]["requestId"] == request_id);
+                if complete {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            panic!("baseline request did not complete: {request_id}");
+        };
+
+        wait_for_output(b"Working 01");
+        std::thread::sleep(Duration::from_millis(50));
+        take_output_frames();
+
+        let ctx = AgentTerminalCtx {
+            driver: &driver,
+            transport: &transport,
+            fanout: &fanout,
+        };
+        ctx.subscribe_session(
+            session_id,
+            "phone-a",
+            true,
+            &json!({ "requestId": "initial", "maxChars": 200_000 }),
+        );
+        wait_for_request("initial");
+        let mut client = codux_terminal_core::RemoteTerminalOutputRouter::new(200_000, 200_000);
+        client.bind_session(session_id, true);
+        client.resize_screen(session_id, 40, 10);
+        assert!(client.start_buffer_request(session_id, "initial", true, true, true));
+        for frame in take_output_frames() {
+            client.accept(&frame, Some(session_id));
+        }
+
+        session.write(b"\n").expect("release ANSI prefix");
+        wait_for_output(b"\x1b[7");
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(client.start_buffer_request(session_id, "refresh", true, true, true));
+        ctx.subscribe_session(
+            session_id,
+            "phone-a",
+            true,
+            &json!({ "requestId": "refresh", "maxChars": 200_000 }),
+        );
+        session.write(b"\n").expect("release ANSI suffix");
+        wait_for_output(b"Working 02");
+        wait_for_request("refresh");
+        std::thread::sleep(Duration::from_millis(50));
+        for frame in take_output_frames() {
+            client.accept(&frame, Some(session_id));
+        }
+
+        let host: Value =
+            serde_json::to_value(driver.screen_snapshot(session_id).unwrap()).unwrap();
+        let actual: Value =
+            serde_json::from_str(&client.screen_snapshot_json(session_id).unwrap()).unwrap();
+        let _ = driver.kill_and_wait(session.id(), Duration::from_secs(2));
+
+        assert_eq!(actual["cells"], host["cells"]);
+        assert_eq!(actual["cursor"], host["cursor"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn last_viewer_unsubscribe_preserves_remote_scrollback() {
         let (transport, _) = test_transport(&[]);
         let driver = Arc::new(TerminalManager::new());
-        let fanout = TerminalFanout::new();
+        let fanout = test_fanout();
         let ctx = AgentTerminalCtx {
             driver: &driver,
             transport: &transport,
@@ -1600,7 +1905,7 @@ mod tests {
     #[test]
     fn live_output_uses_the_event_history_watermark() {
         let (transport, received) = test_transport(&["phone-a"]);
-        let fanout = TerminalFanout::new();
+        let fanout = test_fanout();
         fanout.add_viewer("session-1", "phone-a");
 
         assert!(handle_agent_terminal_event(
@@ -1616,6 +1921,10 @@ mod tests {
                 buffer_end: 42,
             },
         ));
+
+        wait_for_message(&received, "phone-a", |message| {
+            message["type"] == REMOTE_TERMINAL_OUTPUT && message["payload"]["data"] == "output"
+        });
 
         let messages = received.lock().unwrap();
         let output = messages.get("phone-a").unwrap().first().unwrap();
@@ -1734,7 +2043,7 @@ mod tests {
     #[test]
     fn natural_exit_notifies_all_viewers_and_clears_session() {
         let (transport, received) = test_transport(&["phone-a", "phone-b", "desktop-a"]);
-        let fanout = TerminalFanout::new();
+        let fanout = test_fanout();
         fanout.add_project_subscriber("project-1", "phone-a");
         fanout.add_viewer("session-1", "phone-b");
 
@@ -1767,7 +2076,7 @@ mod tests {
 
     #[test]
     fn project_unsubscribe_preserves_direct_session_viewer() {
-        let fanout = TerminalFanout::new();
+        let fanout = test_fanout();
         fanout.set_session_project("session-1", "project-1");
         fanout.add_project_subscriber("project-1", "phone-a");
         fanout.add_viewer("session-1", "phone-a");
@@ -1779,7 +2088,7 @@ mod tests {
 
     #[test]
     fn project_subscriber_is_not_a_session_viewer() {
-        let fanout = TerminalFanout::new();
+        let fanout = test_fanout();
         fanout.add_project_subscriber("project-1", "phone-a");
         fanout.set_session_project("session-1", "project-1");
 
@@ -1788,7 +2097,7 @@ mod tests {
 
     #[test]
     fn remove_device_clears_all_subscriptions_and_output_ack() {
-        let fanout = TerminalFanout::new();
+        let fanout = test_fanout();
         fanout.set_session_project("session-1", "project-1");
         fanout.add_project_subscriber("project-1", "phone-a");
         fanout.add_viewer("session-1", "phone-a");
@@ -1825,7 +2134,7 @@ mod tests {
             )
             .expect("create terminal");
         let (transport, _) = test_transport(&["phone-a"]);
-        let fanout = TerminalFanout::new();
+        let fanout = test_fanout();
         let envelope = json!({ "sessionId": session_id });
 
         handle_terminal(

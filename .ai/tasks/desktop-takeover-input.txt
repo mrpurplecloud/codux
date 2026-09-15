@@ -633,3 +633,81 @@ updater 签名跳过；DMG/app 本机 ad-hoc 签名有效。Android 真机未连
 delivery_state：installed_and_running
 contract_state：frozen
 completion：done
+
+## 2026-09-12 离线性能诊断 checkpoint
+
+当前授权：用户要求执行无公网 beta12/beta13 性能对照，出结果前持续推进。
+先前两个 relay 临时直连及必要的远端 agent 部署已获批，但当前均暂停且未执行。
+生产代码仍 frozen；本轮仅隔离副本诊断，不修复、不提交、不安装。
+诊断副本：`/private/tmp/codux-offline-latency.SIOSsN`，由 f548104e archive 建立。
+比较：同一 fixture / build profile 下 beta13、beta13 仅禁新增诊断日志、beta12 对应生产代码。
+验证：ControllerInner 的约 200KB chunk assembly + held live + 另一终端输出；
+真实 pane callback 的 owner/Force/input/baseline 去重；人工持有 runtime trace lock 的阻塞对照；
+relay disabled、127.0.0.1 绑定的 Iroh framed transfer。
+边界：这些检查不声称覆盖真实 GPUI 绘制完成，也不把注入的日志锁阻塞当现场根因。
+下一动作：编译并执行共同夹具，保留每版 timing 与断言输出；根据结果继续定位。
+
+2026-09-12 离线诊断结果：三轮 beta12 / beta13 / beta13 禁新增日志交错对照均完成。
+每模式 1500 次 pane 接管输入、120 次约 200KB Controller baseline/live 恢复、
+120 次真实 TerminalModel snapshot publication。Controller p50 各模式均约 26–27ms，
+Model p50 约 18ms；正常负载无现场 24–27 秒延迟。仅在注入 runtime trace 全局锁
+竞争时，beta13 pane input 被阻塞约 105–106ms；beta12 和 beta13 禁新日志均 2–6μs。
+逐块实验：仅 pane 新日志阻塞 pane 输入；仅 controller 新日志阻塞 owner 回复和同一
+入站流下一终端输出，outbound input 仍可发送；仅 embedded-host 新日志阻塞主机 payload。
+保留 Pending/设备名但关闭新增日志则矩阵全不阻塞。UI label 决策 1000 次 p50 1μs，
+首进程 i18n 冷加载约 38–68ms。真实本机 Iroh host queue / input 回传 213KB 最大11.68ms；
+raw framed loopback 最大20.49ms，relay disabled、仅127.0.0.1，无真实身份。
+证据范围：确认新增同步日志的条件性阻塞，未证明现场曾发生对应日志锁长等待；
+不把注入条件或历史无时间戳 send failures 当现场 A 级根因；未覆盖 GPUI实际paint完成。
+产物：临时副本 RESULTS.md、compare.mjs、compare-blocks.mjs 与保存的版本测试二进制。
+当前副本源回到 beta13，加诊断 hook 和 fixture；测试 package 元数据保持 beta13，
+beta12 性能二进制实质为已按9e3c3c73逐文件校验的生产代码，同build profile与依赖。
+生产 contract_state 仍 frozen；无生产源码修复、提交、安装、路由或远端agent变更。
+下一动作：继续定位现场几十秒延迟；用户明确拒绝将人工日志锁竞争当事故根因。
+
+2026-09-12 网络分段诊断 checkpoint：生产代码仍 frozen，仅诊断。
+用户确认 SD-WAN 已关闭；17:00 前后实查无 wireguard 进程，en0 已从此前
+192.168.168.20 变为10.10.10.16，10.10.10.18 走 en0，不能视为只关 SD-WAN
+的单变量实验。当前 ping 平均4.63ms；SSH 200KB总179ms（认证124ms、首字节160ms）；
+远端日志tail1400总177ms。此前SSH多秒/30秒读取未完成并非当前状态。
+同一beta13 PID86109，已有16:57:25项目切换/恢复日志中，VGBridge对应session
+13块199956B跨度27ms；另一项目10块158364B跨度31ms。不是本轮新触发动作，
+未核实SD-WAN关闭准确时间，不作其关闭带来恢复的因果结论，也不等于GPUI绘制完成。
+Clash仍GLOBAL/TUN，当前节点回到洛杉矶SSR；relay仍走utun1024。
+HTTPS三轮en0直出97–115ms、当前代理875–922ms；仅HTTP，不等于终端RTT。
+远端历史日志含同一peer直连10.10.10.16:58376（3–4ms）与relay（约318–372ms）
+交替的selected-path记录，但无时间戳；不能判断对应哪个慢窗口。25秒tail-follow
+无新增日志，未观察到新send failure。历史1053条terminal failure仍全部属于当前桌面。
+依赖源码确认UDP7842为QUIC地址发现，不是terminal数据端口；download=0不能当输出丢包。
+当前隔离实验：临时副本新增relay_latency.rs与relay_connect_proxy.py，随机测试身份、
+合成213KB payload、禁IP直连强制真实relay；本机loopback CONNECT只允许两个Codux
+relay的443，分别绑定en0或默认TUN，旨在做数据通道单变量对照。无全局路由变更、
+无真实host配对/PTY操作、无agent部署。下一动作：构建并执行relay数据路径对照，
+关停临时代理，保留实测边界；仍未确认现场几十秒事故根因。
+
+2026-09-12 17:19 网络实验结果（后续诊断仍开放）：
+先前自制CONNECT适配器未设置TCP_NODELAY；生产iroh-relay client/tls.rs明确设置。
+已修正适配器双向TCP_NODELAY，修正前0.7–6.8秒数据不用于事故因果结论。
+修正后主机端固定en0直出，客户端仅切en0/default-TUN；两relay各两轮交错、
+每轮4次213KB合成数据回传，共32次断言通过，无真实配对身份/PTY/App回调参与。
+阿里云relay：直出248–911ms，TUN 1026–3914ms；首次客户端数据到测试主机
+约42–51ms对182–211ms。dux relay：直出597–2297ms，TUN 1017–4186ms；
+dux即使直出仍有吞吐抖动，不可把全部问题归于代理。计时均为213KB双向回传，
+不是单向terminal baseline，更不是GPUI paint；两个测试端点位于本机而非远端Mac Studio。
+32次客户端QUIC lost_packets/data_blocked/stream_data_blocked均0，另12次边界
+复测也为0；不能由此排除relay外层TCP重传、排队或服务端限速。
+TCP_CONNECTION_INFO：en0到relay RTT35–40ms；TUN虚拟连接RTT1ms仅到本机栈。
+nettop确认当前SSR节点为144.34.233.77:41903，真实公网TCP走en0，RTT约135–165ms；
+22秒期间观察到该节点新连接的TCP重传/乱序。但其中包含其他App流量，未做到
+测试连接与外层每个socket一一关联，不能把重传字节全部归于Codux。
+dux直出两测试socket出现rx_out_of_order_bytes约11932/81573、单socket一次小重传；
+阿里云测试host直出socket无重传/乱序。仅证实当前不同公网路径质量差异。
+重读原慢窗口：23:02:17.872–42.096，13块199956B，块间最大4.317/4.247秒，
+仍缺socket入口/agent发送时间，不能判定每段空白全部属于网络。
+当前结论：单变量已证实当前TUN/SSR路径会增加真实Iroh数据传输秒级延迟；
+无beta13接管代码与新增日志也会发生。未复现/解释完整24–27秒历史事故，
+未证明SD-WAN责任（已关闭且物理网络变更），未授权生产修复Gate。
+已询问用户当前同局域网是否仍有明显延迟，尚未收到反馈。下一判别需要真实慢
+窗口中的实际selected path与收发边界；当前环境不能替代此前跨网SD-WAN状态。
+所有临时CONNECT服务已请求SIGINT关闭；测试端点均正常结束；未改路由、代理配置、
+生产源码、安装App或远端agent。诊断源码保留在既有隔离副本，不作为交付产物。

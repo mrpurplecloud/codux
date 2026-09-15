@@ -1,0 +1,222 @@
+# 任务
+
+ID: desktop-remote-connect-flap
+类型：bug
+状态：active
+创建：2026-09-11
+更新：2026-09-11
+一句话描述：桌面 Codux 两个实例同时控制同一远程项目，连接互相取代，表现为时连时断、一直反复
+
+## 等级
+
+grade：Guarded
+依据：触及 macOS 平台生命周期 / 发布打包，根因是跨进程单实例约束缺失；无法满足 Light 的"不触及构建配置、发布或平台生命周期"条件
+升级触发证据：none
+
+## Active Contract
+
+state：frozen
+
+### 目标
+
+桌面 Codux 在 macOS 上同时只运行一个实例；连接远程项目后不再出现两进程互相取代导致的连接抖动，用户可持续使用。
+
+### 证据
+
+复现（未修改版本，真实产物）：
+- 环境：macOS；`/Applications/Codux.app` 2.0.3-beta.12；连接 Mac Studio headless host（device `a5f00c6abaaa45d3a1dae7d2697ec742` / hostId `codux-748376f45f5b`）。
+- 步骤：在第一个 Codux 进程运行期间，再经 LaunchServices 启动同一 `/Applications/Codux.app`。
+- 实际：`~/Library/Application Support/Codux/runtime-rust.log` 在 2026-09-11 16:16–16:31 记录 `controller_connect ok` 221 次、`iroh_controller_read failed error=connection lost` 218 次；每次连接存活中位数 0.96s（min 0.32s / mean 1.02s）。
+- 期望：单实例稳定连接。
+- 频率：always（16:16 第二个实例启动后持续）；结果：failed；基础设施问题：none。
+
+last-known-good：07:02:25 启动的单个实例从约 10:16:34 稳定连接到 16:16；期间 15:21–15:23 仍有远端终端输出（`runtime-rust.log.1`），无连续断连。
+
+first-wrong：2026-09-11 16:16:21 同一 bundle 的第二个 Codux 进程经 LaunchServices 启动（PID 97150，PPID 1），且 bundle 未声明单实例约束。
+
+因果链：第二个实例 → 两进程共享 `remote-controllers.json` 的同一 `deviceId`/`deviceToken`，但各自 iroh endpoint identity 不同 → 两者启动即 eager auto-connect → host 侧 `bind_peer_alias_under_ownership` 把同一 device alias 绑到最新 peer，并 `notify_replaced_peer` 以 `superseded connection` 关闭旧连接 → 被踢进程读到 `connection lost` → 1s 退避后重连 → 再次取代对方 → 无限互相取代。
+
+观察证据：
+- Mac Studio host 日志（`/Users/mac/.codux-agent/codux.log`，经产品 terminal/file.read 取出）：两个不同 peer `18de627b…` 与 `1b442d63…` 交替 `iroh_host_streams_ready`，每次紧跟 `iroh_host_peer_replaced`；两 peer 以同一 device alias 互相取代。
+- `lsappinfo` 列出两个 `com.duxweb.codux` 实例；`lsof` 显示两个 Codux PID（91790、97150），均 PPID 1、`__CFBundleIdentifier=com.duxweb.codux`，且两者都同时连到 host relay（140.143.238.80:443）与本地 host relay（120.79.210.7:443）。
+- 对照：用产品入口 `RemoteTransportFactory::connect_controller()` 单独建一条同配置连接并保持 20s，连接稳定、无断连（不携带 deviceId 竞争 alias），证明 relay/host 路径本身健康。
+- 平台行为实测：临时 `.app`（无 key）两次 `open -n` → 2 个进程；同 bundle 加 `LSMultipleInstancesProhibited=true` 后两次 `open -n` → 1 个进程。
+
+### 授权变更
+
+一个因果单元：桌面 macOS bundle 缺少"单实例"平台约束，允许第二个进程共享同一 remote pairing 并建立 controller 连接。
+机制：在 `apps/desktop/scripts/release/package-gpui.mjs` 生成的 macOS Info.plist 中加入 `<key>LSMultipleInstancesProhibited</key><true/>`。
+证据绑定：观测到的两个实例均为 LaunchServices 启动（PPID 1、`__CFBundleIdentifier`），而平台 key 实测能阻止同 bundle 的第二次 `open -n`；既有 dock reopen handler 负责把被拒的启动转成激活已有窗口。
+
+### 范围
+
+owner / invariant：`macosInfoPlist()` 是 macOS bundle 启动约束的唯一 owner；invariant = 同一 bundle 在 macOS 上至多一个运行实例。
+allowed_files：
+- apps/desktop/scripts/release/package-gpui.mjs
+- apps/desktop/scripts/release/test-package-gpui.mjs
+out_of_scope：
+- `app_info::request_restart()` 非更新分支 spawn 新进程后不退出（潜在同类问题，但本次复现未经过该路径；另记）
+- host 侧 alias 单活语义、controller_manager 重连策略、协议、持久化、移动端
+- 不修改已安装的 `/Applications/Codux.app`（交付另需授权）
+
+### 验证
+
+baseline：无 key 的临时 bundle 两次 `open -n` → 2 个进程（已实测）。
+target_check：
+- 命令：`node apps/desktop/scripts/release/test-package-gpui.mjs`
+  通过标准：断言新生成的 macOS Info.plist 含 `LSMultipleInstancesProhibited=true`，且既有打包测试全绿。
+- 命令：对含 key 的临时 bundle 连续两次 `open -n`（用隔离的 dummy 可执行）
+  通过标准：只产生 1 个进程（已实测，实施后复跑）。
+nearest_regression_check：`node apps/desktop/scripts/release/test-package-gpui.mjs`；确认 Info.plist 其余键与 runtime assets 打包不变。
+broader_check_reason：none
+broader_checks：none
+
+## 当前阶段
+
+phase：fix
+
+# Diagnosis
+
+## 现象与复现
+
+环境：macOS；桌面 Codux 2.0.3-beta.12（`/Applications/Codux.app`）；连接 Mac Studio headless host（device a5f00c6abaaa45d3a1dae7d2697ec742）。
+步骤：第一个实例运行中，经 LaunchServices 再启动同一 bundle。
+实际：两进程同时连接同一 host，连接约每 1s 断开重连，持续反复。
+期望：单个实例稳定连接。
+频率：always（16:16 后持续）。
+结果：failed。
+基础设施问题：none。
+
+## 真实链
+
+last-known-good：07:02 单实例从 ~10:16 稳定到 16:16（15:21–15:23 仍有远端终端输出）。
+first-wrong：16:16:21 第二个 Codux 实例经 LaunchServices 启动，且 bundle 无单实例约束。
+因果链：见 Active Contract 证据节。
+观察证据：runtime-rust.log / .1；Mac Studio host codux.log 的 peer 交替 replaced；两个 Codux PID + 双 relay 连接；单连接 probe 20s 稳定。
+
+## 竞争解释（仅仍有歧义时，最多两个）
+
+1. explanation：host/relay 路径抖动是直接原因。
+   prediction：单条 product 连接也会在数秒内断开。
+   discriminating_check：用产品入口单独连接并 hold 20s，同时 app 仍在抖动。
+   result：单连接稳定 20s；app 抖动由两个 controller peer 造成。
+   state：rejected
+
+2. explanation：桌面单进程重连策略自身把正常连接抖成循环。
+   prediction：只有一个 Codux 进程时也出现同频抖动。
+   discriminating_check：`lsappinfo`/`lsof` 计实例数；host 日志核对 peer 数。
+   result：存在两个 Codux 进程；host 侧两个 peer 交替取代同一 device alias。
+   state：rejected
+
+## 根因
+
+statement：macOS 允许同一 Codux bundle 运行两个实例；两实例共享同一 remote pairing identity 并各自建立 controller 连接；host 的单 device alias 单活语义使两连接互相取代，快速重连把取代放大为持续抖动。
+first-wrong condition：bundle 未声明 `LSMultipleInstancesProhibited`，第二次 LaunchServices 启动得以产生第二个实例。
+evidence_grade：A
+evidence_reference：`~/Library/Application Support/Codux/runtime-rust.log(.1)`；Mac Studio `/Users/mac/.codux-agent/codux.log`；`lsappinfo`/`lsof`；`/tmp/insttest` platform 对照实验；`crates/codux-remote-transport/examples/dial_probe.rs` product/readfile 对照。
+
+## 其他
+
+excluded：relay/网络路径故障；host 进程重启/睡眠；传输库/ALPN；单进程重连逻辑；deviceToken 不匹配；host `stream readiness timeout`（是连接建立失败的次生现象，非本次抖动的首因）。
+missing_information：第二个实例在 16:16 被谁启动（用户手动或自动化）——不影响修复，单实例约束覆盖所有 LaunchServices 启动路径。
+completion：complete
+
+## 能力（仅选中时）
+
+blocker：
+logical_capability：
+resolved_skill：
+state：pending
+result：
+
+## Stop revision（仅 stopped 时）
+
+stop_evidence：
+被反驳字段：
+current_diff：
+新版 Active Contract：
+相对旧版变化：
+建议处理：
+approval：pending
+用户批准证据：
+
+## Checkpoint
+
+latest_verified：诊断完成；两个 Codux 实例经同一 device alias 在 host 侧互相取代；单连接对照稳定 20s；平台 key 实测阻止第二次 open -n。修复已实现并验证：`node apps/desktop/scripts/release/test-package-gpui.mjs` 通过；由真实 `macosInfoPlist()` 生成的 plist `plutil -lint` OK 且含 `LSMultipleInstancesProhibited=1`；同一 bundle 两次 `open -n` 只产生 1 个进程（无 key 对照产生 2 个）。生产代码已冻结。
+contract_state：frozen
+active_capability：none
+next_action：等待用户明确授权后再构建/交付修复产物；用户可先退出多余的 Codux 实例止血（保留一个）。
+
+## Delivery Gate（仅获授权交付时）
+
+authorized_action：
+target_environment：
+prerequisites：
+rollback：
+artifact_identity：
+state：pending
+result：
+
+# 实施与验证结果
+
+生产改动（allowed_files 内，+15/-1）：
+- `apps/desktop/scripts/release/package-gpui.mjs`：`macosInfoPlist()` 增加 `<key>LSMultipleInstancesProhibited</key><true/>`；新增 test-only export `__testMacosInfoPlist`。
+- `apps/desktop/scripts/release/test-package-gpui.mjs`：断言生成的 macOS Info.plist 含该 key。
+
+验证证据：
+- target_check：`node apps/desktop/scripts/release/test-package-gpui.mjs` → `package-gpui installer test passed`（exit 0）。
+- target_check（平台行为）：用真实 `macosInfoPlist()` 生成隔离 dummy bundle，`plutil -lint` OK、`LSMultipleInstancesProhibited=1`；连续两次 `open -n` 只产生 1 个进程。对照（同 generator，去掉 key 的旧行为）两次 `open -n` 产生 2 个进程。
+- nearest_regression：同一打包测试通过；生成的 plist 其余键完整（CFBundleIdentifier / CFBundleExecutable / LSMinimumSystemVersion / NSHighResolutionCapable 等），未触碰 runtime assets。
+- 自审三问：改动只服务单实例 invariant；无越界机制/兜底/相邻回归；证据覆盖目标与最近契约。
+- Guarded 反驳：已排除 relay/host 路径（单连接 20s 稳定 + 6 小时单实例稳定期）、单进程重连策略（两进程、两 peer 交替 replaced）、direct-exec 启动路径（观测两实例均 PPID 1 / `__CFBundleIdentifier` = LaunchServices）。
+
+未覆盖 / 已声明残留：
+- `app_info::request_restart()` 非更新分支 spawn 同 exe 后不退出，是另一条潜在双实例路径；本次复现未经过它，按 out_of_scope 另记。
+- 不修改用户已安装的 `/Applications/Codux.app`；交付需单独授权。
+
+# Guarded Fix
+
+## 现有正确路径证据
+
+examined_existing_paths：
+- `apps/desktop/scripts/release/package-gpui.mjs` `macosInfoPlist()`：唯一生成 macOS bundle `Info.plist` 的位置；当前无单实例 key。查证结果：可在此扩展。
+- `apps/desktop/src/app/macos_window.rs` `install_dock_reopen_handler` / `dock_should_handle_reopen`：已有"再次打开时激活/重建主窗口"路径；LS 拒绝第二实例后会走该激活路径。查证结果：可复用。
+- `apps/desktop/runtime/src/remote/controller_manager.rs` epoch / reconnect worker：只在单进程内去重 controller，无法跨进程；查证结果：不能复用来解决跨进程冲突。
+- host `crates/codux-remote-transport/src/iroh_link.rs` `insert_peer` / `bind_peer_alias_under_ownership` / `notify_replaced_peer`：单 device alias 单活 owner 的既有契约，用于合法重连替换；查证结果：不能为了支持双实例而放宽，否则所有 device 路由失去唯一 owner。
+- 相关历史修复：`e1071e49`（保留 reconnect worker 直到 link 真正 live）、`7c503eb2`（配对时停止 transport churn）、`1d3c0857`（移动端一个失败身份 + 停止重连策略）。查证结果：都只解决单 controller 进程内/单设备问题，未提供跨进程单实例 owner。
+reuse_decision：extend-existing `macosInfoPlist()`（加平台 key）+ reuse `macos_window.rs` dock reopen 激活
+decision_evidence：两个观测实例均 PPID 1 且 `__CFBundleIdentifier=com.duxweb.codux`，即 LaunchServices 启动；dummy bundle 实测无 key → 2 进程、有 key → 1 进程，key 精确覆盖观测路径。
+
+## 根因与 owner
+
+causal_chain：同一 device alias 被两个 Codux 进程同时主张 → host 每次绑定新 peer 就 close 旧 peer → 双方快速重连 → 持续互相取代。
+first-wrong condition：bundle 未声明单实例约束，第二次 LaunchServices 启动被允许。
+A_evidence：app 日志 15 分钟 221 ok / 218 lost（中位存活 0.96s）；host 日志两个 peer 交替 replaced；两个 Codux PID 同时连 host relay；单连接 probe 20s 稳定；平台 key 对照实验。
+owner：macOS bundle 的启动约束（`macosInfoPlist()`）。
+invariant：同一 Codux bundle 在 macOS 上至多一个运行实例，因而同一 pairing 至多一个 controller owner。
+
+## 授权机制
+
+causal_unit：桌面 macOS bundle 缺少单实例平台约束。
+mechanism：Info.plist `LSMultipleInstancesProhibited=true`。
+evidence_binding：见上"平台 key 对照实验"与 LaunchServices 启动证据。
+why_minimal_and_sufficient：1 个平台 key、0 新文件、0 新机制/协议；实测覆盖观测到的 launch 路径（`open -n` 与普通 LaunchServices 启动）。
+
+## 备选（仅真实存在时）
+
+alternatives：应用启动时自建 flock 锁文件（代码级单实例）。
+排除证据：平台 key 已实测足以阻止观测路径的第二次启动；flock 方案需新机制、跨平台激活逻辑与额外文件，证据不支持其必要性。直接 exec 启动路径本次未观测到，不授权为它扩大机制。
+
+## 实际命中风险
+
+contract / data / concurrency / compatibility / rollback：平台生命周期与发布打包；无数据/协议变更。回滚：删除该 key 重新打包。
+verification_only：单实例行为验证、打包脚本回归。
+out_of_scope：`request_restart` 非更新分支不退出；host 端语义；重连策略。
+
+## 修改前方案审查
+
+existing_path_check：pass — 复用现有 `macosInfoPlist()` 与 dock reopen 激活路径；新增的只是一个平台声明，不重复任何现有跨进程职责（现有职责只到进程内去重）。
+owner_and_evidence：owner 明确为 bundle 启动约束；证据绑定平台对照实验与真实日志。
+semantic_scope：仅"同一 bundle 单实例"，未扩大到 host/协议/重连策略。
+verification_power：baseline 已实测无 key → 2 实例；target_check 断言生成 plist 含 key 且带 key 的 bundle 拒绝第二次 `open -n`。
+result：pass

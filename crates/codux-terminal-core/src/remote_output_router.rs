@@ -1395,6 +1395,118 @@ mod tests {
     }
 
     #[test]
+    fn mobile_baseline_preserves_live_cursor_continuation() {
+        assert_baseline_preserves_live_cursor_continuation(false);
+    }
+
+    #[test]
+    fn desktop_baseline_preserves_live_cursor_continuation() {
+        assert_baseline_preserves_live_cursor_continuation(true);
+    }
+
+    fn assert_baseline_preserves_live_cursor_continuation(for_emulator: bool) {
+        use crate::HeadlessTerminalScreen;
+
+        for alternate in [false, true] {
+            for hidden in [false, true] {
+                let mut host = HeadlessTerminalScreen::new(40, 10, 100);
+                let mut router = RemoteTerminalOutputRouter::new(65_536, 65_536);
+                router.bind_session("session-1", true);
+                router.resize_screen("session-1", 40, 10);
+                let mut mirror = HeadlessTerminalScreen::new(40, 10, 100);
+                let mut raw = (1..=30)
+                    .map(|i| format!("history-{i}\r\n"))
+                    .collect::<String>();
+                raw.push_str(if alternate { "\x1b[?1049h" } else { "" });
+                raw.push_str(
+                    "\x1b[2J\x1b[HHistory\x1b[10;1Hfooter:abcdefghijklmnopqrstuvwxyz\x1b[6;1HWorking 01",
+                );
+                raw.push_str(if hidden { "\x1b[?25l" } else { "\x1b[?25h" });
+                host.process(raw.as_bytes());
+                let mut sequence = 1;
+
+                for round in 0..2 {
+                    let request_id = format!("baseline-{round}");
+                    assert!(router.start_buffer_request(
+                        "session-1",
+                        &request_id,
+                        true,
+                        true,
+                        true,
+                    ));
+                    let baseline = host.snapshot_at_offset_request(0).snapshot();
+                    let mut message =
+                        buffer_with_screen_data("session-1", &raw, &baseline.data, sequence);
+                    message["payload"]["requestId"] = json!(request_id);
+                    message["payload"]["bufferLength"] = json!(raw.chars().count());
+                    message["payload"]["bufferEnd"] = json!(raw.chars().count());
+                    if for_emulator {
+                        let result = router.accept_for_emulator(&message, Some("session-1"));
+                        let Some(RemoteTerminalEmulatorUpdate::Replace {
+                            history,
+                            screen,
+                            cols,
+                            rows,
+                        }) = result.update
+                        else {
+                            panic!("baseline must replace the desktop mirror");
+                        };
+                        assert_eq!((cols, rows), (40, 10));
+                        mirror.clear();
+                        mirror.process_replay(&history);
+                        mirror.replace_visible_with_keyframe(&screen);
+                        assert_eq!(mirror.snapshot().cells, baseline.cells);
+                    } else {
+                        router.accept(&message, Some("session-1"));
+                        assert_eq!(
+                            screen_snapshot(&router, "session-1")["cells"],
+                            json!(baseline.cells),
+                        );
+                    }
+
+                    // Initial pixels alone passed with the defect. Continue
+                    // at the hidden cursor, including a horizontal move and
+                    // wide text, then replace Working in place. Re-subscribe
+                    // and repeat to catch a second serialization losing it.
+                    for frame in [
+                        "\x1b[1A\x1b[2C恢复说明",
+                        "\x1b[1B\r\x1b[2KWorking 02",
+                        "\r\x1b[2KWorking 03",
+                    ] {
+                        sequence += 1;
+                        host.process(frame.as_bytes());
+                        raw.push_str(frame);
+                        let message = live_with_watermark(
+                            "session-1",
+                            frame,
+                            raw.chars().count() as i64,
+                            sequence,
+                        );
+                        let actual = if for_emulator {
+                            let result = router.accept_for_emulator(&message, Some("session-1"));
+                            let Some(RemoteTerminalEmulatorUpdate::Append(bytes)) = result.update
+                            else {
+                                panic!("live frame must append to the desktop mirror");
+                            };
+                            mirror.process(&bytes);
+                            json!(mirror.snapshot())
+                        } else {
+                            router.accept(&message, Some("session-1"));
+                            screen_snapshot(&router, "session-1")
+                        };
+                        let expected = json!(host.snapshot());
+                        assert_eq!(
+                            actual["cells"], expected["cells"],
+                            "cell drift: emulator={for_emulator} alt={alternate} hidden={hidden} round={round}",
+                        );
+                        assert_eq!(actual["cursor"], expected["cursor"]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn emulator_update_replaces_chunked_baseline_after_interleaved_live_output() {
         let mut router = RemoteTerminalOutputRouter::new(65_536, 65_536);
         router.bind_session("session-1", true);

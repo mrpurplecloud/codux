@@ -150,7 +150,12 @@ impl RuntimeService {
             }
             for payload in controller.drain_pushed_project_lists() {
                 match self.apply_remote_project_snapshot(&device_id, epoch, &payload, &controller) {
-                    Ok(_) => {}
+                    Ok(true) => {
+                        // Membership or paths changed; newly added projections
+                        // need their own project-scoped terminal subscription.
+                        self.subscribe_remote_terminal_projects(&device_id, &controller);
+                    }
+                    Ok(false) => {}
                     Err(error) => crate::runtime_trace::runtime_trace(
                         "remote-projects",
                         &format!("ignored snapshot from {device_id}: {error}"),
@@ -359,7 +364,26 @@ impl RuntimeService {
             return Ok(());
         };
         completed?;
+        // The project catalog baseline can be empty of changes for a host whose
+        // projections were already local from a previous session. Subscribe for
+        // every current projection so its terminal list still converges.
+        self.subscribe_remote_terminal_projects(device_id, controller);
         Ok(())
+    }
+
+    /// Send one fire-and-forget project-scoped `terminals` subscription per
+    /// remote projection on this device. The host answers with an unsolicited
+    /// `terminal.list` (and pushes later changes), which the existing hosted
+    /// workspace update path reconciles into the desktop terminal layout.
+    fn subscribe_remote_terminal_projects(
+        &self,
+        device_id: &str,
+        controller: &crate::remote::RemoteController,
+    ) {
+        let store = ProjectStore::new(self.support_dir.clone());
+        for (local_project_id, _) in store.remote_project_id_pairs(device_id) {
+            controller.subscribe_terminal_project(&local_project_id);
+        }
     }
 
     /// Hand this desktop's legacy remote records — the ones it created back when

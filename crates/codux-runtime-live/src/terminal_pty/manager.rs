@@ -443,11 +443,8 @@ impl TerminalManager {
         &self,
         session_id: &str,
         max_chars: usize,
-        use_remote_viewport: bool,
     ) -> Result<TerminalBaselineSnapshot> {
-        Ok(self
-            .session(session_id)?
-            .baseline_snapshot(max_chars, use_remote_viewport))
+        Ok(self.session(session_id)?.baseline_snapshot(max_chars))
     }
 
     pub fn screen_snapshot(&self, session_id: &str) -> Result<TerminalScreenSnapshot> {

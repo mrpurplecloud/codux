@@ -1043,7 +1043,7 @@ async fn connect_serving_host(
     let ai_runtime = Arc::new(AIRuntimeBridge::new());
     ai_runtime.stage_assets()?;
     let driver = Arc::new(TerminalManager::with_ai_runtime(Arc::clone(&ai_runtime)));
-    let fanout = crate::terminals::TerminalFanout::new();
+    let fanout = crate::terminals::TerminalFanout::new(tokio::runtime::Handle::current());
     let agent_worktree_control =
         AgentWorktreeControl::start(&crate::projects::agent_data_dir(), Arc::clone(&ai_runtime))?;
     let agent_worktree_host: Arc<dyn AgentWorktreeHost> =

@@ -409,24 +409,18 @@ impl TerminalPtySession {
         self.history.lock().tail_text(max_chars)
     }
 
-    pub fn baseline_snapshot(
-        &self,
-        max_chars: usize,
-        use_remote_viewport: bool,
-    ) -> TerminalBaselineSnapshot {
+    /// Atomically pair raw history with a PTY-sized live-screen keyframe.
+    /// Baselines never include scroll overscan or inherit a viewer's offset.
+    pub fn baseline_snapshot(&self, max_chars: usize) -> TerminalBaselineSnapshot {
         let (data, offset, buffer_length, buffer_end, request) = {
             let _commit = self.output_commit.lock();
             let (data, offset, buffer_length, buffer_end) =
                 self.history.lock().snapshot_tail(max_chars);
             let screen = self.screen.lock();
-            let request = if use_remote_viewport {
-                // The baseline must describe the whole scrollable window the
-                // screen retains. `0` leaves capacity ownership with screen;
-                // its configured scrollback excludes visible grid rows.
-                screen.remote_viewport_snapshot_request(0, 0, 0)
-            } else {
-                screen.snapshot_request(true)
-            };
+            // History is already carried by `data`. Stacking scroll overscan
+            // into the keyframe would clamp newer rows onto the client's last
+            // visible row. Read the live grid without moving an existing viewer.
+            let request = screen.snapshot_at_offset_request(0);
             (data, offset, buffer_length, buffer_end, request)
         };
         TerminalBaselineSnapshot {
