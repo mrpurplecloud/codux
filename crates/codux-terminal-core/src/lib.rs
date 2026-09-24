@@ -23,7 +23,7 @@ pub use remote_output_router::{
     RemoteTerminalBufferPhase, RemoteTerminalEmulatorResult, RemoteTerminalEmulatorUpdate,
     RemoteTerminalOutputEffect, RemoteTerminalOutputEffectKind, RemoteTerminalOutputRouter,
 };
-pub use remote_pty::RemotePtySession;
+pub use remote_pty::{RemotePtyBaseline, RemotePtySession, RemoteTerminalHistoryUpdate};
 pub use runtime_model::{
     RemoteRuntimeModel, RemoteRuntimePlan, RemoteRuntimeProject, RemoteRuntimeStateSnapshot,
     RemoteRuntimeTerminal, RemoteRuntimeTerminalScope, RemoteRuntimeWorktree,

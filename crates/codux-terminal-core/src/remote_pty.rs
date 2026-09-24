@@ -7,6 +7,18 @@ use crate::{HeadlessTerminalScreen, TerminalScreenSnapshot, TerminalSequence};
 /// buffers grow without limit; past the cap we drop the oldest held frames.
 const MAX_HELD_LIVE: usize = 2048;
 
+/// History mutation chosen by the shared session, also applied by mirrors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteTerminalHistoryUpdate {
+    Replace(Vec<u8>),
+    Append(Vec<u8>),
+}
+
+pub struct RemotePtyBaseline<T> {
+    pub held_live: Vec<T>,
+    pub history: RemoteTerminalHistoryUpdate,
+}
+
 pub struct RemotePtySession<T> {
     max_cached_chars: usize,
     content: String,
@@ -159,25 +171,39 @@ impl<T> RemotePtySession<T> {
         buffer_length: Option<usize>,
         buffer_end: Option<usize>,
         sequence: Option<TerminalSequence>,
-    ) -> Vec<T> {
+    ) -> RemotePtyBaseline<T> {
         // Preserve the user's scroll position across a baseline replace: a
         // resync (e.g. after a dropped frame) rebuilds the buffer, and snapping
         // back to the bottom mid-scroll is jarring. If the user was scrolled up
         // by N lines, restore that distance from the new bottom.
         let prev_offset = self.history_screen.display_offset();
-        self.content.clear();
-        self.content.push_str(content);
-        trim_cache_buffer(&mut self.content, self.max_cached_chars);
+        // A bounded raw tail is not a replacement for rendered scrollback.
+        // Keep the existing parser/history when the tail covers our watermark;
+        // only an unknown stream, a new lifetime, or a gap requires rebuilding.
+        let continuous = self
+            .buffer_end
+            .zip(buffer_end)
+            .is_some_and(|(previous, end)| {
+                previous <= end
+                    && previous >= end.saturating_sub(content.chars().count())
+                    && sequence.is_none_or(|sequence| sequence >= self.sequence)
+            });
+        if !continuous {
+            self.content.clear();
+            self.buffer_end = None;
+            self.history_screen.clear();
+        }
+        let uncovered_start = self.append_live(content, buffer_length, buffer_end, sequence);
+        let bytes = content.as_bytes()[uncovered_start..].to_vec();
+        let history = if continuous {
+            RemoteTerminalHistoryUpdate::Append(bytes)
+        } else {
+            RemoteTerminalHistoryUpdate::Replace(bytes)
+        };
         if let Some(buffer_length) = buffer_length {
             self.buffer_length = buffer_length;
         }
-        self.buffer_end = buffer_end;
-        self.history_screen.clear();
-        let mut rendered = false;
-        if !content.is_empty() {
-            self.history_screen.process(content.as_bytes());
-            rendered = true;
-        }
+        let mut rendered = !content.is_empty();
         // Reconstruct the current screen from the host keyframe. An alt-screen
         // TUI (e.g. Claude) keeps its UI outside raw scrollback, while a normal
         // screen keyframe may overlap the end of that history. Replace the
@@ -186,12 +212,7 @@ impl<T> RemotePtySession<T> {
         if let Some(screen_data) = screen_data
             && !screen_data.is_empty()
         {
-            self.history_screen
-                .replace_visible_with_keyframe(screen_data.as_bytes());
-            if let Some(wrapped_rows) = screen_wrapped_rows {
-                self.history_screen
-                    .restore_visible_wrapped_rows(wrapped_rows);
-            }
+            self.reconcile_visible_keyframe(screen_data, screen_wrapped_rows, sequence);
             rendered = true;
         }
         if rendered {
@@ -208,7 +229,10 @@ impl<T> RemotePtySession<T> {
         }
         let base_sequence = sequence.unwrap_or(self.sequence);
         self.sequence = base_sequence;
-        self.drain_held_live(Some(base_sequence))
+        RemotePtyBaseline {
+            held_live: self.drain_held_live(Some(base_sequence)),
+            history,
+        }
     }
 
     /// Reconcile only the live grid from a host keyframe. Raw cache, complete

@@ -239,8 +239,7 @@ struct ControllerInner {
     terminal_sink: Mutex<Option<TerminalSink>>,
     // One callback per session keeps viewport authority ordered with PTY bytes.
     terminal_streams: Mutex<HashMap<String, RuntimeTerminalStreamForwarder>>,
-    // Shared consumer state owns each finite baseline transaction. Outside a
-    // transaction, live bytes keep the existing direct desktop path.
+    // Shared consumer state retains stream coverage across baseline refreshes.
     terminal_output: Mutex<ControllerTerminalOutput>,
 }
 
@@ -271,11 +270,8 @@ impl ControllerTerminalOutput {
     }
 
     fn set_dimensions(&mut self, session_id: &str, cols: usize, rows: usize) {
-        self.dimensions
-            .insert(session_id.to_string(), (cols, rows));
-        if self.is_reconciling(session_id) {
-            self.router.resize_screen(session_id, cols, rows);
-        }
+        self.dimensions.insert(session_id.to_string(), (cols, rows));
+        self.router.resize_screen(session_id, cols, rows);
     }
 
     fn start_baseline(&mut self, session_id: &str, request_id: &str) -> bool {
@@ -313,15 +309,27 @@ impl ControllerTerminalOutput {
             } else {
                 data
             };
-            return (!data.is_empty())
-                .then(|| RemoteTerminalEmulatorUpdate::Append(data.as_bytes().to_vec()));
+            if data.is_empty() {
+                return None;
+            }
+            let uncovered = self.router.ensure_session(session_id).append_live(
+                data,
+                payload
+                    .get("bufferLength")
+                    .and_then(Value::as_u64)
+                    .and_then(|n| usize::try_from(n).ok()),
+                payload
+                    .get("bufferEnd")
+                    .and_then(Value::as_u64)
+                    .and_then(|n| usize::try_from(n).ok()),
+                payload.get("outputSeq").and_then(Value::as_i64),
+            );
+            return (uncovered < data.len()).then(|| {
+                RemoteTerminalEmulatorUpdate::Append(data.as_bytes()[uncovered..].to_vec())
+            });
         }
 
         let result = self.router.accept_for_emulator(envelope, Some(session_id));
-        let baseline_finished = !self.is_reconciling(session_id);
-        if baseline_finished {
-            self.router.remove_session(session_id);
-        }
         result.update
     }
 
@@ -333,7 +341,6 @@ impl ControllerTerminalOutput {
         let result = self
             .router
             .cancel_buffer_request(session_id, request_id, Some(session_id))?;
-        self.router.remove_session(session_id);
         result.update
     }
 }
@@ -1301,10 +1308,12 @@ impl RemoteController {
             Arc::new(move |event| match event {
                 RuntimeTerminalStreamEvent::Output(bytes) => forwarder(bytes),
                 RuntimeTerminalStreamEvent::Replace {
-                    mut history,
-                    screen,
-                    ..
+                    history, screen, ..
                 } => {
+                    let mut history = match history {
+                        codux_terminal_core::RemoteTerminalHistoryUpdate::Replace(bytes)
+                        | codux_terminal_core::RemoteTerminalHistoryUpdate::Append(bytes) => bytes,
+                    };
                     history.extend(screen);
                     forwarder(history);
                 }
@@ -2687,6 +2696,59 @@ mod tests {
             rx.recv_timeout(Duration::from_secs(1)).unwrap(),
             b"\x1b[2J\x1b[Hready"
         );
+    }
+
+    #[test]
+    fn baseline_refresh_preserves_desktop_history_after_in_place_updates() {
+        let mut output = ControllerTerminalOutput::default();
+        output.set_dimensions("session-1", 40, 10);
+        let mut host = codux_terminal_core::HeadlessTerminalScreen::new(40, 10, 2_000);
+        let mut mirror = codux_terminal_core::HeadlessTerminalScreen::new(40, 10, 2_000);
+        let history: String = (0..300).map(|i| format!("SCROLL-{i}\r\n")).collect();
+        let noise = "\r\x1b[2KWorking".repeat(20_000);
+        let mut end = 0;
+        for (index, data) in [&history, &noise].into_iter().enumerate() {
+            host.process(data.as_bytes());
+            end += data.len();
+            let message = json!({"type": REMOTE_TERMINAL_OUTPUT, "sessionId": "session-1",
+                "payload": {"data": data, "bufferLength": end, "bufferEnd": end, "outputSeq": index + 1}});
+            let Some(RemoteTerminalEmulatorUpdate::Append(bytes)) =
+                output.route(&message, "session-1", false)
+            else {
+                panic!("live output must append");
+            };
+            mirror.process_replay(&bytes);
+        }
+        assert_eq!(mirror.snapshot().total_lines, 301);
+        for round in 0..2 {
+            let request_id = format!("refresh-{round}");
+            assert!(output.start_baseline("session-1", &request_id));
+            let snapshot = host.snapshot_at_offset_request(0).snapshot();
+            let tail = "\r\x1b[2KWorking".repeat(16_000);
+            let message = json!({"type": REMOTE_TERMINAL_OUTPUT, "sessionId": "session-1",
+                "payload": {"data": tail, "screenData": snapshot.data, "buffer": true, "tail": true,
+                    "offset": end - tail.len(), "bufferLength": end, "bufferEnd": end,
+                    "outputSeq": 2, "requestId": request_id}});
+            let Some(RemoteTerminalEmulatorUpdate::Replace {
+                history, screen, ..
+            }) = output.route(&message, "session-1", true)
+            else {
+                panic!("baseline must reconcile mirror");
+            };
+            match history {
+                codux_terminal_core::RemoteTerminalHistoryUpdate::Replace(bytes) => {
+                    mirror.clear();
+                    mirror.process_replay(&bytes);
+                }
+                codux_terminal_core::RemoteTerminalHistoryUpdate::Append(bytes) => {
+                    mirror.process_replay(&bytes)
+                }
+            }
+            mirror.replace_visible_with_keyframe(&screen);
+            assert_eq!(mirror.snapshot().total_lines, 301, "refresh {round}");
+        }
+        output.remove_session("session-1");
+        assert!(output.router.session_ref("session-1").is_none());
     }
 
     #[test]

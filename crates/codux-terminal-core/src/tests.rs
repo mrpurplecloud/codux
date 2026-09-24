@@ -370,7 +370,7 @@ fn restores_baseline_before_replaying_held_live_output() {
 
     let replay = session.replace_from_baseline("abcd", None, None, Some(8), None, Some(11));
     assert_eq!(session.content(), "abcd");
-    assert_eq!(replay, vec!["new"]);
+    assert_eq!(replay.held_live, vec!["new"]);
 }
 
 #[test]
@@ -566,6 +566,56 @@ fn baseline_resets_watermark_for_a_new_terminal_lifetime() {
     assert_eq!(session.content(), "new output");
     assert_eq!(session.buffer_length(), 10);
     assert_eq!(session.buffer_end(), Some(10));
+}
+
+#[test]
+fn baseline_without_continuous_coverage_replaces_old_history() {
+    for next_end in [None, Some(10_000)] {
+        let mut session = RemotePtySession::<()>::new(512);
+        session.resize_screen(20, 4);
+        let old = (0..30).map(|i| format!("old-{i}\r\n")).collect::<String>();
+        session.append_live(&old, Some(old.len()), Some(old.len()), Some(1));
+        let baseline = session.replace_from_baseline("new", None, None, Some(3), next_end, Some(2));
+        assert_eq!(
+            baseline.history,
+            crate::RemoteTerminalHistoryUpdate::Replace(b"new".to_vec())
+        );
+        assert_eq!(session.screen_snapshot().total_lines, 4);
+        assert!(screen_text(&session.screen_snapshot()).contains("new"));
+        assert!(!session.content().contains("old-"));
+    }
+}
+
+#[test]
+fn continuous_baseline_preserves_scroll_position_but_honors_explicit_clear() {
+    let mut session = RemotePtySession::<()>::new(512);
+    session.resize_screen(20, 4);
+    let history = (0..30).map(|i| format!("line-{i}\r\n")).collect::<String>();
+    session.append_live(&history, Some(history.len()), Some(history.len()), Some(1));
+    session.scroll_screen_pixels(200.0, 20.0);
+    let baseline = session.replace_from_baseline(
+        "",
+        None,
+        None,
+        Some(history.len()),
+        Some(history.len()),
+        Some(1),
+    );
+    assert_eq!(
+        baseline.history,
+        crate::RemoteTerminalHistoryUpdate::Append(Vec::new())
+    );
+    assert_eq!(session.screen_snapshot().display_offset, 10);
+    let clear = "\x1b[3J";
+    session.replace_from_baseline(
+        clear,
+        None,
+        None,
+        Some(history.len() + clear.len()),
+        Some(history.len() + clear.len()),
+        Some(2),
+    );
+    assert_eq!(session.screen_snapshot().total_lines, 4);
 }
 
 #[test]

@@ -514,7 +514,7 @@ enum ViewportOwnershipState {
 enum TerminalOutputEvent {
     Append(Vec<u8>),
     Replace {
-        history: Vec<u8>,
+        history: codux_terminal_core::RemoteTerminalHistoryUpdate,
         screen: Vec<u8>,
         cols: usize,
         rows: usize,

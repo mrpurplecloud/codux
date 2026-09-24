@@ -72,12 +72,12 @@ pub struct RemoteTerminalOutputEffect {
 }
 
 /// Exact mutation a second terminal emulator must apply after routing one
-/// wire frame. Baselines replace state atomically; accepted live bytes append.
+/// wire frame. Baselines reconcile history and grid atomically; live bytes append.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteTerminalEmulatorUpdate {
     Append(Vec<u8>),
     Replace {
-        history: Vec<u8>,
+        history: crate::RemoteTerminalHistoryUpdate,
         screen: Vec<u8>,
         cols: usize,
         rows: usize,
@@ -90,22 +90,36 @@ pub struct RemoteTerminalEmulatorResult {
     pub update: Option<RemoteTerminalEmulatorUpdate>,
 }
 
-#[derive(Default)]
 struct EmulatorUpdateCapture {
-    appended: Vec<u8>,
-    replace: bool,
+    history: crate::RemoteTerminalHistoryUpdate,
+    reconcile: bool,
+}
+
+impl Default for EmulatorUpdateCapture {
+    fn default() -> Self {
+        Self {
+            history: crate::RemoteTerminalHistoryUpdate::Append(Vec::new()),
+            reconcile: false,
+        }
+    }
 }
 
 impl EmulatorUpdateCapture {
     fn append(&mut self, bytes: &[u8]) {
-        if !self.replace {
-            self.appended.extend_from_slice(bytes);
+        match &mut self.history {
+            crate::RemoteTerminalHistoryUpdate::Replace(history)
+            | crate::RemoteTerminalHistoryUpdate::Append(history) => {
+                history.extend_from_slice(bytes)
+            }
         }
     }
 
-    fn replace(&mut self) {
-        self.replace = true;
-        self.appended.clear();
+    fn reconcile(&mut self, history: crate::RemoteTerminalHistoryUpdate) {
+        match history {
+            crate::RemoteTerminalHistoryUpdate::Append(bytes) => self.append(&bytes),
+            replacement => self.history = replacement,
+        }
+        self.reconcile = true;
     }
 }
 
@@ -536,22 +550,23 @@ impl RemoteTerminalOutputRouter {
         effects: Vec<RemoteTerminalOutputEffect>,
         capture: EmulatorUpdateCapture,
     ) -> RemoteTerminalEmulatorResult {
-        let update = if capture.replace {
+        let update = if capture.reconcile {
             session_id.and_then(|session_id| {
                 let session = self.sessions.get(session_id)?;
-                let history = session.content().as_bytes().to_vec();
                 let snapshot = session.screen_replay_snapshot();
                 Some(RemoteTerminalEmulatorUpdate::Replace {
-                    history,
+                    history: capture.history,
                     screen: snapshot.data.into_bytes(),
                     cols: snapshot.cols,
                     rows: snapshot.rows,
                 })
             })
-        } else if capture.appended.is_empty() {
-            None
         } else {
-            Some(RemoteTerminalEmulatorUpdate::Append(capture.appended))
+            let bytes = match capture.history {
+                crate::RemoteTerminalHistoryUpdate::Append(bytes)
+                | crate::RemoteTerminalHistoryUpdate::Replace(bytes) => bytes,
+            };
+            (!bytes.is_empty()).then_some(RemoteTerminalEmulatorUpdate::Append(bytes))
         };
         RemoteTerminalEmulatorResult { effects, update }
     }
@@ -832,7 +847,7 @@ impl RemoteTerminalOutputRouter {
                 if decoded.tail {
                     held_live = self.complete_empty_baseline(session_id, output_seq);
                     if let Some(emulator) = emulator.as_mut() {
-                        emulator.replace();
+                        emulator.reconcile(crate::RemoteTerminalHistoryUpdate::Append(Vec::new()));
                     }
                     self.active_buffer_request_by_session.remove(session_id);
                     self.remove_restore_request(session_id);
@@ -874,10 +889,8 @@ impl RemoteTerminalOutputRouter {
                     decoded.buffer_length,
                     decoded.buffer_end,
                     output_seq,
+                    emulator,
                 );
-                if let Some(emulator) = emulator.as_mut() {
-                    emulator.replace();
-                }
             }
 
             if is_baseline_restore || self.content(session_id).is_none() {
@@ -890,10 +903,8 @@ impl RemoteTerminalOutputRouter {
                         decoded.buffer_length,
                         decoded.buffer_end,
                         output_seq,
+                        emulator,
                     );
-                    if let Some(emulator) = emulator.as_mut() {
-                        emulator.replace();
-                    }
                 }
                 self.active_buffer_request_by_session.remove(session_id);
                 self.remove_restore_request(session_id);
@@ -998,9 +1009,10 @@ impl RemoteTerminalOutputRouter {
         buffer_length: Option<i64>,
         buffer_end: Option<i64>,
         output_seq: Option<TerminalSequence>,
+        emulator: &mut Option<EmulatorUpdateCapture>,
     ) -> Vec<String> {
         self.gap_sessions.remove(session_id);
-        let replay = self.session(session_id).replace_from_baseline(
+        let baseline = self.session(session_id).replace_from_baseline(
             data,
             screen_data,
             screen_wrapped_rows,
@@ -1008,10 +1020,13 @@ impl RemoteTerminalOutputRouter {
             buffer_end.and_then(|value| usize::try_from(value).ok()),
             output_seq,
         );
+        if let Some(emulator) = emulator.as_mut() {
+            emulator.reconcile(baseline.history);
+        }
         self.complete_baseline_sessions
             .insert(session_id.to_string());
         self.bump_render(session_id);
-        replay
+        baseline.held_live
     }
 
     fn complete_empty_baseline(
@@ -1145,6 +1160,19 @@ fn decode_data(payload: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn apply_history_update(
+        screen: &mut crate::HeadlessTerminalScreen,
+        history: crate::RemoteTerminalHistoryUpdate,
+    ) {
+        match history {
+            crate::RemoteTerminalHistoryUpdate::Replace(bytes) => {
+                screen.clear();
+                screen.process_replay(&bytes);
+            }
+            crate::RemoteTerminalHistoryUpdate::Append(bytes) => screen.process_replay(&bytes),
+        }
+    }
 
     #[derive(Clone, Copy)]
     struct BufferFlags {
@@ -1395,6 +1423,100 @@ mod tests {
     }
 
     #[test]
+    fn baseline_refresh_preserves_history_after_in_place_updates() {
+        use crate::HeadlessTerminalScreen;
+
+        for for_emulator in [false, true] {
+            let mut router = RemoteTerminalOutputRouter::new(200_000, 262_144);
+            router.bind_session("session-1", false);
+            router.resize_screen("session-1", 40, 10);
+            let mut host = HeadlessTerminalScreen::new(40, 10, 2_000);
+            let mut mirror = HeadlessTerminalScreen::new(40, 10, 2_000);
+            let history: String = (0..700).map(|i| format!("SCROLL-{i}\r\n")).collect();
+            let noise = "\r\x1b[2KWorking".repeat(20_000);
+            let mut end = 0;
+            for (index, data) in [&history, &noise].into_iter().enumerate() {
+                host.process(data.as_bytes());
+                end += data.chars().count();
+                let message = live_with_watermark("session-1", data, end as i64, index as i64 + 1);
+                if for_emulator {
+                    let result = router.accept_for_emulator(&message, Some("session-1"));
+                    if let Some(RemoteTerminalEmulatorUpdate::Append(bytes)) = result.update {
+                        mirror.process_replay(&bytes);
+                    }
+                } else {
+                    router.accept(&message, Some("session-1"));
+                }
+            }
+            let expected = host.snapshot().total_lines;
+            assert_eq!(expected, 701);
+            assert_eq!(
+                screen_snapshot(&router, "session-1")["totalLines"],
+                json!(expected)
+            );
+            if for_emulator {
+                assert_eq!(mirror.snapshot().total_lines, expected);
+            }
+
+            // A same-watermark refresh, then a refresh covering missed output.
+            // Neither raw tail contains the old numbered history anymore.
+            for (round, suffix) in ["", "\r\n恢复\r\n"].into_iter().enumerate() {
+                host.process(suffix.as_bytes());
+                end += suffix.chars().count();
+                let tail = format!("{}{suffix}", "\r\x1b[2KWorking".repeat(16_000));
+                let request_id = format!("refresh-{round}");
+                assert!(router.start_buffer_request("session-1", &request_id, true, true, true));
+                let snapshot = host.snapshot_at_offset_request(0).snapshot();
+                let message = json!({
+                    "type": "terminal.output", "sessionId": "session-1",
+                    "payload": {
+                        "buffer": true, "tail": true, "offset": end - tail.chars().count(),
+                        "data": tail, "screenData": snapshot.data,
+                        "screenWrappedRows": snapshot.wrapped_rows,
+                        "bufferLength": end, "bufferEnd": end,
+                        "outputSeq": 2 + round, "requestId": request_id
+                    }
+                });
+                if for_emulator {
+                    let result = router.accept_for_emulator(&message, Some("session-1"));
+                    let Some(RemoteTerminalEmulatorUpdate::Replace {
+                        history, screen, ..
+                    }) = result.update
+                    else {
+                        panic!("baseline must reconcile mirror");
+                    };
+                    apply_history_update(&mut mirror, history);
+                    mirror.replace_visible_with_keyframe(&screen);
+                    assert_eq!(
+                        mirror.snapshot().total_lines,
+                        snapshot.total_lines,
+                        "mirror round {round}"
+                    );
+                    mirror.scroll_to_offset(snapshot.total_lines - snapshot.rows);
+                    assert!(mirror.snapshot().data.contains("SCROLL-0"));
+                    mirror.scroll_to_bottom();
+                } else {
+                    router.accept(&message, Some("session-1"));
+                    assert_eq!(
+                        screen_snapshot(&router, "session-1")["totalLines"],
+                        json!(snapshot.total_lines),
+                        "mobile round {round}"
+                    );
+                    router
+                        .session_mut("session-1")
+                        .unwrap()
+                        .scroll_screen_pixels(100_000.0, 20.0);
+                    assert!(screen_text(&router, "session-1").contains("SCROLL-0"));
+                    router
+                        .session_mut("session-1")
+                        .unwrap()
+                        .scroll_screen_pixels(-100_000.0, 20.0);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn mobile_baseline_preserves_live_cursor_continuation() {
         assert_baseline_preserves_live_cursor_continuation(false);
     }
@@ -1452,8 +1574,7 @@ mod tests {
                             panic!("baseline must replace the desktop mirror");
                         };
                         assert_eq!((cols, rows), (40, 10));
-                        mirror.clear();
-                        mirror.process_replay(&history);
+                        apply_history_update(&mut mirror, history);
                         mirror.replace_visible_with_keyframe(&screen);
                         assert_eq!(mirror.snapshot().cells, baseline.cells);
                     } else {
@@ -1580,6 +1701,9 @@ mod tests {
         }) = final_chunk.update
         else {
             panic!("completed baseline must produce one replacement");
+        };
+        let crate::RemoteTerminalHistoryUpdate::Replace(history) = history else {
+            panic!("initial baseline must replace history");
         };
         assert!(String::from_utf8_lossy(&history).ends_with("\x1b[Hlatest"));
         let screen = String::from_utf8_lossy(&screen);

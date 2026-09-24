@@ -200,7 +200,7 @@ fn labeled_viewport_event(
 
 fn baseline_event() -> codux_runtime::runtime_terminal::RuntimeTerminalStreamEvent {
     codux_runtime::runtime_terminal::RuntimeTerminalStreamEvent::Replace {
-        history: b"restored".to_vec(),
+        history: codux_terminal_core::RemoteTerminalHistoryUpdate::Replace(b"restored".to_vec()),
         screen: b"\x1b[H\x1b[2Jrestored".to_vec(),
         cols: 80,
         rows: 24,
@@ -215,7 +215,10 @@ fn receive_baseline(output: &flume::Receiver<TerminalOutputEvent>) {
     else {
         panic!("expected requested baseline replacement");
     };
-    assert_eq!(history, b"restored");
+    assert_eq!(
+        history,
+        codux_terminal_core::RemoteTerminalHistoryUpdate::Replace(b"restored".to_vec())
+    );
     assert!(screen.ends_with(b"restored"));
 }
 
@@ -235,7 +238,7 @@ fn output_replacement_discards_stale_screen_and_restores_keyframe() {
     );
 
     model.apply_output_replacement(
-        b"history".to_vec(),
+        codux_terminal_core::RemoteTerminalHistoryUpdate::Replace(b"history".to_vec()),
         b"\x1b[H\x1b[2Jcurrent".to_vec(),
         20,
         4,
@@ -248,6 +251,28 @@ fn output_replacement_discards_stale_screen_and_restores_keyframe() {
     let first_row = super::fixtures::row_text(&model.handle.snapshot(), 0);
     assert!(first_row.contains("current"), "first row: {first_row:?}");
     assert!(!first_row.contains("stale"), "first row: {first_row:?}");
+}
+
+#[test]
+fn incremental_baseline_keeps_history_and_drains_pending_output_once() {
+    let mut model = TerminalModel::new_for_test(20, 4, 100);
+    let history: String = (0..20).map(|i| format!("SCROLL-{i}\r\n")).collect();
+    model.handle.screen.lock().process(history.as_bytes());
+    model.pending_output_bytes.extend_from_slice(b"queued\r\n");
+    model.apply_output_replacement(
+        codux_terminal_core::RemoteTerminalHistoryUpdate::Append(b"new\r\n".to_vec()),
+        Vec::new(),
+        20,
+        4,
+    );
+    assert!(model.pending_output_bytes.is_empty());
+    let mut screen = model.handle.screen.lock();
+    assert_eq!(screen.snapshot().total_lines, 23);
+    let bottom = screen.snapshot().data;
+    assert!(bottom.contains("queued"));
+    assert!(bottom.contains("new"));
+    screen.scroll_to_offset(19);
+    assert!(screen.snapshot().data.contains("SCROLL-0"));
 }
 
 fn wait_for_stream(controller: &HostedTestController) {

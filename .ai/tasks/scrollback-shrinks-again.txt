@@ -1,0 +1,133 @@
+# 任务
+
+ID: scrollback-shrinks-again
+类型：bug
+状态：done
+创建：2026-09-23
+更新：2026-09-23
+一句话描述：修复连续 baseline 用有限 raw tail 重建、导致两端已有滚动历史缩短。
+
+## 等级
+
+grade：Guarded
+依据：A 级真实手机复现；共享 consumer owner、桌面异步输出链和多调用点。
+active_capability：none（仅显式 bugfix 入口，无外部开发 skill 或子 Agent）
+
+## Active Contract
+
+state：frozen
+
+### 目标
+
+同一 headless 会话的连续 baseline 重同步保留两端已有滚动历史，无需折叠展开或 /resume 恢复。未知水位、新 lifetime、无法覆盖缺口的 baseline 保持重建行为；显式清屏仍有效。
+
+### 证据
+
+基线 main / 563bbae5603507345cc2e161c31e85ee88a9cbf6，唯一 worktree 当前仓库；tracked 初始干净，824 项原有 untracked 保留。
+原始未修改代码的独立实际 router 实验：300 行正文后 20000 次原地状态刷新；有限尾部 baseline 同 bufferEnd；host=301/301，mobile=301/41，desktop=301/41。
+用户授权无线 ADB 10.10.10.40:43263。Honor FCP-AN10 / Android 16 / sideload beta.14+63，经既有配对连接 Mac Studio 10.10.10.18 headless beta.19。独立临时终端中 300 行 SCROLL 编号加 20000 次原地 Working 刷新；重同步前可到 SCROLL-0，项目切换后最早 SCROLL-272。10:46:28 日志为同 session 的 viewport-owner-refresh baseline=true。
+first-wrong：RemotePtySession::replace_from_baseline 无条件 clear 完整 history_screen，尾部原始字节已不含正文；桌面又从有限 raw cache 重建，且 ControllerTerminalOutput 在 baseline 完成后丢弃同步状态。
+evidence_grade：A。证据在 /private/tmp/codux-scrollback-{before-baseline.png,after-baseline.png,adb-live.log} 和诊断探针目录。
+
+### 授权变更
+
+一个因果单元：连续字符流的有限 baseline 不得覆盖已有渲染历史。
+复用 append_live 的 bufferEnd 字符去重、reconcile_visible_keyframe 的网格更新。共享 session 决定 Replace/Append 历史操作；router 捕获实际操作与 held-live，桌面传递和消费它。删除从 bounded raw cache 重建镜像及 baseline 后销毁同步状态的补偿。桌面增量 baseline 先处理已接收的 pending bytes；真实 replacement 丢弃旧积压。
+
+### 范围
+
+owner / invariant：RemotePtySession 拥有字符流覆盖范围和渲染历史；镜像执行同一历史操作，不能独立猜测连续性。
+allowed_files：
+- crates/codux-terminal-core/src/{remote_pty.rs,remote_output_router.rs,lib.rs,tests.rs}
+- apps/desktop/runtime/src/{remote/controller.rs,runtime_terminal.rs}
+- apps/desktop/src/terminal/{pane.rs,model.rs,tests/pty_binding.rs}
+- apps/desktop/Cargo.toml、apps/mobile/pubspec.yaml、Cargo.lock、docs/version-compatibility.md
+- 本任务文件及 /private/tmp/codux-scrollback-diagnosis/{Cargo.toml,src/main.rs}
+out_of_scope：2000 行原始容量/reflow 上限、host 完整历史新协议、断流缺口中无法恢复的数据、其他渲染问题；提交、配对、安装、发布、服务重启或部署。
+
+### 验证
+
+baseline：
+- cargo test -p codux-terminal-core --lib --offline -- --test-threads=2：142 passed。
+- cargo test -p codux-runtime remote::controller --offline -- --test-threads=2：72 passed，4 opt-in ignored。
+- 手机旧版本真实复现上述 SCROLL-0 至 SCROLL-272。
+
+target_check：
+- 原始独立 probe：cargo run --offline --manifest-path /private/tmp/codux-scrollback-diagnosis/Cargo.toml。最终 host=301/301 mobile=301/301 desktop=301/301；192000 字符尾部直接 session 复现从 301/41 变 301/301。仅适配镜像历史操作类型，实验输入未变。
+- baseline_refresh_preserves_history_after_in_place_updates：双 consumer 700 行，连续同水位/覆盖新 Unicode 后缀均保持总行数与 SCROLL-0。
+- baseline_refresh_preserves_desktop_history_after_in_place_updates：真实 ControllerTerminalOutput 未修复版 301→10 失败；最终连续两次 refresh 保持301，通过。
+- 首次新增 core 测试夹具有两处错误（等待初始baseline却只发live；usize::MAX转i32导致滚回底部），已修正并补前置总行数断言。其初次失败不算根因证据；原始probe/真机/真实controller证据独立成立。
+
+nearest_regression_check：
+- cargo test -p codux-terminal-core --lib --offline -- --test-threads=2：145 passed。
+- cargo test -p codux-runtime remote::controller --offline -- --test-threads=2：73 passed，4 opt-in ignored。
+- cargo test -p codux terminal::tests::pty_binding --offline -- --test-threads=2：20 passed。
+- 覆盖未知水位/缺口重建、新lifetime、显式clear、滚动位置、cursor/alt-screen、held-live/chunks、取消/注销和desktop pending bytes恰好一次。
+
+broader_check_reason：内部历史操作类型贯穿真实桌面事件链和 mobile FFI；caller枚举另发现 runtime-live 真实PTY测试也消费同一session API。
+broader_checks：
+- cargo check -p codux-protocol-ffi --offline：passed。
+- cargo build -p codux-protocol-ffi --offline：passed，供Flutter实际加载新版本地测试dylib。
+- flutter test --no-pub test/remote_terminal_output_controller_test.dart test/terminal_viewport_controller_test.dart test/widgets/self_drawn_terminal_view_test.dart：48 passed。
+- cargo test -p codux-runtime-live remote_baseline_replays_current_screen_without_losing_recent_rows --offline -- --test-threads=2：1 passed，真实PTY环境。
+- Flutter初次SDK cache写入被沙箱限制；escalated后又遇缺少本地FFI符号，构建FFI后48项通过。均属基础设施，不修改生产路径。
+- git diff --check passed；rustfmt比较确认所有实际改动行已格式化，保留无关旧格式。
+- 枚举所有历史操作/replace_from_baseline消费方，桌面编译和PTY调用方测试通过。
+
+## Guarded Fix
+
+examined_existing_paths：HeadlessTerminalScreen::replace_visible_with_keyframe；RemotePtySession::append_live/reconcile_visible_keyframe；router baseline/held-live/emulator_result；desktop ControllerTerminalOutput、RuntimeTerminalStreamEvent、pane/model；mobile FFI。查证历史2a43fb61、5c103ea4、f51c4b80、b50fe3f2。可见keyframe已有正确保留历史行为，live已有正确水位去重。
+reuse_decision：extend-existing append_live + reconcile_visible_keyframe。
+decision_evidence：raw字节尾部不能代表逻辑历史，扩大上限只延后失败；host新建完整历史协议非本任务所需；只修mobile不能覆盖桌面。
+causal_unit：已有连续渲染历史被有限baseline重建覆盖。
+mechanism：previousEnd位于incoming[end-chars,end]且无sequence回退时补未覆盖后缀；否则原重建。向镜像传递类型化Replace/Append；controller保留session到注销；model按操作处理积压。
+contract / data / concurrency / compatibility / rollback：内部Rust history Vec改为明确操作类型；wire和持久化不变，无迁移。desktop保留bounded session screen到注销，增加有限内存/解析；源diff可回滚。desktop beta.22、mobile beta.15+64；变更为client viewer模块，headless beta.19不变。
+verification_only：未知水位、缺口、新lifetime、空baseline、700行跨raw600行上限、第二次refresh、pending output、Unicode、显式clear、cursor和held-live。
+existing_path_check：pass。删除有限cache重建和transient session丢弃，未增加并列自救flag。
+owner_and_evidence：pass。共享owner的clear对应实测首错。
+semantic_scope：pass。所有生产差异服务同一baseline历史单元。
+verification_power：pass。未修改版真机+原始probe+真实controller；修复后双consumer及真实desktop model、mobile FFI、PTY集成通过。
+result：pass（修改前审查已完成，生产实现frozen）。
+
+## 自审
+
+每个生产变更：绑定已有历史保留、镜像消费、必要产品版本；无无关清理、配置、重试或wire机制。
+证据绑定反驳：旧lifetime或未知水位不得复用历史（现有/新增测试通过）；显式clear不得被保留策略屏蔽（通过）；desktop不能丢弃基线前的积压或双重应用（model通过）；实际controller不能在第一轮后又丢覆盖状态（两轮通过）。
+限制：手机已获授权安装并完成版本/hash/启动检查；因锁屏未做新版滚动交互复测。桌面.app已交付，安装和交互由用户稍后执行。断流缺口或新客户端仍只能重建host提供的有限尾部。2000行宽度预算变化为独立已知边界，不并入。
+未运行：4项opt-in Iroh controller测试，与本地历史重同步目标无关。
+兼容性记录：docs/version-compatibility.md列pending，避免把本地测试当作已部署证据。
+
+## 设备和清理
+
+仅创建测试终端2228f175-1d6c-48f7-82b6-b928620e6ed1（project p-d6a072cbf97f5f48，UI终端2），仅stdout测试，无业务文件写入，无业务终端输入。
+删除UI操作期间用户切到其他应用，立即停止后续触控；未宣称UI删除成功。
+随后SSH只读核查：428个进程中30个带CODUX/DMUX_TERMINAL_ID，但测试UUID匹配为0；本次测试shell已无活进程，无需kill。UI卡片状态未另确认。
+UID logcat session98919已停止；本次手机/sdcard/codux-scrollback-diagnostic.png已删除。本地/private/tmp证据保留，不上传。
+未新增headless诊断配对、未重启服务。安装和Git授权及执行见本轮Delivery Gate。
+
+## Checkpoint
+
+phase：done（源码验证和本轮授权交付完成）
+contract_state：frozen
+latest_verified：原始probe双端301/301；145 core、73 controller、20 desktop model/binding、48 Flutter、1真实PTY通过；FFI check/build通过。
+workspace：本轮提交仅包含13个预期tracked文件与本任务；824个既有untracked保留。当前main，未新增分支。提交/push范围明确授权为lan/main，实际提交对象以Git refs为准。
+next_action：无需继续源码修改；手机解锁后、桌面由用户安装后，可继续滚动行为设备验收。不得把已通过的产物/启动核验表述成已完成交互复测。
+
+## Delivery Gate
+
+state：complete
+authorization：用户明确“手机可直接adb安装，桌面app放到下载目录我稍后自己装”。目标 Android 10.10.10.40:43263 / com.duxweb.codux.sideload；desktop /Users/mac/Downloads，仅交付，不替换/启动 /Applications/Codux.app。该授权覆盖此前 out_of_scope 中 Android 安装部分，不授权提交、headless升级、配对或其他发布。
+git_authorization：用户随后明确“别忘提交和push to lan”。允许在当前 main 提交本任务预期文件，并正常推送到 lan 的对应分支；不允许force push，不纳入其他untracked文件。交付核验完成后执行。
+frozen：成立；源码与上一轮已验证diff一致，main/563bbae5，13个预期tracked修改、825个untracked，git diff --check通过。
+verification_and_review：上一轮287项测试、FFI check/build、自审及证据绑定反驳已完成；4项无关opt-in Iroh未运行。
+scope：复用 tools/local-delivery.py，构建/包产物和唯一任务记录；不修改生产实现。
+compatibility：wire、持久化、配置格式不变；Android使用同签名 -r 升级保留数据，signer不符即停止；desktop独立version beta.22，mobile beta.15+64，headless beta.19保持。旧Downloads同名不同内容由脚本保留并为新副本加hash。构建失败不影响已安装版本；不清除app数据，不降级或自动回滚。
+artifact_verification：Android检查package/versionCode64/versionName beta.15.sideload、签名、arm64 native库和安装后base.apk SHA-256；desktop最终Downloads副本检查bundle身份/版本、arm64、codesign --verify --deep --strict、可执行文件--version、目录指纹。
+commands：python3 tools/local-delivery.py android --serial 10.10.10.40:43263；python3 tools/local-delivery.py desktop。
+device_acceptance：安装后正常启动sideload并检查连接/崩溃；如手机可用，复用独立测试终端的300行+原地刷新复测，不向业务终端输入。desktop实际安装/交互由用户稍后进行，本轮不宣称完成。
+delivery_environment：desktop release编译成功（7m56s），原交付命令在hdiutil create APFS阶段报“未設定裝置”；独立16MB hdiutil临时镜像同样失败，确认为设备环境问题。用户仅要求.app：仍复用原package-gpui.mjs生成完整签名bundle，用独立自建staging保留其DMG失败前的.app，再调用tools/local-delivery.py既有deliver函数复制、核验。明确记录DMG未成功，不改打包源码或伪造成功。Android标准脚本继续执行。
+android_result：标准脚本成功，-r升级com.duxweb.codux.sideload，versionName=2.0.3-beta.15.sideload，versionCode=64，arm64-v8a。同签名核验通过；安装后base.apk SHA-256与Downloads文件一致：7cf6d0f49e30e99f8a1e3e94f089522f435e29d313a54951eef8393c51e13a4f。firstInstallTime保持2026-08-17 23:43:02，现有数据保留。APK=/Users/mac/Downloads/codux-android-2.0.3-beta.15+64-sideload-arm64.apk。arm64 ELF头检查包括新编译libcodux_protocol_ffi.so。
+android_startup：am start -W返回Status: ok，PID21079存在；观察日志无FATAL EXCEPTION/UnsatisfiedLinkError/dlopen失败。keyguard showing=true/inputRestricted=true，未解锁、未进一步触控或业务终端输入；本次安装后滚动/连接交互验收未执行。
+desktop_result：/Users/mac/Downloads/Codux-2.0.3-beta.22.app；最终副本CFBundleIdentifier=com.duxweb.codux，shortVersion=2.0.3-beta.22，--version=codux 2.0.3-beta.22，Mach-O arm64；codesign --verify --deep --strict通过，local ad-hoc签名。既有deliver目录SHA-256指纹=5de997a518f20fbc11c8a6bcc194009c242f963d2411372c7b38bb8cb7ea6bbd。未替换或打开/Applications/Codux.app。
+packaging_cleanup：第二次DMG子进程挂起，按唯一PID11563及完整自建路径验证后停止；SIGTERM未结束，SIGKILL后打包父命令退出1。完整.app在DMG之前已生成并签名，最终Downloads副本独立验证通过；不宣称DMG构建成功。
+git_result_scope：提交主题fix(remote): preserve scrollback across baseline refreshes；仅main正常提交并push lan main。推送前远端main为563bbae5603507345cc2e161c31e85ee88a9cbf6，与起点一致；不涉及origin/upstream或force push。

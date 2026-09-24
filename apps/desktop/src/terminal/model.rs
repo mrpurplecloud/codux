@@ -213,7 +213,7 @@ impl TerminalModel {
 
     fn replace_output(
         &mut self,
-        history: Vec<u8>,
+        history: codux_terminal_core::RemoteTerminalHistoryUpdate,
         screen: Vec<u8>,
         cols: usize,
         rows: usize,
@@ -225,14 +225,14 @@ impl TerminalModel {
 
     fn apply_output_replacement(
         &mut self,
-        history: Vec<u8>,
+        history: codux_terminal_core::RemoteTerminalHistoryUpdate,
         screen: Vec<u8>,
         cols: usize,
         rows: usize,
     ) {
-        // Router replacement already includes every live frame held during
-        // baseline assembly. Any older append backlog is covered by it.
-        self.pending_output_bytes.clear();
+        // A fresh baseline covers old backlog. An incremental refresh starts
+        // after it, so those accepted bytes must reach the mirror first.
+        let pending = std::mem::take(&mut self.pending_output_bytes);
         let has_pending_resize = self
             .events
             .iter()
@@ -248,8 +248,16 @@ impl TerminalModel {
         }
         {
             let mut terminal = self.handle.screen.lock();
-            terminal.clear();
-            terminal.process_replay(&history);
+            match history {
+                codux_terminal_core::RemoteTerminalHistoryUpdate::Replace(bytes) => {
+                    terminal.clear();
+                    terminal.process_replay(&bytes);
+                }
+                codux_terminal_core::RemoteTerminalHistoryUpdate::Append(bytes) => {
+                    terminal.process_replay(&pending);
+                    terminal.process_replay(&bytes);
+                }
+            }
             if !screen.is_empty() {
                 terminal.replace_visible_with_keyframe(&screen);
             }
