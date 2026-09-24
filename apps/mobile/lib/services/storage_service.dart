@@ -14,6 +14,7 @@ class StorageService {
   static const lastDeviceIdKey = 'codux.mobile.last_device_id';
   static const settingsKey = 'codux.mobile.settings';
   static const projectCachePrefix = 'codux.mobile.projects';
+  static const lastProjectIdPrefix = 'codux.mobile.last_project_id';
 
   final DeviceSnapshotStore _deviceSnapshots;
 
@@ -89,6 +90,21 @@ class StorageService {
     final value = prefs.getString(settingsKey);
     if (value == null || value.isEmpty) return null;
     return MobileSettings.fromJson(jsonDecode(value) as Map<String, dynamic>);
+  }
+
+  Future<String?> loadLastProjectId(StoredDevice device) async {
+    final prefs = await SharedPreferences.getInstance();
+    final value = prefs.getString('$lastProjectIdPrefix.${device.hostId}');
+    return value == null || value.isEmpty ? null : value;
+  }
+
+  Future<void> saveLastProjectId(StoredDevice device, String projectId) async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = await prefs.setString(
+      '$lastProjectIdPrefix.${device.hostId}',
+      projectId,
+    );
+    if (!saved) throw StateError('Failed to save last working project');
   }
 
   Future<void> saveSettings(MobileSettings settings) async {

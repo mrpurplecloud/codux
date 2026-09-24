@@ -1,0 +1,130 @@
+# 任务
+
+ID: restore-last-project
+类型：feature
+状态：done
+创建：2026-09-24
+更新：2026-09-24
+一句话描述：手机、桌面进入 Codux 时恢复上次离开前最后工作的项目窗口。
+
+## 等级
+
+grade：Guarded
+依据：跨桌面与手机产品；涉及项目选择持久化及启动恢复。
+升级触发证据：none
+
+## Active Contract
+
+state：complete
+
+### 目标
+
+重新进入手机或桌面 Codux，激活本设备上次最后工作的项目。用户已用“ok”批准独立记忆方案，连接 headless 与桌面主机均适用。手机冷启动有有效记忆时直接显示该项目工作区；前后台切换保留当前项目；无记忆保持设备首页；已删除项目沿既有列表选择规则处理。
+
+### 证据
+
+桌面 project_actions/selection.rs 已通过 RuntimeService.select_project 写入 ProjectStore.selectedProjectId；runtime_state/loaders.rs 及 app_runtime_ready 从该字段恢复，未发现本任务需要的新桌面机制。remote/host/tests/projects.rs 已明确远程选择不改变桌面选择。手机 StorageService 仅保存项目列表，bootstrap.dart 显式 _showTerminal=false；Rust restore_cached_projects 选首项，selected_project_from_list 在无 pending/session 时优先主机选择。既有 userSelectProject + pending_project_select + protocol-ready 驱动已实现本地选择优先与重发，可直接复用。基线 Flutter 68 passed，desktop startup 1 passed。
+
+### 授权变更
+
+StorageService 新增按 hostId 保存/读取最后工作项目 ID；保留原项目缓存格式。工作区进入及实际项目切换在现有 HomeController 同步点保存。启动缓存恢复借助 userSelectProject 建立 pending intent，并打开工作区。连接启动等待缓存恢复，复用现有 generation/epoch 防止过期恢复发布。只提升 mobile 版本 beta.15+64 至 beta.16+65；记录兼容性边界。桌面仅补充/运行恢复验证，不改生产行为。
+
+### 范围
+
+owner / invariant：HomeController 拥有手机工作区意图；StorageService 保存每个 host 的最后工作项目；RemoteRuntimeModel 继续独占选择/确认/重发规则。重新进入恢复最后工作项目，过期缓存读取不得覆盖更新的设备或用户选择。
+allowed_files：apps/mobile/lib/services/storage_service.dart；apps/mobile/lib/screens/home/state/{bootstrap,connection,sync,actions}.dart；apps/mobile/test/{storage_service_test,widget_test}.dart；apps/desktop/runtime/src/runtime_state/service_core_tests/project_activation.rs；apps/mobile/pubspec.yaml；docs/version-compatibility.md；本任务文件。
+out_of_scope：跨设备同步、终端/工作树会话持久化重构、项目排序、断线退出工作区的既有行为、桌面持久化并发优化、推送、用户设备安装、发布、后续构建。
+
+### 验证
+
+baseline：flutter test test/storage_service_test.dart test/remote_runtime_store_test.dart test/widget_test.dart --reporter compact，68 passed；cargo test -p codux-runtime app_runtime_ready_marks_selected_project_active_and_returns_startup_snapshots，1 passed。日志 /private/tmp/codux-last-project-baseline-{mobile,desktop}.log。Flutter SDK 缓存写受沙箱限制，升级权限后通过。
+target_check：新增 widget 测试，模拟保存非首项、重建应用、主机回传首项，断言无需点击即显示保存项目及其终端；显式切换保存、冷启动及后台恢复；无效记忆回退。新增 storage 测试验证 host 隔离、旧缓存读取、连续选择及写失败；桌面测试验证第二项目经保存和重载后仍激活。
+nearest_regression_check：上述 3 个 Flutter 文件；cargo test -p codux-runtime remote_project_select_keeps_desktop_selected_project；startup 新旧测试。
+broader_check_reason：持久化及连接启动顺序，现有 generation/epoch 防陈旧结果；移动工作区实际渲染。
+broader_checks：flutter analyze 所改 Dart 文件；Android 验证构建复用 tools/local-delivery.py android（无 --serial），不安装到用户设备。真实环境复核发现沙箱外 ADB 可访问 Honor 192.168.1.2:38417；安装验证需单独授权，设备证据未取得前不得宣称实机通过。
+
+## 当前阶段
+
+phase：implementation
+
+approval：approved
+用户最新要求：不管连接 headless 还是桌面端，都要这样；动手前确认方案。
+用户批准证据：2026-09-24，用户对最终确认方案回复“ok”；后续明确“自审无问题后提交即可”，授权本地提交，并要求不再构建。未授权推送或安装。
+
+## 需求
+
+用户可观察结果：再次进入 Codux 时自动激活上次最后工作的项目。
+
+## 验收标准
+
+1. outcome：手机重新进入后恢复最后项目。
+   verification：选择第二个项目，后台返回及重新启动分别检查。
+2. outcome：桌面重新进入后恢复最后项目窗口。
+   verification：选择非首个项目/窗口，切换应用及重启分别检查。
+
+## 非目标
+
+- 改变项目内容、终端进程、项目排序或连接协议。
+
+## 现状与差距
+
+current_behavior_or_contract：桌面恢复已持久化项目；手机启动设备页、缓存选首项、随后跟随主机。
+target_behavior：最后工作的项目优先恢复。
+gap：手机缺本设备工作项目记忆及自动进入工作区。
+evidence：见 Active Contract 证据及上述源文件。
+
+## 约束
+
+- 保留用户未跟踪文件；当前 main @ 8124f566，无已跟踪修改。
+- 按产品独立版本规则处理实际修改产品。
+
+completion：complete
+
+## Guarded Design
+
+### 现有正确路径证据
+
+examined_existing_paths：桌面 ProjectStore.select_project / load_projects / app_runtime_ready；手机 StorageService 缓存与 lastDeviceId、bootstrap、_connect、_syncRuntimeViewState、_openDeviceTerminal；Rust user_select_project 与 pending confirmation 驱动。git log 查对应文件历史，7b822f12 将手机状态职责统一；检查其 diff 未发现已有最后工作项目持久化，71d32cd9 要求缓存设备字段保持完整。
+reuse_decision：extend-existing StorageService 与缓存恢复；reuse Rust userSelectProject、pending selection、existing generation/epoch、desktop 恢复。
+decision_evidence：不新增选择算法/协议/共享状态；仅补缺失持久化与入口连接。
+
+### 设计
+
+owner：HomeController / StorageService / RemoteRuntimeModel，职责如上。
+invariant：最后工作项目按设备和 host 隔离；更新用户选择优先于陈旧恢复与主机列表。
+selected_design：上述授权变更。
+acceptance_binding：保存服务对应跨进程记忆；bootstrap 对应自动打开；userSelectProject 对应主机不覆盖；await + existing generation/epoch 对应异步恢复顺序。
+why_minimal_and_sufficient：复用现有缓存与 pending intent，未引入新状态机、FFI 或额外选择 owner。
+alternatives：跨设备共享主机 selectedProjectId 已存在，但违反独立记忆及 desktop remote scope 既有契约，排除。
+interface：仅新增手机内部存取方法，无 wire/FFI 修改。
+data_model：新增可选 preference key，hostId 作用域；原列表缓存/配对数据不修改格式。
+compatibility：无新字段时保持原首次启动；desktop/headless 不需要升级。
+migration：无需数据迁移；旧键仍可读。
+feature_flag：none。
+rollback：回退手机代码/版本，新 preference 无破坏性影响。
+verification_only：缓存读取与重连/用户选择竞争；保存失败；未连接真实手机。
+out_of_scope：同 Active Contract。
+
+### 修改前方案审查
+
+existing_path_check：pass；新存取仅补持久化缺口，选择仍由 Rust pending 机制负责。
+owner_and_evidence：pass；移动入口和保存缺失有直接代码证据。
+semantic_scope：pass；桌面仅验证，手机仅恢复项目工作区，不扩终端恢复。
+verification_power：pass；整页重建加假主机验证可观察工作区、选择与终端绑定，平台检查单列证据边界。
+result：pass
+
+## Checkpoint
+
+latest_verified：最终 Flutter 三文件 76 passed；desktop startup 1、remote scope 1、headless selection 1 passed；最终 flutter analyze 无问题；git diff --check 通过。Android 构建在用户新指令前完成，APK 位于 Downloads，未安装。用户要求自审后本地提交，不再构建或安装；设备验收依此延后。
+contract_state：complete
+active_capability：none
+next_action：仅将本任务相关文件在当前 main 本地提交，向用户报告 commit。设备验收留待用户后续安排；不推送。
+
+## 最终自审
+
+目标绑定：5 个手机生产文件仅补保存、恢复、启动顺序与工作区入口；mobile 版本独立递增；desktop 仅加回归测试，既有正确路径保持复用。
+边界检查：无新 wire/FFI/host 机制，无迁移或缓存格式重写；空记忆仍走原启动路径；写失败抛错并在 UI 状态与日志可见；未碰其他 bug 任务及未跟踪文件。
+caller 检查：_restoreCachedProjects 三处调用均显式 await；_connect 的 UI、启动、前台与重试入口仍由同一连接 generation 管理；_rememberWorkingProject 仅工作区打开和项目实际变更触发。
+证据绑定反驳：headless 实际 catalog snapshot 使用 selectedProjectId=None，故 widget 验证 null 与 desktop 非空两种形态；快速 A/B/A 主机切换检查仅最新主机创建 transport；删除/空列表检查沿原 owner 回退；保存后重建 App 与 SharedPreferences 实例验证非内存假恢复。均通过，未发现阻断问题。
+剩余限制：未完成手机真实进程重启/前后台与安装产品组合验收；用户已要求本次只自审和提交。已有独立 scrollback/takeover bug 不纳入本任务。
+验证日志：/private/tmp/codux-last-project-final-tests.log；/private/tmp/codux-last-project-final-analyze.log；/private/tmp/codux-last-project-desktop-target.log；/private/tmp/codux-last-project-desktop-regression.log；/private/tmp/codux-last-project-headless-check.log。

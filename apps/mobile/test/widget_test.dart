@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:codux_protocol_ffi/codux_protocol_ffi.dart';
 import 'package:codux_flutter/main.dart';
@@ -13,13 +13,324 @@ import 'package:codux_flutter/services/log_service.dart';
 import 'package:codux_flutter/services/remote_protocol.dart';
 import 'package:codux_flutter/services/remote_protocol_service.dart';
 import 'package:codux_flutter/services/remote_transport.dart';
+import 'package:codux_flutter/services/storage_service.dart';
 import 'package:codux_flutter/theme/app_theme.dart';
 import 'package:codux_flutter/widgets/components/device_home_screen.dart';
 import 'package:codux_flutter/widgets/components/remote_terminal_pane.dart';
 import 'package:codux_flutter/widgets/components/self_drawn_terminal_view.dart';
+import 'package:codux_flutter/widgets/phone/remote_workspace_view.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 void main() {
+  setUp(() => SharedPreferences.setMockInitialValues({}));
+
+  for (final hostSelectedProjectId in <String?>[null, 'project-1']) {
+    testWidgets(
+      'startup restores the last working project before host selection ($hostSelectedProjectId)',
+      (WidgetTester tester) async {
+        final device = await _fakeDevice();
+        const projects = [
+          {'id': 'project-1', 'name': 'Project 1', 'path': '/tmp/p1'},
+          {'id': 'project-2', 'name': 'Project 2', 'path': '/tmp/p2'},
+        ];
+        SharedPreferences.setMockInitialValues({
+          'codux.mobile.projects.${device.hostId}': jsonEncode(projects),
+          'codux.mobile.last_project_id.${device.hostId}': 'project-2',
+        });
+        void onSent(
+          _FakeRemoteTransport transport,
+          Map<String, dynamic> envelope,
+        ) {
+          if (envelope['type'] == 'host.info') {
+            transport.emitEncrypted(
+              RelayEnvelope(
+                type: 'project.list',
+                payload: {
+                  'selectedProjectId': hostSelectedProjectId,
+                  'projects': projects,
+                },
+              ),
+            );
+            transport.emitEncrypted(
+              RelayEnvelope(
+                type: 'terminal.list',
+                payload: {'terminals': _terminalListForProject('project-2')},
+              ),
+            );
+            transport.emitEncrypted(
+              RelayEnvelope(type: 'host.info', payload: _hostInfoPayload()),
+            );
+          }
+          if (envelope['type'] == 'project.select') {
+            transport.emitEncrypted(
+              RelayEnvelope(
+                type: 'project.selected',
+                payload: {
+                  'projectId': (envelope['payload'] as Map)['projectId'],
+                },
+              ),
+            );
+          }
+        }
+
+        final fake = _FakeRemoteTransport(device: device, onSent: onSent);
+
+        await tester.pumpWidget(
+          CoduxFlutterApp(
+            initialDevices: [device],
+            transportFactory: (_) => fake,
+          ),
+        );
+        await tester.pumpAndSettle(const Duration(milliseconds: 200));
+
+        final workspace = tester.widget<RemoteWorkspaceView>(
+          find.byType(RemoteWorkspaceView),
+        );
+        expect(workspace.selectedProjectId, 'project-2');
+        expect(workspace.activeTerminalId, 'session-2');
+
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.inactive,
+        );
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        await tester.pump();
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.inactive,
+        );
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.resumed,
+        );
+        await tester.pumpAndSettle(const Duration(milliseconds: 200));
+        expect(
+          tester
+              .widget<RemoteWorkspaceView>(find.byType(RemoteWorkspaceView))
+              .selectedProjectId,
+          'project-2',
+        );
+
+        await _tapProjectTab(tester, 'Project 1');
+        await tester.pumpAndSettle(const Duration(milliseconds: 200));
+        final prefs = await SharedPreferences.getInstance();
+        expect(
+          prefs.getString('codux.mobile.last_project_id.${device.hostId}'),
+          'project-1',
+        );
+
+        // Recreate the app through its real saved-device bootstrap, with fresh
+        // runtime/transport state and preferences read back from the store.
+        await prefs.setString(
+          'codux.mobile.devices',
+          jsonEncode([device.toJson()]),
+        );
+        await prefs.setString('codux.mobile.last_device_id', device.deviceId);
+        await tester.pumpWidget(const SizedBox.shrink());
+        SharedPreferences.resetStatic();
+        final storage = StorageService();
+        expect(await storage.loadLastDeviceId(), device.deviceId);
+        expect(await storage.loadLastProjectId(device), 'project-1');
+        expect(await storage.loadCachedProjects(device), hasLength(2));
+        expect((await storage.initializeDevices()).devices, hasLength(1));
+        const deviceInfoChannel = MethodChannel(
+          'dev.fluttercommunity.plus/device_info',
+        );
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          deviceInfoChannel,
+          (_) async => throw PlatformException(code: 'unavailable'),
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            deviceInfoChannel,
+            null,
+          ),
+        );
+        await tester.pumpWidget(
+          CoduxFlutterApp(
+            transportFactory: (target) =>
+                _FakeRemoteTransport(device: target, onSent: onSent),
+          ),
+        );
+        await tester.pumpAndSettle(const Duration(milliseconds: 200));
+        await tester.pump(const Duration(milliseconds: 200));
+        final reopened = tester.widget<RemoteWorkspaceView>(
+          find.byType(RemoteWorkspaceView),
+        );
+        expect(reopened.selectedProjectId, 'project-1');
+        expect(reopened.activeTerminalId, 'session-1');
+      },
+    );
+  }
+
+  for (final remainingProjects in [1, 0]) {
+    testWidgets(
+      'startup drops a deleted last project with $remainingProjects remaining',
+      (WidgetTester tester) async {
+        final device = await _fakeDevice();
+        const projects = [
+          {'id': 'project-1', 'name': 'Project 1', 'path': '/tmp/p1'},
+          {'id': 'project-2', 'name': 'Project 2', 'path': '/tmp/p2'},
+        ];
+        SharedPreferences.setMockInitialValues({
+          'codux.mobile.projects.${device.hostId}': jsonEncode(projects),
+          'codux.mobile.last_project_id.${device.hostId}': 'project-2',
+        });
+        final fake = _FakeRemoteTransport(
+          device: device,
+          onSent: (transport, envelope) {
+            if (envelope['type'] != 'host.info') return;
+            transport.emitEncrypted(
+              RelayEnvelope(
+                type: 'project.list',
+                payload: {
+                  'selectedProjectId': 'project-1',
+                  'projects': projects.take(remainingProjects).toList(),
+                },
+              ),
+            );
+            transport.emitEncrypted(
+              RelayEnvelope(
+                type: 'terminal.list',
+                payload: {
+                  'terminals': remainingProjects == 0
+                      ? <Object>[]
+                      : _terminalListForProject('project-1'),
+                },
+              ),
+            );
+            transport.emitEncrypted(
+              RelayEnvelope(type: 'host.info', payload: _hostInfoPayload()),
+            );
+          },
+        );
+        await tester.pumpWidget(
+          CoduxFlutterApp(
+            initialDevices: [device],
+            transportFactory: (_) => fake,
+          ),
+        );
+        await tester.pumpAndSettle(const Duration(milliseconds: 200));
+        await tester.pump(const Duration(milliseconds: 200));
+
+        final workspace = tester.widget<RemoteWorkspaceView>(
+          find.byType(RemoteWorkspaceView),
+        );
+        expect(workspace.projects, hasLength(remainingProjects));
+        expect(
+          workspace.selectedProjectId,
+          remainingProjects == 0 ? isNull : 'project-1',
+        );
+        expect(
+          workspace.activeTerminalId,
+          remainingProjects == 0 ? isNull : 'session-1',
+        );
+      },
+    );
+  }
+
+  testWidgets('switching hosts restores each host last working project', (
+    WidgetTester tester,
+  ) async {
+    final desktop = await _fakeDevice();
+    final headless = StoredDevice(
+      server: desktop.server,
+      hostId: 'headless-host',
+      deviceId: 'headless-phone',
+      token: desktop.token,
+      name: 'Headless',
+      transports: desktop.transports,
+    );
+    const projects = [
+      {'id': 'project-1', 'name': 'Project 1', 'path': '/tmp/p1'},
+      {'id': 'project-2', 'name': 'Project 2', 'path': '/tmp/p2'},
+    ];
+    SharedPreferences.setMockInitialValues({
+      for (final host in [desktop, headless])
+        'codux.mobile.projects.${host.hostId}': jsonEncode(projects),
+      'codux.mobile.last_project_id.${desktop.hostId}': 'project-2',
+      'codux.mobile.last_project_id.${headless.hostId}': 'project-1',
+    });
+    final connections = <String>[];
+    await tester.pumpWidget(
+      CoduxFlutterApp(
+        initialDevices: [desktop, headless],
+        transportFactory: (device) => _FakeRemoteTransport(
+          device: device,
+          onConnect: (device) => connections.add(device.hostId),
+          onSent: (transport, envelope) {
+            if (envelope['type'] != 'host.info') return;
+            transport.emitEncrypted(
+              const RelayEnvelope(
+                type: 'project.list',
+                payload: {'projects': projects},
+              ),
+            );
+            transport.emitEncrypted(
+              RelayEnvelope(
+                type: 'terminal.list',
+                payload: {'terminals': _terminalListForProject('project-2')},
+              ),
+            );
+            transport.emitEncrypted(
+              RelayEnvelope(type: 'host.info', payload: _hostInfoPayload()),
+            );
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle(const Duration(milliseconds: 200));
+
+    for (final (device, expected) in [
+      (headless, 'project-1'),
+      (desktop, 'project-2'),
+    ]) {
+      tester
+          .widget<RemoteWorkspaceView>(find.byType(RemoteWorkspaceView))
+          .onBack();
+      await tester.pumpAndSettle();
+      tester
+          .widget<DeviceHomeScreen>(find.byType(DeviceHomeScreen))
+          .onConnect(device);
+      await tester.pumpAndSettle(const Duration(milliseconds: 200));
+      tester
+          .widget<DeviceHomeScreen>(find.byType(DeviceHomeScreen))
+          .onOpen(device);
+      await tester.pumpAndSettle(const Duration(milliseconds: 200));
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(
+        tester
+            .widget<RemoteWorkspaceView>(find.byType(RemoteWorkspaceView))
+            .selectedProjectId,
+        expected,
+      );
+    }
+
+    // A superseded cache read must not start its transport or overwrite the
+    // newer host's restored selection.
+    tester
+        .widget<RemoteWorkspaceView>(find.byType(RemoteWorkspaceView))
+        .onBack();
+    await tester.pumpAndSettle();
+    final home = tester.widget<DeviceHomeScreen>(find.byType(DeviceHomeScreen));
+    final before = connections.length;
+    home.onConnect(headless);
+    home.onConnect(desktop);
+    await tester.pumpAndSettle(const Duration(milliseconds: 200));
+    expect(connections.skip(before), [desktop.hostId]);
+    tester
+        .widget<DeviceHomeScreen>(find.byType(DeviceHomeScreen))
+        .onOpen(desktop);
+    await tester.pumpAndSettle(const Duration(milliseconds: 200));
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(
+      tester
+          .widget<RemoteWorkspaceView>(find.byType(RemoteWorkspaceView))
+          .selectedProjectId,
+      'project-2',
+    );
+  });
+
   testWidgets('Codux app boots', (WidgetTester tester) async {
     await tester.pumpWidget(const CoduxFlutterApp());
     await tester.pump();

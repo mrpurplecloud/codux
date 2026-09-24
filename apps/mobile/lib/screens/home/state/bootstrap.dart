@@ -17,7 +17,7 @@ extension _HomePageBootstrap on HomeController {
         _showTerminal = false;
       });
       if (initialDevices.isNotEmpty) {
-        unawaited(_restoreCachedProjects(initialDevices.first));
+        await _restoreCachedProjects(initialDevices.first, openWorkspace: true);
         _scheduleStartupConnect(initialDevices.first);
       }
       return;
@@ -61,7 +61,7 @@ extension _HomePageBootstrap on HomeController {
     });
     final autoConnectDevice = startupDevice.autoConnectDevice;
     if (autoConnectDevice != null) {
-      unawaited(_restoreCachedProjects(autoConnectDevice));
+      await _restoreCachedProjects(autoConnectDevice, openWorkspace: true);
       _scheduleStartupConnect(autoConnectDevice);
     }
   }
@@ -77,18 +77,43 @@ extension _HomePageBootstrap on HomeController {
     });
   }
 
-  Future<void> _restoreCachedProjects(StoredDevice device) async {
+  Future<void> _restoreCachedProjects(
+    StoredDevice device, {
+    bool openWorkspace = false,
+  }) async {
+    if (_projects.isNotEmpty) return;
+    final epoch = _remoteRuntimeEpoch;
     try {
       final cached = await _storage.loadCachedProjects(device);
+      final lastProjectId = await _storage.loadLastProjectId(device);
       if (!mounted ||
+          _disposing ||
+          epoch != _remoteRuntimeEpoch ||
           _activeDevice?.hostId != device.hostId ||
+          _activeDevice?.deviceId != device.deviceId ||
           cached.isEmpty ||
           _projects.isNotEmpty) {
         return;
       }
       _remoteRuntime.restoreCachedProjects(cached);
+      final lastProject = cached
+          .where((project) => project.id == lastProjectId)
+          .firstOrNull;
+      // Restoring is local selection intent. The existing pending-selection
+      // driver sends it once the connection is ready and rejects stale lists.
+      final plan = lastProject == null
+          ? null
+          : _remoteRuntime.userSelectProject(
+              project: lastProject,
+              terminalVisible: false,
+            );
       _applyState(() {
-        _syncRuntimeViewState();
+        if (openWorkspace && lastProject != null) _showTerminal = true;
+        if (plan == null) {
+          _syncRuntimeViewState();
+        } else {
+          _applyRuntimePlan(plan, reason: 'restore-last-project');
+        }
       });
       CoduxLog.info(
         '[codux-flutter-projects] cache restored count=${cached.length} host=${device.hostId}',

@@ -288,9 +288,13 @@ extension _HomePageSync on HomeController {
   }
 
   void _syncRuntimeViewState() {
+    final previousProjectId = _selectedProjectId;
     _projects = _remoteRuntime.projects;
     _terminals = _remoteRuntime.terminals;
     _selectedProjectId = _remoteRuntime.selectedProjectId;
+    if (_selectedProjectId != previousProjectId) {
+      unawaited(_rememberWorkingProject());
+    }
     final nextSessionId = _remoteRuntime.activeSessionId;
     if (nextSessionId != _terminalActivation?.sessionId) {
       _terminalActivation = nextSessionId == null
@@ -347,6 +351,22 @@ extension _HomePageSync on HomeController {
       await _storage.saveCachedProjects(device, projects);
     } catch (error) {
       CoduxLog.warn('[codux-flutter-projects] cache save failed: $error');
+    }
+  }
+
+  Future<void> _rememberWorkingProject() async {
+    final device = _activeDevice;
+    final projectId = _selectedProjectId;
+    if (!_showTerminal || device == null || projectId == null) return;
+    try {
+      await _storage.saveLastProjectId(device, projectId);
+    } catch (error) {
+      CoduxLog.warn(
+        '[codux-flutter-projects] last project save failed: $error',
+      );
+      if (mounted) {
+        _applyState(() => _status = '${_t('remote.error')}: $error');
+      }
     }
   }
 

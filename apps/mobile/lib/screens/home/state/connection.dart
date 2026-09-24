@@ -637,7 +637,7 @@ extension _HomePageConnection on HomeController {
     _flushTerminalInput();
   }
 
-  void _connect([StoredDevice? device, bool background = false]) {
+  Future<void> _connect([StoredDevice? device, bool background = false]) async {
     final target = device ?? _activeDevice;
     if (target == null) {
       _applyState(() => _showScanner = true);
@@ -726,7 +726,13 @@ extension _HomePageConnection on HomeController {
       }
       _activeDevice = target;
     });
-    unawaited(_restoreCachedProjects(target));
+    await _restoreCachedProjects(target);
+    if (!mounted ||
+        _disposing ||
+        generation != _transportGeneration ||
+        !_shouldReconnect) {
+      return;
+    }
     if (!_hasConnectableTransport(target)) {
       _applyState(() => _status = _t('pair.repairRequired'));
       return;

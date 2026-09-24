@@ -1,4 +1,52 @@
 #[test]
+fn startup_restores_last_working_project_after_reload() {
+    for hosted in [false, true] {
+        let support_dir = std::env::temp_dir().join(format!(
+            "codux-restore-last-project-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let project_dir = support_dir.join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        fs::write(
+            support_dir.join("state.json"),
+            json!({
+                "projects": [
+                    { "id": "first", "name": "First", "path": project_dir },
+                    {
+                        "id": "last", "name": "Last", "path": project_dir,
+                        "runtimeTarget": if hosted {
+                            json!({ "kind": "remote", "deviceId": "headless-host" })
+                        } else {
+                            json!({ "kind": "local" })
+                        }
+                    }
+                ],
+                "selectedProjectId": "first"
+            })
+            .to_string(),
+        )
+        .expect("write projects");
+
+        ProjectStore::new(support_dir.clone())
+            .select_project("last")
+            .expect("persist last working project");
+        let service = RuntimeService::new(support_dir.clone());
+        let state = service.reload_state();
+        assert_eq!(
+            state.selected_project.as_ref().map(|p| p.id.as_str()),
+            Some("last")
+        );
+        let ready = service.app_runtime_ready(true, true);
+        assert_eq!(ready.projects.selected_project_id.as_deref(), Some("last"));
+        assert_eq!(
+            ready.project_activity.active_project_id.as_deref(),
+            Some("last")
+        );
+        let _ = fs::remove_dir_all(support_dir);
+    }
+}
+
+#[test]
 fn app_runtime_ready_marks_selected_project_active_and_returns_startup_snapshots() {
     let support_dir =
         std::env::temp_dir().join(format!("codux-runtime-ready-{}", uuid::Uuid::new_v4()));

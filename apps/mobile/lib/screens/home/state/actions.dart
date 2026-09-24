@@ -51,6 +51,7 @@ extension _HomePageActions on HomeController {
         _workspaceMode = WorkspaceMode.terminal;
         _terminalReady = false;
         _setTerminalBufferLoading(false);
+        unawaited(_rememberWorkingProject());
       }).then((_) {
         if (!mounted) return;
         _ensureTerminalForSelectedProject();
