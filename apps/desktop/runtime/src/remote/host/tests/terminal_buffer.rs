@@ -569,7 +569,9 @@ fn desktop_refresh_baseline_does_not_split_pending_ansi_output() {
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut bytes = Vec::new();
         while Instant::now() < deadline && !bytes.windows(needle.len()).any(|w| w == needle) {
-            if let Ok(chunk) = output.recv_timeout(Duration::from_millis(20)) {
+            if let Ok(codux_terminal_core::TerminalOutputEvent::Append(chunk)) =
+                output.recv_timeout(Duration::from_millis(20))
+            {
                 bytes.extend(chunk);
             }
         }

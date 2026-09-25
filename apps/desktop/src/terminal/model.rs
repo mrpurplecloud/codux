@@ -119,7 +119,7 @@ impl TerminalModel {
             ..TerminalScreenSnapshot::default()
         });
         let reader_task = cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            while let Some(event) = output_rx.recv().await {
+            while let Ok(event) = output_rx.recv_async().await {
                 if this
                     .update(cx, |model, cx| model.receive_output_event(event, cx))
                     .is_err()

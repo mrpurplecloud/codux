@@ -90,7 +90,7 @@ impl TerminalPane {
             TerminalView::new(
                 TerminalViewInput {
                     stdin_writer: writer,
-                    output_rx: TerminalOutputReceiver::Bytes(output_rx),
+                    output_rx,
                     session_event_rx,
                     session_event_wake_rx,
                     session: session.clone(),
@@ -152,7 +152,7 @@ impl TerminalPane {
             TerminalView::new(
                 TerminalViewInput {
                     stdin_writer: writer,
-                    output_rx: TerminalOutputReceiver::Events(output_rx),
+                    output_rx,
                     session_event_rx,
                     session_event_wake_rx,
                     session: session.clone(),
@@ -240,7 +240,7 @@ impl TerminalPane {
         let output_terminal_id = terminal_id.clone().unwrap_or_else(|| attached_id.clone());
         codux_runtime::async_runtime::spawn(async move {
             let mut first_output = true;
-            while let Ok(bytes) = output_rx.recv_async().await {
+            while let Ok(event) = output_rx.recv_async().await {
                 if first_output {
                     first_output = false;
                     codux_runtime::runtime_trace::runtime_trace(
@@ -248,12 +248,22 @@ impl TerminalPane {
                         &format!(
                             "first_output terminal_id={} bytes={} attach_total_ms={}",
                             output_terminal_id,
-                            bytes.len(),
+                            match &event {
+                                TerminalOutputEvent::Append(bytes) => bytes.len(),
+                                TerminalOutputEvent::Replace { history, .. } => match history {
+                                    codux_terminal_core::RemoteTerminalHistoryUpdate::Replace(
+                                        bytes,
+                                    )
+                                    | codux_terminal_core::RemoteTerminalHistoryUpdate::Append(
+                                        bytes,
+                                    ) => bytes.len(),
+                                },
+                            },
                             attach_total_started_at.elapsed().as_millis()
                         ),
                     );
                 }
-                if output_tx.send_async(TerminalOutputEvent::Append(bytes)).await.is_err() {
+                if output_tx.send_async(event).await.is_err() {
                     break;
                 }
             }
@@ -511,33 +521,7 @@ enum ViewportOwnershipState {
     Unknown,
 }
 
-enum TerminalOutputEvent {
-    Append(Vec<u8>),
-    Replace {
-        history: codux_terminal_core::RemoteTerminalHistoryUpdate,
-        screen: Vec<u8>,
-        cols: usize,
-        rows: usize,
-    },
-}
-
-enum TerminalOutputReceiver {
-    Bytes(flume::Receiver<Vec<u8>>),
-    Events(flume::Receiver<TerminalOutputEvent>),
-}
-
-impl TerminalOutputReceiver {
-    async fn recv(&self) -> Option<TerminalOutputEvent> {
-        match self {
-            Self::Bytes(receiver) => receiver
-                .recv_async()
-                .await
-                .ok()
-                .map(TerminalOutputEvent::Append),
-            Self::Events(receiver) => receiver.recv_async().await.ok(),
-        }
-    }
-}
+type TerminalOutputReceiver = flume::Receiver<TerminalOutputEvent>;
 
 #[derive(Clone, Copy)]
 enum HostedViewportCommand {

@@ -159,7 +159,10 @@ impl TerminalManager {
         config: TerminalPtyConfig,
         context: Option<&TerminalLaunchContext>,
         emit: EventSink,
-    ) -> Result<(Arc<TerminalPtySession>, flume::Receiver<Vec<u8>>)> {
+    ) -> Result<(
+        Arc<TerminalPtySession>,
+        flume::Receiver<TerminalOutputEvent>,
+    )> {
         self.attach_or_create_with_context_internal(config, context, None, emit)
     }
 
@@ -169,7 +172,10 @@ impl TerminalManager {
         context: Option<&TerminalLaunchContext>,
         event_key: impl Into<String>,
         emit: EventSink,
-    ) -> Result<(Arc<TerminalPtySession>, flume::Receiver<Vec<u8>>)> {
+    ) -> Result<(
+        Arc<TerminalPtySession>,
+        flume::Receiver<TerminalOutputEvent>,
+    )> {
         self.attach_or_create_with_context_internal(config, context, Some(event_key.into()), emit)
     }
 
@@ -179,7 +185,10 @@ impl TerminalManager {
         context: Option<&TerminalLaunchContext>,
         event_key: Option<String>,
         emit: EventSink,
-    ) -> Result<(Arc<TerminalPtySession>, flume::Receiver<Vec<u8>>)> {
+    ) -> Result<(
+        Arc<TerminalPtySession>,
+        flume::Receiver<TerminalOutputEvent>,
+    )> {
         ensure_terminal_id(&mut config, context);
         let requested_id = config
             .terminal_id

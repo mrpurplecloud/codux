@@ -193,7 +193,7 @@ fn terminal_manager_reuses_session_and_broadcasts_to_subscribers() {
 }
 #[cfg(unix)]
 #[test]
-fn reattach_appends_keyframe_only_for_alt_screen_session() {
+fn reattach_keeps_keyframe_separate_from_raw_output() {
     let manager = TerminalManager::new();
     let emit: EventSink = Arc::new(|_| true);
     let config = TerminalPtyConfig {
@@ -210,7 +210,7 @@ fn reattach_appends_keyframe_only_for_alt_screen_session() {
         .expect("terminal should start");
 
     // Normal screen: a re-attach replays only the raw history; it never
-    // appends the keyframe (identified by its cursor-hide repaint prefix).
+    // carries a separate keyframe (identified by its cursor-hide repaint prefix).
     session
         .write(b"normal-line\n")
         .expect("write should succeed");
@@ -235,17 +235,96 @@ fn reattach_appends_keyframe_only_for_alt_screen_session() {
     }
     assert!(session.screen_snapshot().input_mode.alternate_screen);
 
-    // Alt screen: the re-attach replay now carries the live keyframe, so the
-    // current screen and its alt-screen mode are reconstructed even though
-    // the alternate buffer never reached the raw history.
+    // Alt screen: the current grid is carried separately from the raw replay.
+    // A retained tail can begin after the original alternate-screen entry.
     let (_alt_session, alt_rx) = manager
         .attach_or_create_with_context(config, None, emit)
         .expect("terminal should attach");
-    let alt_replay = recv_until_contains(&alt_rx, "\x1b[?25l", Duration::from_secs(2));
-    assert!(alt_replay.contains("\x1b[?25l"));
-    assert!(alt_replay.contains("\x1b[?1049h"));
+    let TerminalOutputEvent::Replace {
+        history,
+        screen,
+        cols,
+        rows,
+    } = alt_rx.recv_timeout(Duration::from_secs(2)).unwrap()
+    else {
+        panic!("reattach must begin with a separate baseline");
+    };
+    let codux_terminal_core::RemoteTerminalHistoryUpdate::Replace(raw) = history else {
+        panic!("initial baseline must replace history");
+    };
+    assert!(!String::from_utf8_lossy(&raw).contains("\x1b[?25l"));
+    let mut mirror = HeadlessTerminalScreen::new(cols, rows, 100);
+    // Even without raw history, the keyframe must reconstruct the current TUI.
+    mirror.replace_visible_with_keyframe(&screen);
+    let snapshot = mirror.snapshot();
+    assert!(snapshot.input_mode.alternate_screen);
+    assert!(snapshot.data.contains("ALT_SCREEN_MARKER"));
 
     let _ = session.kill();
+}
+
+#[cfg(unix)]
+#[test]
+fn reattach_during_synchronized_repaint_preserves_history() {
+    let manager = TerminalManager::new();
+    let emit: EventSink = Arc::new(|_| true);
+    let config = TerminalPtyConfig {
+        terminal_id: Some(format!("test-sync-reattach-{}", Uuid::new_v4())),
+        shell: Some("/bin/sh".to_string()),
+        command: Some(
+            concat!(
+                "stty -echo; ",
+                "i=0; while [ $i -lt 300 ]; do printf 'history-%04d\\r\\n' $i; i=$((i+1)); done; ",
+                "printf '\\033[?1049h\\033[HPREVIEW'; read ready; ",
+                "printf '\\033[?2026h\\033[?1049l\\033[H\\033[3Jhistory-0000\\r\\n'; read resume; ",
+                "i=1; while [ $i -lt 300 ]; do printf 'history-%04d\\r\\n' $i; i=$((i+1)); done; ",
+                "printf '\\033[?2026l'; read hold"
+            )
+            .to_string(),
+        ),
+        cols: Some(82),
+        rows: Some(41),
+        scrollback_lines: Some(2000),
+        ..Default::default()
+    };
+    let (session, first) = manager
+        .attach_or_create_with_context(config.clone(), None, emit.clone())
+        .unwrap();
+    assert!(recv_until_contains(&first, "PREVIEW", Duration::from_secs(5)).contains("PREVIEW"));
+    session.write(b"\n").unwrap();
+    assert!(
+        recv_until_contains(&first, "\x1b[?2026h", Duration::from_secs(5)).contains("\x1b[?2026h")
+    );
+    let (_, output) = manager
+        .attach_or_create_with_context(config, None, emit)
+        .unwrap();
+    let TerminalOutputEvent::Replace {
+        history,
+        screen,
+        cols,
+        rows,
+    } = output.recv_timeout(Duration::from_secs(2)).unwrap()
+    else {
+        panic!("missing initial baseline");
+    };
+    let codux_terminal_core::RemoteTerminalHistoryUpdate::Replace(raw) = history else {
+        panic!("initial baseline must replace history");
+    };
+    let mut mirror = HeadlessTerminalScreen::new(cols, rows, 2000);
+    mirror.process_replay(&raw);
+    mirror.replace_visible_with_keyframe(&screen);
+    session.write(b"\n").unwrap();
+    let continuation = recv_until_contains(&output, "\x1b[?2026l", Duration::from_secs(5));
+    assert!(continuation.contains("\x1b[?2026l"));
+    mirror.process(continuation.as_bytes());
+    let actual = mirror.snapshot();
+    let expected = session.screen_snapshot();
+    let _ = session.kill();
+    assert!(!actual.input_mode.alternate_screen);
+    assert_eq!(actual.total_lines, expected.total_lines);
+    assert_eq!(actual.cells, expected.cells);
+    mirror.scroll_lines(2000);
+    assert!(mirror.snapshot().data.contains("history-0000"));
 }
 #[cfg(unix)]
 #[test]

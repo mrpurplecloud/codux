@@ -11,13 +11,26 @@ mod osc;
 mod viewport;
 
 #[cfg(unix)]
-fn recv_until_contains(rx: &flume::Receiver<Vec<u8>>, needle: &str, timeout: Duration) -> String {
+fn recv_until_contains(
+    rx: &flume::Receiver<TerminalOutputEvent>,
+    needle: &str,
+    timeout: Duration,
+) -> String {
     let deadline = Instant::now() + timeout;
     let mut text = String::new();
     while Instant::now() < deadline && !text.contains(needle) {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(remaining.min(Duration::from_millis(100))) {
-            Ok(bytes) => text.push_str(&String::from_utf8_lossy(&bytes)),
+            Ok(event) => {
+                let bytes = match event {
+                    TerminalOutputEvent::Append(bytes) => bytes,
+                    TerminalOutputEvent::Replace { history, .. } => match history {
+                        codux_terminal_core::RemoteTerminalHistoryUpdate::Replace(bytes)
+                        | codux_terminal_core::RemoteTerminalHistoryUpdate::Append(bytes) => bytes,
+                    },
+                };
+                text.push_str(&String::from_utf8_lossy(&bytes));
+            }
             Err(flume::RecvTimeoutError::Timeout) => {}
             Err(flume::RecvTimeoutError::Disconnected) => break,
         }

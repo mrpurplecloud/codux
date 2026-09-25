@@ -1,0 +1,133 @@
+# 任务
+
+ID: scrollback-shrinks-recurrence
+类型：bug
+状态：delivery（源码已冻结；用户授权提交、push lan、Android安装及macOS下载目录交付）
+创建：2026-09-24
+更新：2026-09-24
+一句话描述：桌面和移动窗口滚动历史再次自动变短，当前移动 NAS Library 项目「终端1」为现场。
+
+## 等级
+
+grade：Guarded
+依据：用户授权先修已复现的快照污染原始解析器缺陷；跨共享核心、桌面绑定和内部输出类型，涉及异步输出连续性。本次历史事故是否还有其他根因保留未证实。
+升级触发证据：none
+
+## Active Contract
+
+state：frozen
+
+### 目标
+
+修复已复现的单一因果单元：快照不得进入未结束的PTY原始解析流。移动/远程桌面baseline刷新与本地桌面attach后，拆分CSI和DEC2026重绘必须继续正确退出备用屏、保留全部历史，后续输出继续增长。用户本轮明确“这个缺陷先得修，我再看是否还有问题”；不声称NAS事故全部原因已经证实。
+
+### 证据
+
+- 用户报告两个客户端均再次发生；移动 NAS Library「终端1」刚被缩短。
+- 当前 main / 8124f566；唯一注册 worktree 为当前仓库；tracked 干净，原有大量 untracked 保留。
+- HEAD 为上次 baseline refresh 历史保留修复；历史记录的交付为 desktop beta.22、mobile beta.15+64、headless beta.19。当前实际运行版本待核实。
+- ADB 初次沙箱启动失败：could not install *smartsocket* listener: Operation not permitted，属于基础设施，尚非复现。
+- 当前本机 /Applications/Codux.app plist 为 2.0.3-beta.22，运行 PID 91356 对应该路径。NAS Library 为本机项目 c034e317-1bfe-5cf9-ab89-a826fab05611；现场 session=gpui-term-c034e317-1bfe-5cf9-ab89-a826fab05611-8d7fa1d4-eca2-48bb-b5d9-37f8b2d0b0ad，由本机 desktop host 发给手机。
+- 用户当前指定 ADB 192.168.1.2:45883。Mac Wi-Fi=192.168.1.3；ping 2/2 成功，nc 端口返回 Connection refused。初始 adb connect 重复 No route to host；无已连接设备时重启本机 ADB 服务后同端口返回 Connection refused。未读到手机当前版本/日志，未操作业务终端。
+- 本机 settings.json terminalScrollbackLines=2000。NAS host 日志 15:14:14、15:14:15、15:15:56、15:17:55、15:17:58、15:18:51 存在 baseline_send，伴随 viewport.resize。日志 chars 是 retained buffer_length，不是单调 bufferEnd，也不是历史行数；不能据其 784106 至 784096 的变化宣称正文丢失。
+- 原独立非交付 probe 在当前未修改源码运行成功：cargo run --offline --manifest-path /private/tmp/codux-scrollback-diagnosis/Cargo.toml。连续同水位 refresh 后 host/mobile/desktop 都保持 301/301；192000 字符尾部 refresh 301/301；300 行在 39、82、150 列变换均保留最早行。上次修复的控制实验未复发。
+- 同 probe 的另一实验稳定复现宽度容量收缩：150x41、scrollback=2000，变窄至39列后输出3000条短硬行，再变宽150列，总行数从3001降为2041。first-wrong（仅此合成实验）为 HeadlessTerminalScreen worker apply_scrollback_budget 在变宽后将临时放大的容量缩回2000；短硬行无法通过 reflow 减少行数，set_options 裁剪历史。尚未证明这就是 NAS 现场原因。
+- 当前根因、因果链、first-wrong 和 A 级证据：待诊断。
+- 2026-09-24恢复：用户提供192.168.1.2:38417，ADB连接成功；手机com.duxweb.codux.sideload为beta.15/code64，包含上次修复。UID10563日志已采集至/private/tmp/codux-recurrence-phone-logcat.txt，未操作业务终端。用户另授权修复无人抢占却显示接管界面，先判定是否同因，独立则另建任务顺序处理。
+- 用户反证：本次缩短后只有一屏多，展开屏幕后恢复。明确排除3001至2041容量收缩为本次解释，不修改该机制。当前需区分渲染历史真正重建与备用屏/输入模式导致滚动不可达。
+- 手机内屏截图/private/tmp/codux-recurrence-phone-inner.png显示NAS Library正常业务TUI（OMP）；当前已展开。外屏截图黑屏，不能用作症状证据。后续确认只在Codux前台取图；一次用户已切其他应用的临时截图已删除，不作为证据或产物。
+- 持续仅UID10563日志采集运行于exec session82555，文件/private/tmp/codux-recurrence-phone-live.log；结束诊断时须停止采集。首段logcat仅覆盖06:28:39至06:29:03，未涵盖最初事故；不可宣称记录了最初截断。
+- NAS本机日志中15:19:00、15:28:09、15:28:26均收到手机terminal.viewport.release后owner变desktop；并非这些具体事件由其他设备force抢占。手机paused/hidden都会主动release。此证据仍不能等同用户所说“偶尔”事故的first-wrong。
+- 只读查实NAS所见TUI对应本机OMP（/Users/mac/.bun/bin/omp，安装包@oh-my-pi/pi-coding-agent）；其pi-tui/src/tui.ts宽度resize暂借备用屏，仅绘制viewport，settle后退出备用屏并重放全部历史。故备用屏未正确退出可解释一屏多且resize恢复，待现场或真实复现证实；不得改第三方安装包。
+- 最新用户事实：展开状态下再次发生，切回NAS后才发现；当前历史是缩短后的历史加后来新输出。不能再把折叠当必要触发条件，也不能直接认定一直卡在备用屏。
+- 现场APK只读SHA256核对通过：7cf6d0f49e30e99f8a1e3e94f089522f435e29d313a54951eef8393c51e13a4f，与上次beta.15+64交付一致。
+- 06:42:32.329/.450两次NAS owner-refresh基线完成；06:44:11.013切回NAS为cached=true、baseline=false，无该次切回重建基线证据。已采集日志未见sequence gap或LRU淘汰；不能以缓存重建作为已确认根因。
+- 新独立实验：真实OMP渲染输出，在后台输出/切回的5038组控制序列分割点回放中，仅插入基线刷新时出现12组异常；7组主机300行正常屏、客户端41行备用屏，其余为重复历史。无刷新的后台输出/切回组均正常。first-wrong（此实验）：ReplaceVisible调用self.feed，快照ANSI进入正在解析分包PTY指令的同一个Processor，破坏尚未完成的退出备用屏/清屏指令。去掉临时Terminal代理错误的keyboardEnhancement序列后重跑，结果仍为5038组/12异常。
+- 反事实验证仅在/private/tmp/codux-keyframe-parser-core复制源码：ReplaceVisible使用独立局部Processor解析快照，不触碰原始流解析器。相同5038组变为0异常；复制核心145测试通过。未修改仓库生产代码。此缺陷可解释一屏备用屏及resize恢复，但尚未解释用户本次“缩短后继续积累新历史”，不得自动等同现场根因。
+- 用户最新确认：桌面同一NAS终端历史也不完整，要求继续查根因；不再等待桌面对照。单独手机快照解析器缺陷不足以解释桌面本地PTY屏幕同时缺历史。
+- 恢复时用户其他工作已提交为6f8931bc（feat(mobile): restore last working project per host），main、单worktree、tracked干净；本任务未修改生产代码。此前独立工作涉及的mobile/runtime文件不得归入本任务。
+- NAS OMP会话JSONL的cwd为/Volumes/AllData/Library；最近compaction在2026-09-23T08:29Z，事故附近未发生compaction。真实进程55135运行安装版17.1.8；未发现PI_TUI_SCROLLBACK_REBUILD覆写，默认关闭。未采到事故原始PTY字节。
+- 新候选：desktop model.apply_ui_event在remote_owner切换且明暗改变时发送997外观报告；OMP onThemeChange调用requestRender(true,{clearScrollback:true})，随后ED3并重放。桌面settings theme=Auto，系统AppleInterfaceStyle未设置（通常浅色），手机固定深色；需验证重放能否实际漏历史及事故关联，不能只凭代码路径确认为根因。
+- 主题候选的反证：独立/private/tmp/codux-omp-theme-probe.ts使用安装包TUI与TranscriptContainer，最终历史100行加live内容300行，覆盖ordinary、theme、later-output、resetDisplay、resize以及pinned开/关。普通分支402、412、411、421、421、421行，最早final-0始终保留；pinned分支从初始就按约定裁剪live区，143/142行，最早final-0仍保留。未复现既有正文缩短。生成输出/private/tmp/codux-omp-theme-output.json，回放命令cargo run --quiet --offline --manifest-path /private/tmp/codux-scrollback-diagnosis/Cargo.toml --bin theme。实验只证实此最小组件组合，不涵盖真实NAS完整会话。
+- 核实OMP实际入口为.bun/bin/omp指向pi-coding-agent/dist/cli.js（13MB压缩bundle），不是直接运行src。bundle确有clearScrollback、resetDisplay、临时备用屏和主题回调对应机制，但不能把src实验表述为已对整个运行bundle复现。
+- 回查保留logcat：06:42:29.716返回NAS为cached/baseline=false；06:42:32.279 force claim；32.329请求owner-refresh；32.450第一基线收到并立即第二次owner-refresh；33.546第二基线收到；46.204/.208离开并release；06:44:11.013再次返回NAS仍baseline=false。用户粘贴06:43:53的buffer属于a9816cc4另一个项目，不能当NAS重建证据。
+- 连接异常实证（logcat记录时间）：06:42:46之后project.select连续超时；06:43:01.382 path改relay，21.236恢复direct；29.311集中收到延迟8014/5014/2003ms的pong；NAS live output集中于06:43:20-49。这证明存在停顿与积压，不证明ANSI清屏或缺包。路径切换baseline均针对当时活动的96bc1788会话，不是后台NAS；NAS未见同期baseline、序号gap或evict。
+- 最新用户追问为何未从其事故后日志找到线索。已明确说明具体时间线及证据局限；异步问题已发：最早发现缩短是06:42接管后还是06:44再次切回，尚未收到回答。不得默认后者就是发现时刻。当前日志不含raw PTY、totalLines、alternate_screen；无法从terminal.output类型推断那包是否包含ED3或备用屏切换。
+
+- 同步输出补充证据：旧OMP代理未回报DEC2026支持，生成流不含同步更新包裹，和Codux实际报告SyncUpdate Reset的行为不一致。临时生成器增加onPrivateModeReport(2026,true)，启用CODUX_PROBE_SYNC=1后重做。真实源码生成的resize同步流在原核心5046组中2503异常；已打印首批均为host300行正常屏、mobile41行备用屏。未插入baseline对照通过。临时独立快照Processor副本5046组0异常。82×41主机网格对82×29手机视口恰为一屏多，但尚不证明事故触发来自resize。
+- 同宽theme同步流原核心6790组399异常；首批为重复历史（411对451等），尚未聚合全部，不能宣称符合一屏多丢失。下一步统计全部模式/行数，追加后续输出与第二次baseline，判定是否能复现“缩短后继续增长”。
+- 新完整反例：同步resize流cut=100，初始300行；插入第一次baseline后mobile41行备用屏，后续OMP输出10行仍41；第二次baseline后host310、mobile41且已回正常屏；再加10行host320、mobile51；再次改宽度重绘host/mobile均320。原版命令cargo run --quiet --offline --manifest-path /private/tmp/codux-scrollback-diagnosis/Cargo.toml --bin switch_split -- /private/tmp/codux-omp-resize-sync-output.json 100。两次刷新导致一屏历史并允许后续增长及resize恢复，合成实验已串通；不能再用“后来历史增长”反证快照解析器污染。全量2503异常中第二次刷新后406组恰41行，其他组42至301行。无插入baseline对照通过。
+- 反证边界：theme同步重绘399异常全部增多（host411/mobile412至822），无缩短；同尺寸SIGWINCH实验415异常亦全部增多，未进入备用屏。现场NAS 06:32:52至06:43:44收到的viewport尺寸始终82×41（generation45至48），请求82×29不会实际改PTY，因为远端行数不缩小且相同尺寸直接return。因此当前没有证据证明06:42基线前发生宽度变化，需查早先已污染状态或桌面attach路径，不能以“未折叠也会resize”替代事件证据。
+- 桌面链路修正：本地桌面持续输出确为原始Bytes，但首次/重新attach不是纯raw。TerminalPtySession::subscribe_output(true)在host处于备用屏时snapshot.push_str(screen.data)，将合成ANSI拼进raw尾；manager.rs:198/227两个入口均调用。临时sync_trace按该真实拼接方式回放，原核心desktop_attach也300变41/alt=true，主机仍300/alt=false。后续普通输出保持41，改宽度重绘恢复320。此为桌面可达代码路径的最小回放，不是本次NAS实际重新attach的证据，也未启动实际PTY/GPUI。
+- 完整反事实：/private/tmp/codux-scrollback-diagnosis/src/bin/sync_trace.rs及/private/tmp/codux-keyframe-parser-core/examples/sync_trace.rs。只用独立快照Processor，移动300/310/320全程保留，桌面raw拼接仍失败；再以CODUX_PROBE_SEPARATE_ATTACH=1将桌面快照与raw分开送入同一公开keyframe API，两端全程300/310/320且正常屏。原核心即使分开API仍失败，证明需要共享解析器隔离与桌面停止raw拼接两个条件。此为临时反事实，不构成生产修复或设备验证。
+- 现场OMP进程55135仍在；安全白名单提取环境仅见TERM=xterm-256color，未见PI_TUI/PI_DEBUG/TMUX/ZELLIJ覆写。当前state.json不含NAS现场session；desktop terminal runtime summary在加载路径使用default，未找到可追溯事故raw流的持久化副本。
+
+### 授权变更
+
+用户本轮授权修复已复现缺陷。共享HeadlessTerminalScreen用独立Processor应用完整快照，并复用现有事件处理以保持回放不答复查询的语义。将桌面已有TerminalOutputEvent::Append/Replace移到共享核心，PTY订阅采用该类型，删除raw尾拼接快照；桌面本地/远程均走现有apply_output_replacement。不改变wire协议、滚动容量、所有权或重新连接策略。按仓库规则分别更新包含共享代码的产品版本与兼容记录。
+
+### 范围
+
+owner / invariant：HeadlessTerminalScreen独占raw解析状态；TerminalPtySession输出契约将raw与快照区分，调用方无需选择安全开关。
+allowed_files：crates/codux-terminal-core/src/{headless_screen.rs,terminal_driver.rs,lib.rs}；crates/codux-runtime-live/src/terminal_pty/{session.rs,capture.rs,manager.rs,mod.rs,tests/mod.rs,tests/manager.rs}；apps/desktop/src/{terminal.rs,terminal/pane.rs,terminal/model.rs,terminal/tests/pty_binding.rs}；apps/desktop/runtime/src/runtime_state/service_core_tests/common.rs、apps/agent/src/terminals.rs（适配现有测试消费类型）；apps/desktop/Cargo.toml、apps/agent/Cargo.toml、apps/mobile/pubspec.yaml、Cargo.lock、docs/version-compatibility.md；本任务记录。
+out_of_scope：SetQueryColors未复现的同类候选、历史容量、wire协议、所有权、订阅注册与历史快照之间既存时序窗口、其他任务、用户现存改动、清除或重建用户终端、headless服务升级、替换运行中的macOS应用、公共发布。
+
+### 验证
+
+baseline：桌面/host 为已安装beta.22；手机当前版本未取得。cargo test -p codux-terminal-core --lib --offline -- --test-threads=2：145 passed / 0 failed。日志 /private/tmp/codux-scrollback-recurrence-core-baseline.log。原始独立probe通过连续baseline控制并复现宽度容量收缩。git diff --check通过；tracked无改动，仅新增本任务，原有untracked保留。
+target_check：新增visible_keyframe_preserves两项原版均失败，修后通过（/private/tmp/codux-keyframe-regression-{red,green}.log）。cargo test -p codux-terminal-core --offline：147通过；真实本地PTY reattach两项通过；原OMP同步拆包5046组0异常（修前2503异常）；sync_trace两次baseline、后续输出两端均300/310/320正常屏。日志/private/tmp/codux-keyframe-{core,reattach,omp-fixed,full-trace-fixed}.log。目标通过后生产冻结。
+nearest_regression_check：runtime-live terminal_pty 73通过，3项socket EPERM属沙箱基础设施，沙箱外以--exact重跑3项均通过，共76通过；desktop terminal::tests::pty_binding 21通过；desktop remote::controller 73通过/4 opt-in忽略；agent terminals::tests 17通过。日志/private/tmp/codux-keyframe-{runtime-pty,runtime-capabilities,desktop-binding,desktop-controller,agent-terminals}.log。
+broader_check_reason：内部订阅类型改变影响desktop/agent编译消费者；共享核心进入mobile FFI。验证本地代码/隔离PTY，不安装到用户现场。
+broader_checks：cargo check -p codux -p codux-agent -p codux-protocol-ffi --offline通过（实际mobile FFI包为codux-protocol-ffi），/private/tmp/codux-keyframe-products-check.log；设备交互验收用户后续进行，当前无安装授权。
+
+## Guarded Fix
+
+examined_existing_paths：headless_screen ReplaceVisible复用self.feed导致raw parser与prompt/image carry共享；现有独立Processor临时反事实已消除5046组异常。desktop TerminalOutputEvent与apply_output_replacement已把history和screen分开，remote router/controller均调用共享keyframe API。local subscribe_output(true)仍拼接screen.data，只有manager.rs两个调用点；枚举manager消费者涵盖desktop pane两种attach、core driver适配、runtime测试和agent测试。前次8124f566已修continuous baseline保留历史，当前不更改该水位判定。
+reuse_decision：extend-existing HeadlessTerminalScreen keyframe；reuse desktop TerminalOutputEvent/Replace contract并移到共享核心，删除Bytes/Events分流及raw拼接。
+causal_chain：raw同步重绘尚在parser缓存；合成快照插入同一缓存，退出备用屏后又执行快照的进入备用屏；后续基线切回正常屏但原历史仅重放了前缀，故41行并继续增长。
+first-wrong condition：ReplaceVisible/self.feed以及subscribe_output/snapshot.push_str把合成快照送进raw增量解析器。
+A_evidence：原核心sync_trace 300/41、310/41、320/51，改宽度恢复320；临时独立parser与分离desktop快照后全程300/310/320。原5046组2503异常，临时core0。
+why_minimal_and_sufficient：一个共享keyframe解析修正；一个现有事件类型上移确保本地入口也无法再把快照伪装成raw。无新队列、重试、epoch或开关。
+alternatives：仅独立Processor不能修desktop raw拼接，反事实已失败；仅拆分发送而共用parser仍失败。删除所有alt快照会破坏既有截短raw尾的当前屏幕恢复，已有alt重绑测试锁定该正确行为。
+contract / data / concurrency / compatibility / rollback：内部Rust输出receiver类型变化，所有消费者同改同编译；wire/persisted数据格式不变。raw parser状态、查询抑制、当前屏幕恢复是相邻契约。可按当前diff回滚；不触及运行中数据。
+verification_only：分包CSI、OSC carry、同步更新、两次baseline、后续输出；原有普通/备用屏重绑及cursor恢复；真实PTY孤立测试。
+existing_path_check：pass，复用现有事件类型和Replace消费路径，删除本地例外分流。
+owner_and_evidence：pass，共享解析器拥有raw状态，输出契约负责区分快照。
+semantic_scope：pass，仅快照混入raw单因果单元；当前NAS事故后续诊断保留。
+verification_power：pass，红测试与旧版完整症状反例、反事实、实际consumer编译和隔离PTY覆盖。
+result：pass
+
+## 当前阶段
+
+phase：delivery（修复已复现缺陷；生产冻结）
+现场：移动 NAS Library「终端1」，桌面亦发生。
+last-known-good：未插入快照的同一raw同步重绘回放，两端完整300行；原NAS事故时刻仍缺边界。
+first-wrong：合成快照进入raw Processor的未结束控制序列/同步更新缓存；本地attach也通过字符串拼接进入同一解析器。
+竞争解释：
+1. 快照ANSI混入未结束的raw解析器：完整移动症状与桌面attach异常均已在隔离回放复现，独立解析器/独立快照通道反事实消除异常。现场关联仍缺当时备用屏/同步更新状态，且06:32至06:43未记录尺寸变化。
+2. 实际raw输出重绘时已只包含尾部：可解释独立桌面持续reader也缺历史，但无事故raw流；同宽主题回放保留全文，不能凭“OMP会ED3”认定此因。
+已排除：宽度容量收缩实验不符合用户“一屏多、展开恢复”的实际症状。
+阻塞：旧45883端口拒绝连接已解除，新38417端口已连接。
+下一判别：已证明快照混入raw解析器可先造成备用屏错误、再由第二次快照固化为正常屏41行并继续增长；桌面attach原始拼接也有同类可达缺陷。本次事故仍缺原始输出和截断时mode/totalLines，且06:32至06:43无尺寸变化，不能确认这一机制就是本次唯一根因。需同一session基线应用前后的模式/历史行数及原始流，或本次desktop pty_attach证据。completion：pending；不具备对本次事故声称修复的证据。
+
+## Checkpoint
+
+latest_verified：用户授权先修已复现缺陷，已完成。生产core隔离快照Processor并保留回放事件处理；桌面既有TerminalOutputEvent上移core，本地PTY改typed输出，删除raw+keyframe拼接和Bytes/Events分流。全部生产调用者编译，相关测试334通过/4 opt-in忽略，5046组OMP回放0异常；真实隔离PTY与desktop model均覆盖同步重绘中重绑/刷新。桌面beta.23、mobile beta.17+66、agent beta.20源版本已分别更新，wire不变。未打包、提交、安装或重启业务现场。NAS真实事故是否还有其他根因留待用户复测。
+contract_state：frozen（生产已冻结；用户已授权提交、push lan、打包、ADB安装和macOS下载目录交付）
+active_capability：none
+next_action：提交当前修复并push lan/main；复用tools/local-delivery.py构建Android并安装现有sideload包、交付macOS App至Downloads。旧ADB 192.168.1.2:38417当前拒绝连接，查找现用地址。若升级后NAS仍复发，需同session模式/行数/raw补证。接管问题独立暂停；headless不升级，运行中macOS不替换。原有无关untracked保留。
+
+## Delivery Gate
+
+authorization：用户明确“提交, push to lan,打包, adb安装手机, mac app放下载目录”。当前main，lan=mac@10.10.10.21:/Users/mac/git_repo/codux.git。
+frozen / verification / review：生产冻结；334项相关测试通过、4项opt-in忽略、5046组回放0异常；已完成证据绑定反驳及自审。git diff --check通过；22个tracked改动均在授权范围。
+compatibility / data / rollback：wire及持久化格式不变；Android仅同签名install -r保留数据；macOS只交付下载目录，保留同名不同内容的既有包；不升级headless或替换运行中桌面，回滚源代码可revert本次提交。
+artifact_verification：复用tools/local-delivery.py验证版本、签名和最终副本hash；Android安装后APK hash必须一致；桌面验证ad-hoc签名、版本、架构。真实NAS场景验收仍pending。
+result：ready；设备地址和交付结果待记录。
+
+## 最终自审
+
+直接性：生产修改仅隔离快照解析及删除本地raw拼接；其他源码均类型消费适配或产品版本。host terminal_buffer/terminal_lifecycle两个既有测试也按此前枚举结果机械适配Append类型，无新增生产范围。
+边界：wire、持久化、所有权、滚动容量、SetQueryColors、订阅注册既有时序窗口未改变；无重试/开关/静默兜底。
+证据绑定反驳：仅核心独立parser无法覆盖桌面raw拼接，故采用typed output复用已有Replace；仅typed output而不隔离parser也失败。原版红测试、真实PTY、实际desktop model、全消费编译及5046组已推翻这两种不完整修复。NAS原事故无raw因果证明，兼容记录保持pending，未声称现场已验证。
+维护与性能：复用既有事件类型/消费路径，移除本地例外；局部Processor仅每次keyframe创建，实时输出仍复用原parser。查询/剪贴板事件沿现有回放抑制路径处理，raw的CSI、OSC carry及同步缓存不变。

@@ -5,7 +5,9 @@ use codux_terminal_core::{
     TerminalLaunchConfig, TerminalPtyResponder, TerminalQueryColors, TerminalScreenSnapshot,
     TerminalSessionHandle as CoreTerminalSessionHandle,
 };
-pub use codux_terminal_core::{TerminalEvent, TerminalSessionSnapshot, TerminalViewportState};
+pub use codux_terminal_core::{
+    TerminalEvent, TerminalOutputEvent, TerminalSessionSnapshot, TerminalViewportState,
+};
 use codux_terminal_pty::{
     LocalPtyCommandMode, LocalPtyProcessHandle, LocalPtySpawnConfig, spawn_local_pty,
 };

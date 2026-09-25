@@ -26,7 +26,7 @@ pub struct TerminalPtySession {
     pub(super) query_colors: Arc<parking_lot::Mutex<Option<TerminalQueryColors>>>,
     pub(super) remote_query_colors: TerminalQueryColors,
     pub(super) output_commit: Arc<parking_lot::Mutex<()>>,
-    pub(super) output_subscribers: Arc<parking_lot::Mutex<Vec<flume::Sender<Vec<u8>>>>>,
+    pub(super) output_subscribers: Arc<parking_lot::Mutex<Vec<flume::Sender<TerminalOutputEvent>>>>,
     pub(super) event_subscribers: Arc<parking_lot::Mutex<Vec<EventSubscriber>>>,
     pub(super) info: Arc<parking_lot::Mutex<TerminalSessionSnapshot>>,
     pub(super) exit_signal: Arc<TerminalExitSignal>,
@@ -353,26 +353,27 @@ impl TerminalPtySession {
         self.clone_handle().set_query_colors(colors);
     }
 
-    pub fn subscribe_output(&self, replay_snapshot: bool) -> flume::Receiver<Vec<u8>> {
+    pub fn subscribe_output(&self, replay_snapshot: bool) -> flume::Receiver<TerminalOutputEvent> {
         let (tx, rx) = flume::unbounded();
         if replay_snapshot {
-            let mut snapshot = self.snapshot();
-            // An alt-screen TUI (e.g. Claude Code) keeps its UI in the alternate
-            // buffer, which has no scrollback and so never reaches the raw
-            // history above. A re-attaching viewer that only replays the raw
-            // history therefore renders blank until the TUI happens to repaint
-            // (which is why re-entering the terminal "fixed" it). Append the
-            // live screen keyframe -- it carries the active DEC modes
-            // (alt-screen, mouse) and its ESC[2J clears only the visible screen
-            // (alacritty keeps scrollback) -- so the current screen and its
-            // modes are reconstructed immediately. Normal-screen sessions
-            // reconstruct fully from the raw history and skip this.
-            let screen = self.screen_snapshot();
-            if screen.input_mode.alternate_screen && !screen.data.is_empty() {
-                snapshot.push_str(&screen.data);
-            }
-            if !snapshot.is_empty() {
-                let _ = tx.send(snapshot.into_bytes());
+            let snapshot = self.baseline_snapshot(usize::MAX);
+            let screen = snapshot.screen;
+            // A bounded raw tail may omit the alternate-screen entry/paint.
+            // Carry its current grid separately: raw output can end mid-CSI or
+            // mid-synchronized repaint and must resume without injected ANSI.
+            if !snapshot.data.is_empty() || screen.input_mode.alternate_screen {
+                let _ = tx.send(TerminalOutputEvent::Replace {
+                    history: codux_terminal_core::RemoteTerminalHistoryUpdate::Replace(
+                        snapshot.data.into_bytes(),
+                    ),
+                    screen: if screen.input_mode.alternate_screen {
+                        screen.data.into_bytes()
+                    } else {
+                        Vec::new()
+                    },
+                    cols: screen.cols,
+                    rows: screen.rows,
+                });
             }
         }
         self.output_subscribers.lock().push(tx);

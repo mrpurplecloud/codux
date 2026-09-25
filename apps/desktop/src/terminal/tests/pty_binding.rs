@@ -275,6 +275,42 @@ fn incremental_baseline_keeps_history_and_drains_pending_output_once() {
     assert!(screen.snapshot().data.contains("SCROLL-0"));
 }
 
+#[test]
+fn baseline_replacement_preserves_synchronized_repaint_continuation() {
+    let history = (0..300)
+        .map(|i| format!("history-{i:04}"))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    let prefix = format!("{history}\x1b[?1049h\x1b[Hpreview\x1b[?2026h\x1b[?1049l\x1b[H\x1b[3J");
+    let suffix = format!("{history}\x1b[?2026l");
+    for initial_attach in [false, true] {
+        let mut host = HeadlessTerminalScreen::new(82, 41, 2000);
+        host.process(prefix.as_bytes());
+        let frame = host.snapshot_at_offset_request(0).snapshot();
+        let mut model = TerminalModel::new_for_test(82, 41, 2000);
+        let update = if initial_attach {
+            codux_terminal_core::RemoteTerminalHistoryUpdate::Replace(prefix.as_bytes().to_vec())
+        } else {
+            model
+                .pending_output_bytes
+                .extend_from_slice(prefix.as_bytes());
+            codux_terminal_core::RemoteTerminalHistoryUpdate::Append(Vec::new())
+        };
+        model.apply_output_replacement(update, frame.data.into_bytes(), 82, 41);
+        assert!(model.pending_output_bytes.is_empty());
+        model.process_output_bytes_for_test(suffix.as_bytes());
+        host.process(suffix.as_bytes());
+        let mut screen = model.handle.screen.lock();
+        let actual = screen.snapshot();
+        let expected = host.snapshot();
+        assert!(!actual.input_mode.alternate_screen);
+        assert_eq!(actual.total_lines, expected.total_lines);
+        assert_eq!(actual.cells, expected.cells);
+        screen.scroll_lines(2000);
+        assert!(screen.snapshot().data.contains("history-0000"));
+    }
+}
+
 fn wait_for_stream(controller: &HostedTestController) {
     for _ in 0..100 {
         if !controller.streams.lock().unwrap().is_empty() {

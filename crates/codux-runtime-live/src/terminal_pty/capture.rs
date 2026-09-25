@@ -32,7 +32,7 @@ pub(super) struct CaptureReaderShared {
     pub(super) history: Arc<parking_lot::Mutex<RingHistory>>,
     pub(super) screen: Arc<parking_lot::Mutex<HeadlessTerminalScreen>>,
     pub(super) output_commit: Arc<parking_lot::Mutex<()>>,
-    pub(super) output_subscribers: Arc<parking_lot::Mutex<Vec<flume::Sender<Vec<u8>>>>>,
+    pub(super) output_subscribers: Arc<parking_lot::Mutex<Vec<flume::Sender<TerminalOutputEvent>>>>,
     pub(super) event_subscribers: Arc<parking_lot::Mutex<Vec<EventSubscriber>>>,
     pub(super) info: Arc<parking_lot::Mutex<TerminalSessionSnapshot>>,
 }
@@ -200,7 +200,11 @@ impl CaptureReader {
             return;
         }
         let mut subscribers = self.shared.output_subscribers.lock();
-        subscribers.retain(|subscriber| subscriber.send(bytes.to_vec()).is_ok());
+        subscribers.retain(|subscriber| {
+            subscriber
+                .send(TerminalOutputEvent::Append(bytes.to_vec()))
+                .is_ok()
+        });
     }
 }
 

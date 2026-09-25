@@ -4,6 +4,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::TerminalSequence;
 
+/// Raw PTY output and authoritative screen keyframes are distinct streams.
+/// Consumers must apply `screen` through `replace_visible_with_keyframe`, never
+/// concatenate it with `history` or feed it into the live output parser.
+#[derive(Clone, Debug)]
+pub enum TerminalOutputEvent {
+    Append(Vec<u8>),
+    Replace {
+        history: crate::RemoteTerminalHistoryUpdate,
+        screen: Vec<u8>,
+        cols: usize,
+        rows: usize,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalBaselineRequest {
     pub session_id: String,

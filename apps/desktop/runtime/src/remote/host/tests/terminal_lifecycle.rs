@@ -611,7 +611,9 @@ fn last_remote_viewer_unsubscribe_preserves_scrollback() {
     let mut received = String::new();
     while Instant::now() < deadline && !received.contains("__DONE__") {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if let Ok(bytes) = output.recv_timeout(remaining.min(Duration::from_millis(100))) {
+        if let Ok(codux_terminal_core::TerminalOutputEvent::Append(bytes)) =
+            output.recv_timeout(remaining.min(Duration::from_millis(100)))
+        {
             received.push_str(&String::from_utf8_lossy(&bytes));
         }
     }

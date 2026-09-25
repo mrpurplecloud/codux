@@ -34,7 +34,8 @@ pub use runtime_model::{
 pub use sequence_guard::RemoteSequenceGuard;
 pub use terminal_driver::{
     TerminalBaselineRequest, TerminalDriver, TerminalEvent, TerminalEventSink,
-    TerminalLaunchConfig, TerminalSessionHandle, TerminalSessionSnapshot, TerminalViewportState,
+    TerminalLaunchConfig, TerminalOutputEvent, TerminalSessionHandle, TerminalSessionSnapshot,
+    TerminalViewportState,
 };
 pub use terminal_input::{
     TerminalInputMode, TerminalKeyInput, TerminalKeyInputModifiers, TerminalMouseAction,

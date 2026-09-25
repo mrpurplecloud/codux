@@ -1634,7 +1634,9 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let mut text = String::new();
         while !text.contains(">prompt") && std::time::Instant::now() < deadline {
-            if let Ok(bytes) = output.recv_timeout(Duration::from_millis(100)) {
+            if let Ok(codux_terminal_core::TerminalOutputEvent::Append(bytes)) =
+                output.recv_timeout(Duration::from_millis(100))
+            {
                 text.push_str(&String::from_utf8_lossy(&bytes));
             }
         }
@@ -1753,7 +1755,9 @@ mod tests {
             while std::time::Instant::now() < deadline
                 && !bytes.windows(needle.len()).any(|w| w == needle)
             {
-                if let Ok(chunk) = output.recv_timeout(Duration::from_millis(20)) {
+                if let Ok(codux_terminal_core::TerminalOutputEvent::Append(chunk)) =
+                    output.recv_timeout(Duration::from_millis(20))
+                {
                     bytes.extend(chunk);
                 }
             }
@@ -1876,7 +1880,9 @@ mod tests {
         let mut received = String::new();
         while std::time::Instant::now() < deadline && !received.contains("__DONE__") {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if let Ok(bytes) = output.recv_timeout(remaining.min(Duration::from_millis(100))) {
+            if let Ok(codux_terminal_core::TerminalOutputEvent::Append(bytes)) =
+                output.recv_timeout(remaining.min(Duration::from_millis(100)))
+            {
                 received.push_str(&String::from_utf8_lossy(&bytes));
             }
         }

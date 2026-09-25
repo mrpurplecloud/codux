@@ -791,6 +791,10 @@ impl TerminalScreenWorker {
     /// DSR/DA queries in recorded output don't inject unsolicited replies.
     fn feed(&mut self, bytes: &[u8], answer_queries: bool) {
         self.advance_with_intercepts(bytes);
+        self.dispatch_events(answer_queries);
+    }
+
+    fn dispatch_events(&mut self, answer_queries: bool) {
         let events: Vec<Event> = self.events.borrow_mut().drain(..).collect();
         // Titles apply for replayed history too: restored output re-sets the
         // title the shell had established before the restore.
@@ -1095,18 +1099,23 @@ impl TerminalScreenWorker {
                 TerminalScreenCommand::Process(bytes) => self.feed(&bytes, true),
                 TerminalScreenCommand::ProcessReplay(bytes) => self.feed(&bytes, false),
                 TerminalScreenCommand::ReplaceVisible(bytes) => {
+                    // A keyframe is a complete, separate ANSI stream. The live
+                    // parser may still hold a split CSI or synchronized repaint;
+                    // feeding the keyframe into it corrupts that pending output.
+                    let mut parser: Processor = Processor::new();
                     let targets_alternate_screen = bytes.starts_with(b"\x1b[?1049h");
                     if self.term.mode().contains(TermMode::ALT_SCREEN) != targets_alternate_screen {
                         self.term.swap_alt();
                     }
                     if let Some(index) = bytes.windows(4).position(|window| window == b"\x1b[2J") {
-                        self.feed(&bytes[..index], false);
+                        parser.advance(&mut self.term, &bytes[..index]);
                         self.term.grid_mut().reset_region(..);
-                        self.feed(&bytes[index + 4..], false);
+                        parser.advance(&mut self.term, &bytes[index + 4..]);
                     } else {
                         self.term.grid_mut().reset_region(..);
-                        self.feed(&bytes, false);
+                        parser.advance(&mut self.term, &bytes);
                     }
+                    self.dispatch_events(false);
                 }
                 TerminalScreenCommand::RestoreWrappedRows(wrapped_rows) => {
                     self.restore_visible_wrapped_rows(&wrapped_rows);
@@ -2744,6 +2753,62 @@ mod tests {
 
         assert_eq!(after.total_lines, before);
         assert!(after.data.contains("current"));
+    }
+
+    #[test]
+    fn visible_keyframe_preserves_incomplete_live_repaint() {
+        let history = (0..300)
+            .map(|i| format!("history-{i:04}"))
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        for sync in [false, true] {
+            let repaint = format!(
+                "{}\x1b[?1049l\x1b[H\x1b[3J{history}{}",
+                if sync { "\x1b[?2026h" } else { "" },
+                if sync { "\x1b[?2026l" } else { "" }
+            );
+            // Inside CSI, at a held ESC, and in the synchronized frame body.
+            for cut in [1, 5, 12, 100] {
+                let mut host = HeadlessTerminalScreen::new(82, 41, 2000);
+                let mut client = HeadlessTerminalScreen::new(82, 41, 2000);
+                for screen in [&mut host, &mut client] {
+                    screen.process(history.as_bytes());
+                    screen.process(b"\x1b[?1049h\x1b[Hpreview");
+                    screen.process(&repaint.as_bytes()[..cut]);
+                }
+                let frame = host.snapshot_at_offset_request(0).snapshot();
+                client.replace_visible_with_keyframe(frame.data.as_bytes());
+                host.process(&repaint.as_bytes()[cut..]);
+                client.process(&repaint.as_bytes()[cut..]);
+                let expected = host.snapshot();
+                let actual = client.snapshot();
+                assert!(!actual.input_mode.alternate_screen, "sync={sync} cut={cut}");
+                assert_eq!(
+                    actual.total_lines, expected.total_lines,
+                    "sync={sync} cut={cut}"
+                );
+                assert_eq!(actual.cells, expected.cells, "sync={sync} cut={cut}");
+                client.replace_visible_with_keyframe(expected.data.as_bytes());
+                for screen in [&mut host, &mut client] {
+                    screen.process(b"\r\nlater");
+                }
+                assert_eq!(client.snapshot().total_lines, host.snapshot().total_lines);
+                client.scroll_lines(1000);
+                assert!(client.snapshot().data.contains("history-0000"));
+            }
+        }
+    }
+
+    #[test]
+    fn visible_keyframe_preserves_split_prompt_marker() {
+        let mut screen = HeadlessTerminalScreen::new(20, 4, 100);
+        screen.process(b"\x1b]13");
+        screen.replace_visible_with_keyframe(b"\x1b[?1049l\x1b[H\x1b[2J\x1b[H");
+        screen.process(b"3;A\x07$ prompt");
+        let snapshot = screen.snapshot();
+        assert_eq!(snapshot.prompt_marks, vec![0]);
+        assert!(snapshot.data.contains("$ prompt"));
+        assert!(!snapshot.data.contains("3;A"));
     }
 
     #[test]
