@@ -2,7 +2,7 @@
 
 ID: scrollback-shrinks-recurrence
 类型：bug
-状态：done（已复现缺陷修复及授权交付完成；真实NAS事故验收仍待用户复测）
+状态：done（客户端交付及headless备份升级完成；真实NAS事故验收仍待用户复测）
 创建：2026-09-24
 更新：2026-09-24
 一句话描述：桌面和移动窗口滚动历史再次自动变短，当前移动 NAS Library 项目「终端1」为现场。
@@ -70,7 +70,7 @@ state：complete
 
 owner / invariant：HeadlessTerminalScreen独占raw解析状态；TerminalPtySession输出契约将raw与快照区分，调用方无需选择安全开关。
 allowed_files：crates/codux-terminal-core/src/{headless_screen.rs,terminal_driver.rs,lib.rs}；crates/codux-runtime-live/src/terminal_pty/{session.rs,capture.rs,manager.rs,mod.rs,tests/mod.rs,tests/manager.rs}；apps/desktop/src/{terminal.rs,terminal/pane.rs,terminal/model.rs,terminal/tests/pty_binding.rs}；apps/desktop/runtime/src/runtime_state/service_core_tests/common.rs、apps/agent/src/terminals.rs（适配现有测试消费类型）；apps/desktop/Cargo.toml、apps/agent/Cargo.toml、apps/mobile/pubspec.yaml、Cargo.lock、docs/version-compatibility.md；本任务记录。
-out_of_scope：SetQueryColors未复现的同类候选、历史容量、wire协议、所有权、订阅注册与历史快照之间既存时序窗口、其他任务、用户现存改动、清除或重建用户终端、headless服务升级、替换运行中的macOS应用、公共发布。
+out_of_scope：SetQueryColors未复现的同类候选、历史容量、wire协议、所有权、订阅注册与历史快照之间既存时序窗口、其他任务、用户现存改动、清除或重建用户终端、替换运行中的macOS应用、公共发布。用户已追加授权headless备份及服务升级，按现有交付脚本重启服务会结束旧PTY。
 
 ### 验证
 
@@ -99,7 +99,7 @@ result：pass
 
 ## 当前阶段
 
-phase：complete（修复已复现缺陷及授权交付；生产冻结）
+phase：complete（客户端交付及headless备份升级完成；生产冻结）
 现场：移动 NAS Library「终端1」，桌面亦发生。
 last-known-good：未插入快照的同一raw同步重绘回放，两端完整300行；原NAS事故时刻仍缺边界。
 first-wrong：合成快照进入raw Processor的未结束控制序列/同步更新缓存；本地attach也通过字符串拼接进入同一解析器。
@@ -112,18 +112,21 @@ first-wrong：合成快照进入raw Processor的未结束控制序列/同步更�
 
 ## Checkpoint
 
-latest_verified：修复提交bb645f49a5e8644eb7abc6735e0b83dcf2cf505a已push lan/main并ls-remote核对。334项相关测试通过/4项opt-in忽略，5046组回放0异常。tools/local-delivery.py desktop/android均成功：桌面beta.23与Android beta.17+66最终副本已校验并交付Downloads。用户提供新端口37799后，已用tools/local-delivery.py android --serial 192.168.1.2:37799完成同签名install -r，设备APK hash与交付副本一致；dumpsys确认versionName=2.0.3-beta.17.sideload、versionCode=66，原有数据保留。未重启NAS或替换运行中的macOS应用；未升级headless。真实事故验收仍pending。
-contract_state：complete（生产已冻结；授权提交、push lan、打包、ADB安装和macOS下载目录交付均完成）
+latest_verified：修复bb645f49及客户端交付记录已push lan/main。334项相关测试通过/4项opt-in忽略，5046组回放0异常。桌面beta.23已交付Downloads，Android beta.17+66同签名install -r及安装hash核对通过。用户追加headless部署授权后，tools/local-delivery.py headless mac@10.10.10.18已完成beta.19备份及beta.20部署；旧/新版隔离PTY冒烟均通过，新PID99826、launchd running、发布status及executable inode一致；远端新binary hash与本机构建一致，旧备份hash/签名/版本已再次核对。配置、配对和host/node身份未变。未替换本机运行中macOS App；真实NAS事故验收仍pending。
+contract_state：complete（生产冻结；客户端交付及追加headless备份升级均完成，无新增生产修改）
 active_capability：none
-next_action：用户复测；若升级后NAS仍复发，需同session模式/行数/raw补证，不能沿用本次已复现缺陷当唯一原因。接管问题独立暂停；原有825个无关untracked保留（本任务记录已提交）。
+next_action：用户复测；若NAS仍复发需同session模式/行数/raw补证。需回退时复用既有deploy-headless.py，以已验证beta.19备份作为incoming、版本2.0.3-beta.19和完整旧hash执行；不需要改变配置或重新配对。接管问题独立暂停；原有825个无关untracked保留。
 
 ## Delivery Gate
 
-authorization：用户明确“提交, push to lan,打包, adb安装手机, mac app放下载目录”。当前main，lan=mac@10.10.10.21:/Users/mac/git_repo/codux.git。
+authorization：用户明确“提交, push to lan,打包, adb安装手机, mac app放下载目录”，本轮追加“那还是部署后早点测试暴露问题为好。部署前备份以便恢复”。当前main，lan=mac@10.10.10.21:/Users/mac/git_repo/codux.git。目标mac@10.10.10.18已只读确认Darwin/arm64、com.codux.host、binary=/Users/mac/.local/bin/codux、data=/Users/mac/.codux-agent；当前beta.19，PID1425，旧binary SHA256=bc0a7a48a4482fe39e1c993add4c34aac2a50f0e7a6479bece3de66c9a885479。
 frozen / verification / review：生产冻结；334项相关测试通过、4项opt-in忽略、5046组回放0异常；已完成证据绑定反驳及自审。git diff --check通过；22个tracked改动均在授权范围。
-compatibility / data / rollback：wire及持久化格式不变；Android仅同签名install -r保留数据；macOS只交付下载目录，保留同名不同内容的既有包；不升级headless或替换运行中桌面，回滚源代码可revert本次提交。
+compatibility / data / rollback：wire及持久化格式不变；Android仅同签名install -r保留数据；macOS仅交付下载目录、不替换运行中桌面。headless使用既有脚本先备份旧二进制为codux.backup-bc0a7a48a448并核对完整hash，再原子替换及重启；不改配置/配对，升级后验证其hash及host/node身份。恢复时可复用deploy-headless.py将已验证旧备份按beta.19版本和旧hash重新部署；不自动回滚。
 artifact_verification：复用tools/local-delivery.py验证版本、签名和最终副本hash；Android安装后APK hash必须一致；桌面验证ad-hoc签名、版本、架构。真实NAS场景验收仍pending。
-result：pass；提交/push/两端构建/macOS交付完成，Android已通过用户提供的192.168.1.2:37799安装并核对版本、同签名和设备APK hash。
+result：pass；客户端提交/push/两端构建/macOS交付及Android安装已完成；追加headless备份/升级/服务与PTY冒烟验证完成。
+headless_artifact：mac@10.10.10.18:/Users/mac/.local/bin/codux，2.0.3-beta.20，arm64，codesign --verify --strict通过；SHA256=2e86378938617250cce8fd3406f45becbe21a7fb25880a3f6ce714789188bd54，与本机target/release/codux-agent一致。launchd com.codux.host及status.json均PID99826，executable inode已由脚本验证；配置codux.toml、配对devices.json的hash及host/node身份不变。
+headless_backup：mac@10.10.10.18:/Users/mac/.local/bin/codux.backup-bc0a7a48a448；版本2.0.3-beta.19；SHA256=bc0a7a48a4482fe39e1c993add4c34aac2a50f0e7a6479bece3de66c9a885479，等于升级前binary；签名验证通过。备份由既有脚本在原子替换前创建并校验，部署后又独立核对。
+headless_checks：升级前beta.19与升级后实际beta.20均运行codux smoke pty，均观察到codux-agent-pty-ok。该检查隔离临时PTY，不等同真实客户端历史事故验收。日志/private/tmp/codux-keyframe-headless-delivery.log。
 desktop_artifact：/Users/mac/Downloads/Codux-2.0.3-beta.23.app；com.duxweb.codux，2.0.3-beta.23，Mach-O arm64，ad-hoc codesign --verify --deep --strict通过；最终bundle fingerprint=8ad4d847ec00f3788645d3b64d03c42b265a9294a4119e395cd9098f61469745。
 android_artifact：/Users/mac/Downloads/codux-android-2.0.3-beta.17+66-sideload-arm64.apk；com.duxweb.codux.sideload，versionName=2.0.3-beta.17.sideload，versionCode=66，arm64-v8a，APK签名验证通过；SHA256=e44b03bfe45a4c3944ffc751e84b581d519c7d1ddbe0fcc41ecba9df7864bcc8。已核对与旧安装包同签名；install -r成功，设备APK hash一致；原有数据保留。
 delivery_logs：/private/tmp/codux-keyframe-desktop-delivery.log；/private/tmp/codux-keyframe-android-delivery.log；/private/tmp/codux-keyframe-android-install.log。macOS既有同名包按脚本保留策略处理；未创建公开release。
