@@ -2,7 +2,7 @@
 
 ID: scrollback-shrinks-recurrence
 类型：bug
-状态：delivery（源码已冻结；用户授权提交、push lan、Android安装及macOS下载目录交付）
+状态：delivery（提交/push lan/两端打包/macOS交付完成；Android安装待设备连接）
 创建：2026-09-24
 更新：2026-09-24
 一句话描述：桌面和移动窗口滚动历史再次自动变短，当前移动 NAS Library 项目「终端1」为现场。
@@ -112,10 +112,10 @@ first-wrong：合成快照进入raw Processor的未结束控制序列/同步更�
 
 ## Checkpoint
 
-latest_verified：用户授权先修已复现缺陷，已完成。生产core隔离快照Processor并保留回放事件处理；桌面既有TerminalOutputEvent上移core，本地PTY改typed输出，删除raw+keyframe拼接和Bytes/Events分流。全部生产调用者编译，相关测试334通过/4 opt-in忽略，5046组OMP回放0异常；真实隔离PTY与desktop model均覆盖同步重绘中重绑/刷新。桌面beta.23、mobile beta.17+66、agent beta.20源版本已分别更新，wire不变。未打包、提交、安装或重启业务现场。NAS真实事故是否还有其他根因留待用户复测。
+latest_verified：修复提交bb645f49a5e8644eb7abc6735e0b83dcf2cf505a已push lan/main并ls-remote核对。334项相关测试通过/4项opt-in忽略，5046组回放0异常。tools/local-delivery.py desktop/android均成功：桌面beta.23与Android beta.17+66最终副本已校验并交付Downloads。Android构建日志确认重新编译codux-terminal-core和codux-protocol-ffi。手机未安装：ADB无设备，旧192.168.1.2:38417拒绝连接，mdns为空，已询问当前地址或USB连接。未重启NAS或替换运行中的macOS应用；未升级headless。真实事故验收仍pending。
 contract_state：frozen（生产已冻结；用户已授权提交、push lan、打包、ADB安装和macOS下载目录交付）
 active_capability：none
-next_action：提交当前修复并push lan/main；复用tools/local-delivery.py构建Android并安装现有sideload包、交付macOS App至Downloads。旧ADB 192.168.1.2:38417当前拒绝连接，查找现用地址。若升级后NAS仍复发，需同session模式/行数/raw补证。接管问题独立暂停；headless不升级，运行中macOS不替换。原有无关untracked保留。
+next_action：收到当前ADB地址或USB连接后，复用tools/local-delivery.py android --serial安装既有sideload包，校验同签名及设备APK hash并更新交付记录。安装授权持续有效，无需再次确认。若升级后NAS仍复发，需同session模式/行数/raw补证。接管问题独立暂停；原有825个无关untracked保留（本任务记录已提交）。
 
 ## Delivery Gate
 
@@ -123,7 +123,10 @@ authorization：用户明确“提交, push to lan,打包, adb安装手机, mac 
 frozen / verification / review：生产冻结；334项相关测试通过、4项opt-in忽略、5046组回放0异常；已完成证据绑定反驳及自审。git diff --check通过；22个tracked改动均在授权范围。
 compatibility / data / rollback：wire及持久化格式不变；Android仅同签名install -r保留数据；macOS只交付下载目录，保留同名不同内容的既有包；不升级headless或替换运行中桌面，回滚源代码可revert本次提交。
 artifact_verification：复用tools/local-delivery.py验证版本、签名和最终副本hash；Android安装后APK hash必须一致；桌面验证ad-hoc签名、版本、架构。真实NAS场景验收仍pending。
-result：ready；设备地址和交付结果待记录。
+result：partial；提交/push/两端构建/macOS交付完成，Android安装因无ADB连接待用户提供地址或USB。
+desktop_artifact：/Users/mac/Downloads/Codux-2.0.3-beta.23.app；com.duxweb.codux，2.0.3-beta.23，Mach-O arm64，ad-hoc codesign --verify --deep --strict通过；最终bundle fingerprint=8ad4d847ec00f3788645d3b64d03c42b265a9294a4119e395cd9098f61469745。
+android_artifact：/Users/mac/Downloads/codux-android-2.0.3-beta.17+66-sideload-arm64.apk；com.duxweb.codux.sideload，versionName=2.0.3-beta.17.sideload，versionCode=66，arm64-v8a，APK签名验证通过；SHA256=e44b03bfe45a4c3944ffc751e84b581d519c7d1ddbe0fcc41ecba9df7864bcc8。尚未与手机安装包校验同签名；未执行install。
+delivery_logs：/private/tmp/codux-keyframe-desktop-delivery.log；/private/tmp/codux-keyframe-android-delivery.log。macOS既有同名包按脚本保留策略处理；未创建公开release。
 
 ## 最终自审
 
