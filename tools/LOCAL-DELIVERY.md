@@ -79,6 +79,17 @@ the new app using the same bundle ID, and install upgrades at a stable path such
 as `/Applications/Codux.app`. Verify permissions on the actual macOS app after
 migration; packaging checks alone do not prove privacy prompts are resolved.
 
+Replacing `/Applications/Codux.app` by hand is outside `local-delivery.py`; use
+`ditto` (or `cp -Rp`) so the seal survives, and never re-sign the copy ad-hoc.
+Replace the previous bundle instead of parking it under
+`~/.local/share/codux/rollback/`. LaunchServices registers every `.app` on disk,
+and a stale record for a retired copy makes tccd resolve that copy's name: macOS
+then shows the retired app in the permission dialog and keeps prompting for its
+unstable ad-hoc identity even though the running app is the signed one. Prefer an
+archive over a runnable bundle for a rollback copy (a `.tar.gz` is never
+registered), and if prompts still name a bundle that no longer exists, refresh
+the database with `lsregister -kill -r -domain local -domain system -domain user`.
+
 Headless requires macOS on both machines, matching CPU architectures, SSH access,
 and an existing `com.codux.host` user LaunchAgent. Its plist owns the executable
 and data paths. The remote helper validates hash, version and signature before
