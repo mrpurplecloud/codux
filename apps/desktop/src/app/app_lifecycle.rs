@@ -274,7 +274,7 @@ impl CoduxApp {
             file_tree_scroll_handle: UniformListScrollHandle::new(),
             file_panel_refreshing: false,
             file_mutation_generation: 0,
-            selected_project_path_available: true,
+            project_drive_availability: None,
             selected_git_file: None,
             selected_git_branch,
             git_review,

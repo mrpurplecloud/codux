@@ -1,0 +1,95 @@
+# 任务
+
+ID: desktop-drive-probe
+类型：bug
+状态：done
+创建：2026-09-26
+更新：2026-09-26
+一句话描述：NAS Library 的磁盘恢复探测在 UI 线程等待 stat，导致整窗假死。
+
+## 等级
+
+grade：Guarded
+依据：异步 UI 生命周期、过期结果、共享调度器和桌面版本。
+升级触发证据：none
+
+## Active Contract
+
+state：complete
+
+### 目标
+
+所选本地项目的磁盘可用性检查不阻塞 UI；保留 missing→available 时文件树/Git/watchers 恢复。一次最多一个检查；项目/工作树切换后不应用旧检查或旧可用性基线。
+
+### 证据
+
+A：未修改的 /Applications/Codux.app beta.22，PID 91356，NAS Library /Volumes/AllData/Library（SMB）。2026-09-26 17:40:48 -0700 开始的 30s sample，主线程 1363/2650 样本停在 detect_project_drive_recovery→Path::is_dir→stat；当前源码仍有同一路径。证据 /private/tmp/codux-hang-watch.4xfRL8/codux-30s-01.txt:51。last-known-good：GPUI timer 调度进入 UI update；first-wrong：panel.rs:103 在 UI update 内执行文件系统 stat。
+现有正确路径证据见当前阶段。
+
+### 授权变更
+
+单因果单元：磁盘探测跨 UI 边界。复用 spawn_blocking、begin/finish_scheduled_work、project_switch_generation；可用性基线附带 generation/path，替代原无身份 bool。结果失败记录原错误并保留基线；过期结果不应用并重新检查当前项目。保留 is_dir/path identity 与恢复动作。
+
+### 范围
+
+owner / invariant：CoduxApp 的所选本地磁盘恢复检查；UI 无磁盘探测、single flight、只发布当前选择结果。
+allowed_files：apps/desktop/src/app/file_actions/panel.rs（实现与局部回归测试）；apps/desktop/src/app/app_state.rs；apps/desktop/src/app/app_lifecycle.rs；apps/desktop/src/app/window_actions/windows.rs（基线类型与构造）；apps/desktop/Cargo.toml；Cargo.lock（生成更新）；docs/version-compatibility.md。
+out_of_scope：AI 状态锁（下一独立任务）、宠物路径 I/O、SMB/OS 取消机制、全量增量解析优化、终端渲染、进程拆分、安装/打包/提交/push。
+
+### 验证
+
+baseline：上述真实未修改应用采样；新增 source-contract 测试在旧实现失败。
+target_check：cargo test -p codux drive_recovery -- --nocapture；验证探测仅在 spawn_blocking 内、single-flight 与清理/重试接线；可用性转换、首次选择、项目/路径代次变化、A→B→A。
+nearest_regression_check：cargo test -p codux app::file_actions；cargo test -p codux app::project_actions；rustfmt --check 修改文件；git diff --check。
+broader_check_reason：无重打包/安装授权，测试编译不生成交付包，无法证明当前运行中的旧应用改善。
+broader_checks：none
+
+## 当前阶段
+
+phase：fix
+
+### 现有正确路径证据
+
+examined_existing_paths：panel.rs reload_project_files_async 使用后台阻塞执行和 generation 校验；app_lifecycle.rs spawn_runtime_scheduled_refresh 使用 spawn_blocking + begin/finish_scheduled_work；work_scheduler.rs 已拥有 single-flight；project_actions/selection.rs 与 terminal_worktree_actions/worktree_actions.rs 均递增 project_switch_generation。历史 0a2c98c1 证明 missing→available 恢复 watchers 的原契约；61e37714 统一本地路径身份，不能去掉文件系统身份比较代替后台化。
+reuse_decision：extend-existing 后台执行、调度器、选择代次；保留 recover_project_drive。
+decision_evidence：现有无身份 bool 不能在异步结果跨选择时安全继承，替换为带 generation/path 的最后结果；不新增并行状态源、线程池、计时器或配置。
+
+### 根因与 owner
+
+causal_chain：约 1s UI tick→同步 is_dir→SMB stat 等待→键鼠事件排队。
+first-wrong condition：在 UI update 里访问不可预测延迟的项目文件系统。
+A_evidence：1363/2650 主线程采样。
+owner：CoduxApp 磁盘恢复检查。
+invariant：探测不得占用 UI，恢复只针对当前项目/工作树。
+
+### 授权机制
+
+causal_unit：UI 同步磁盘恢复探测。
+mechanism：现有后台线程池 + 现有 single-flight scheduler + 现有 generation；基线替代无身份 bool。
+evidence_binding：每项仅解决 probe I/O 或该 I/O 异步化导致的过期结果/积压。
+why_minimal_and_sufficient：不重构恢复动作，不改变 is_dir 意义，不增加线程池。
+
+### 备选
+
+alternatives：把 NAS 判为远程并跳过探测会破坏本机挂载恢复；移除 stat 会丢失恢复功能；均排除。
+
+### 实际命中风险
+
+contract / data / concurrency / compatibility / rollback：无持久化/协议变更；恢复提示晚至后台检查完成；旧结果/错误不能覆盖新状态；single-flight 限制 OS 挂起时最多一条工作线程。
+verification_only：首次可用不触发恢复；missing→available 恰触发一次；代次和路径切换隔离；A→B→A；错误不更新基线；关闭实体后台结果不发布。
+out_of_scope：无法中断内核 SMB stat；若旧检查永不返回，新项目磁盘恢复检查会等待，但 UI 与其他后台工作不等待。未承诺任意 NAS 故障下恢复检测时限。
+
+### 修改前方案审查
+
+existing_path_check：pass — 重用现有 scheduler/代次/后台执行，替换旧 bool，无新增重复调度 owner。
+owner_and_evidence：pass — 直接移除采样中的 UI stat。
+semantic_scope：pass — 仅磁盘恢复因果单元。
+verification_power：pass — 真实基线 + 生产接线 source-contract + 转换回归；安装后 UI 实测明确未覆盖。
+result：pass
+
+## Checkpoint
+
+latest_verified：未修改生产代码的 source-contract 回归失败；修复后 drive_recovery 4 passed（file_actions 最近回归同为这 4 项）、project_actions 4 passed；rustfmt/check 与 git diff --check 通过。Cargo.lock 由 Cargo 更新为桌面 beta.24。自审三问通过：只改 probe 边界/基线/版本；恢复动作原样；现有 scheduler 唯一拥有在途状态。证据绑定反驳：异步闭包在 UI poll 是否仍执行 stat？stat 只在 spawn_blocking closure 内；错误/旧结果先 finish，不滞留 busy；已有 project/worktree generation 都递增，旧 A 不污染 A→B→A。没有包构建/安装/修复后 live UI 证据；不声称旧应用改善。
+contract_state：complete
+active_capability：none
+next_action：本因果单元完成；按用户授权切换独立任务 ai-state-lock-isolation，保持本生产代码冻结。

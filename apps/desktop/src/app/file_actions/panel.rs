@@ -1,6 +1,134 @@
 use super::*;
 use crate::app::project_actions::FilePickerOpenRequest;
 
+#[cfg(test)]
+mod tests {
+    use super::record_project_drive_availability;
+
+    #[test]
+    fn drive_recovery_probe_is_off_ui_thread() {
+        let source = include_str!("panel.rs");
+        let body = source
+            .split("\n    pub(in crate::app) fn detect_project_drive_recovery")
+            .nth(1)
+            .unwrap()
+            .split("\n    fn recover_project_drive")
+            .next()
+            .unwrap();
+        let worker = body.find("spawn_blocking").expect("probe must run off UI");
+        let probe = body.find(".is_dir()").expect("retain directory probe");
+        let publish = body.find("this.update").expect("publish result on UI");
+        assert!(worker < probe && probe < publish);
+        assert!(body.contains("begin_scheduled_work"));
+        assert!(body.contains("finish_scheduled_work"));
+        assert!(body.contains("app.project_switch_generation != generation"));
+        assert!(body.contains("app.selected_worktree_path().as_deref() != Some(path.as_str())"));
+        assert!(body.contains("app.detect_project_drive_recovery(cx)"));
+    }
+
+    #[test]
+    fn drive_recovery_only_fires_on_same_selection_returning() {
+        let mut previous = None;
+        assert!(!record_project_drive_availability(
+            &mut previous,
+            1,
+            "/a",
+            true
+        ));
+        assert!(!record_project_drive_availability(
+            &mut previous,
+            1,
+            "/a",
+            false
+        ));
+        assert!(!record_project_drive_availability(
+            &mut previous,
+            1,
+            "/a",
+            false
+        ));
+        assert!(record_project_drive_availability(
+            &mut previous,
+            1,
+            "/a",
+            true
+        ));
+        assert!(!record_project_drive_availability(
+            &mut previous,
+            1,
+            "/a",
+            true
+        ));
+    }
+
+    #[test]
+    fn drive_recovery_does_not_inherit_another_selection_baseline() {
+        let mut previous = Some((1, "/a".to_string(), false));
+        assert!(!record_project_drive_availability(
+            &mut previous,
+            2,
+            "/b",
+            true
+        ));
+        // A -> B -> A while the old A probe was in flight is a new selection.
+        previous = Some((1, "/a".to_string(), false));
+        assert!(!record_project_drive_availability(
+            &mut previous,
+            3,
+            "/a",
+            true
+        ));
+        previous = Some((3, "/a".to_string(), false));
+        assert!(!record_project_drive_availability(
+            &mut previous,
+            3,
+            "/new-path",
+            true
+        ));
+    }
+
+    #[test]
+    fn drive_recovery_initial_missing_path_still_recovers() {
+        let mut previous = None;
+        assert!(!record_project_drive_availability(
+            &mut previous,
+            1,
+            "/a",
+            false
+        ));
+        assert!(record_project_drive_availability(
+            &mut previous,
+            1,
+            "/a",
+            true
+        ));
+        // Leaving local projects clears the baseline.
+        previous = None;
+        assert!(!record_project_drive_availability(
+            &mut previous,
+            1,
+            "/a",
+            true
+        ));
+    }
+}
+
+fn record_project_drive_availability(
+    previous: &mut Option<(u64, String, bool)>,
+    generation: u64,
+    path: &str,
+    available: bool,
+) -> bool {
+    let recovered = available
+        && previous
+            .as_ref()
+            .is_some_and(|(last_generation, last_path, was_available)| {
+                *last_generation == generation && last_path == path && !was_available
+            });
+    *previous = Some((generation, path.to_string(), available));
+    recovered
+}
+
 impl CoduxApp {
     pub(in crate::app) fn current_file_panel_state_snapshot(
         &self,
@@ -95,16 +223,53 @@ impl CoduxApp {
             .as_ref()
             .is_some_and(|project| project.runtime_target.is_local());
         let Some(path) = self.selected_worktree_path().filter(|_| is_local) else {
-            // Nothing local selected: keep the baseline "available" so a later
-            // local selection doesn't spuriously fire recovery on its first tick.
-            self.selected_project_path_available = true;
+            self.project_drive_availability = None;
             return;
         };
-        let available = std::path::Path::new(&path).is_dir();
-        if available && !self.selected_project_path_available {
-            self.recover_project_drive(path, cx);
+        let scheduler_key = "project_drive_probe";
+        if !self.begin_scheduled_work(scheduler_key, ScheduledWorkPolicy::new(0.0, 0.0)) {
+            return;
         }
-        self.selected_project_path_available = available;
+        let generation = self.project_switch_generation;
+        cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
+            // A local path can live on SMB. Never wait for its metadata on UI,
+            // and do not occupy the limited queue used by project switching.
+            let probe_path = path.clone();
+            let result = codux_runtime::async_runtime::spawn_blocking(move || {
+                std::path::Path::new(&probe_path).is_dir()
+            })
+            .await;
+            let _ = this.update(cx, |app, cx| {
+                app.finish_scheduled_work(scheduler_key);
+                if app.project_switch_generation != generation
+                    || app.selected_worktree_path().as_deref() != Some(path.as_str())
+                    || !app
+                        .state
+                        .selected_project
+                        .as_ref()
+                        .is_some_and(|project| project.runtime_target.is_local())
+                {
+                    app.detect_project_drive_recovery(cx);
+                    return;
+                }
+                let available = match result {
+                    Ok(available) => available,
+                    Err(error) => {
+                        app.runtime_trace("files", &format!("drive probe failed: {error}"));
+                        return;
+                    }
+                };
+                if record_project_drive_availability(
+                    &mut app.project_drive_availability,
+                    generation,
+                    &path,
+                    available,
+                ) {
+                    app.recover_project_drive(path, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     fn recover_project_drive(&mut self, worktree_path: String, cx: &mut Context<Self>) {

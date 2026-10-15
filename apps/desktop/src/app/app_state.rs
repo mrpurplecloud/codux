@@ -214,11 +214,9 @@ pub struct CoduxApp {
     pub(in crate::app) file_tree_scroll_handle: UniformListScrollHandle,
     pub(in crate::app) file_panel_refreshing: bool,
     pub(in crate::app) file_mutation_generation: u64,
-    // Whether the selected LOCAL project's worktree path is currently a live
-    // directory. A false→true flip (an external drive remounting at the same
-    // path with a new inode) triggers auto-recovery of the file tree, git, and
-    // the file/git watchers — which otherwise die silently on unmount.
-    pub(in crate::app) selected_project_path_available: bool,
+    // Last local drive probe: selection generation, path, availability. Only
+    // a false→true flip in the same selection triggers watcher recovery.
+    pub(in crate::app) project_drive_availability: Option<(u64, String, bool)>,
     pub(in crate::app) selected_git_file: Option<String>,
     pub(in crate::app) selected_git_branch: Option<String>,
     pub(in crate::app) git_review: GitReviewSummary,

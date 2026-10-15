@@ -157,10 +157,13 @@ impl AIRuntimeStateStore {
         let Ok(core) = self.core.lock() else {
             return Vec::new();
         };
-        core.sessions
-            .values()
-            .filter(|session| is_transcript_monitored_session(session))
-            .cloned()
+        let sessions = core.sessions.values().cloned().collect::<Vec<_>>();
+        // Resource discovery can parse transcripts and resolve network-volume
+        // paths. UI snapshots and state mutations must not wait for that I/O.
+        drop(core);
+        sessions
+            .into_iter()
+            .filter(is_transcript_monitored_session)
             .collect()
     }
 

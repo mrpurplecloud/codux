@@ -1,0 +1,104 @@
+# 任务
+
+ID: ai-state-lock-isolation
+类型：bug
+状态：done
+创建：2026-09-26
+更新：2026-09-27
+一句话描述：会话资源发现在持有 AI 状态锁时解析会话/网络盘路径，UI 读取快照被阻塞。
+
+## 等级
+
+grade：Guarded
+依据：共享状态锁、跨产品 runtime、并发。
+升级触发证据：none
+
+## Active Contract
+
+state：complete
+
+### 目标
+
+会话资源发现/解析等待 I/O 时，其他线程仍可获取最新内存状态快照、移除会话；保持会话候选与工具资源识别行为。
+
+### 证据
+
+A：未修改 Codux beta.22，30 秒捕获中主线程 500/2650 样本等待 AIRuntimeStateStore::snapshot 的 core mutex；同窗口 supervisor 在 transcript_monitored_sessions 下执行 OMP parse 与 canonicalize/statfs。/private/tmp/codux-hang-watch.4xfRL8/codux-30s-01.txt:55,1767。last-known-good：已拥有会话内存元数据；first-wrong：store.rs transcript_monitored_sessions 的 core guard 覆盖 is_transcript_monitored_session→runtime_resource_paths。
+当前源码保持相同锁范围；真实 FIFO 慢读回归将确认该共享锁因果，不依赖 NAS 人工复现。
+
+### 授权变更
+
+单因果单元：缩短 core 锁范围。锁内仅克隆当前会话，显式释放后使用原 predicate 做资源发现；不改变返回值契约、不增加缓存/后台线程/取消机制/忽略错误。测试使用真实临时 FIFO 阻塞 OMP 读取，验证同时读取/移除状态及不复活过期会话。
+
+### 范围
+
+owner / invariant：AIRuntimeStateStore core 只保护内存状态，资源发现不得持有此锁。
+allowed_files：crates/codux-runtime-live/src/ai_runtime/store.rs；crates/codux-runtime-live/src/ai_runtime/store/tests/isolation.rs；apps/agent/Cargo.toml；Cargo.lock（Cargo 生成）；docs/version-compatibility.md。
+out_of_scope：前一任务已冻结桌面磁盘探测；monitor map 的独立锁、全量解析性能、宠物文件 I/O、所有其他未复现锁路径、进程拆分、网络配置、打包/安装/提交/push。
+
+### 验证
+
+baseline：原应用采样；cargo test -p codux-runtime-live transcript_discovery -- --nocapture，FIFO 期间 core.try_lock 必须原实现失败。
+target_check：同一 FIFO 测试修复后通过，资源发现尚未返回时 snapshot/移除可执行；返回发现快照不写回最新状态；普通工具候选过滤结果保持一致。
+nearest_regression_check：cargo test -p codux-runtime-live ai_runtime::store；cargo test -p codux-runtime-live ai_runtime::monitor；cargo test -p codux-runtime-live ai_runtime::probe::paths::tests::omp；cargo test -p codux-runtime-live ai_runtime::supervisor；cargo test -p codux ai_runtime_status；cargo check -p codux-agent；rustfmt/check、git diff --check。
+broader_check_reason：共享库被 desktop 与 headless 使用；两入口编译/针对性测试。mobile FFI 无 runtime-live 依赖，不改 mobile 版本。
+broader_checks：不重打包、不安装；修复后真实 UI 验收未覆盖。
+
+## 当前阶段
+
+phase：fix
+
+### 现有正确路径证据
+
+examined_existing_paths：supervisor.rs poll_runtime_sessions 先获取 runtime_tracked_sessions/sessions_for_terminals 克隆，再在锁外 probe；本任务复用相同快照边界。state.snapshot 本身只从内存 summary；不需替换为新缓存。唯一 transcript_monitored_sessions caller 为 after_mutation，资源返回仅驱动 monitor map，状态更新仍由 supervisor 串行处理。is_transcript_monitored_session 另在 should_poll_runtime_session 调用，但该调用已在锁外。历史 1116460e 加强状态/终端生命周期，df3bfab6 清除过期活动状态；保持这些判定与通知顺序，不改其 owner。
+reuse_decision：extend-existing 克隆内存会话后在锁外 probe 的路径。
+decision_evidence：现有 API 无需改动；只需把 clone 移至 predicate 前并 drop core。不得以新增 try_lock fallback 隐藏阻塞或返回伪空状态。
+
+### 根因与 owner
+
+causal_chain：supervisor 持 core 锁解析 OMP/路径→NAS/长文件等待→UI snapshot 等同一锁。
+first-wrong condition：I/O predicate 在 core guard 生命周期内执行。
+A_evidence：生产主线程与 supervisor 栈；追加真实阻塞读基线。
+owner：AIRuntimeStateStore。
+invariant：状态快照不等待资源探测 I/O；资源发现不能改写最新业务状态。
+
+### 授权机制
+
+causal_unit：资源发现持有共享状态锁。
+mechanism：锁内 clone、显式 drop、锁外原 predicate。
+evidence_binding：直接消除 sample 中 I/O 持 core 锁的边。
+why_minimal_and_sufficient：保持 session/路径/完成语义，没有新增 owner、缓存或公开 API。
+
+### 备选
+
+alternatives：try_lock 后返回空或旧状态会更改业务结果；整条链改 IPC 超出已证实修复范围，均排除。
+
+### 实际命中风险
+
+contract / data / concurrency / compatibility / rollback：资源发现期间其他线程可读取/移除状态；发现结果是开始时快照，不作为后续状态写入依据。额外临时克隆所有候选，规模为现有会话数，不复制日志全文。桌面 beta.24 已由前一任务提升，headless beta.20→beta.21；无线协议、持久化和 mobile 变化。
+verification_only：阻塞 I/O 期间快照/移除可用；发现完成不复活会话；原工具过滤结果；完成/通知/绑定回归。
+out_of_scope：后台 OMP 全量解析仍可能高 CPU，但不应再持 core 锁；其他 UI 同步 I/O 不纳入该独立根因。
+
+### 修改前方案审查
+
+existing_path_check：pass — 复用 supervisor 已使用的短锁快照，不新增职责。
+owner_and_evidence：pass — core lock 的生命周期直接解释 UI 等待。
+semantic_scope：pass — 只缩短锁，不改 probe/identity/业务完成状态。
+verification_power：pass — 真实 FIFO 控制 I/O，旧实现必能观察锁占用，不依赖耗时阈值推断原因；相邻状态套件验证语义。
+result：pass
+
+## 本地 App 交付
+
+authorization：2026-09-27 用户要求「不用dmg，app就行」，授权将含当前两项已完成修复的桌面 beta.24 .app 构建到 /Users/mac/Downloads；不安装、不替换当前运行应用、不提交、不 push，不构建或部署 headless/mobile。此授权仅补充原打包边界，生产契约与源码保持冻结。
+delivery_gate：passed。两任务专项/最近回归/自审已完成；当前 10 个 tracked 文件 diff 与已验证范围一致，git diff --check 通过；无协议/持久化迁移。Downloads 同名不同产物由现有脚本保留，未替换当前安装或重启应用。
+command：CARGO_BUILD_JOBS=2 nice -n 10 python3 tools/local-delivery.py desktop。
+environment：本机 macOS arm64，main / 94736f8b，tracked diff SHA-256 51314a132a27bd199ee565f0df311a2a0c51005cc939ae7c3ba888453f19bc1d；复用项目标准打包流程，本地 ad-hoc 签名。脚本生成并自动清理临时 DMG/updater，只向 Downloads 交付 .app；不修改发布脚本。
+verification：核对最终 Downloads 副本的 bundle ID、源码/二进制/plist 版本、arm64 架构、codesign --verify --deep --strict 和副本校验和；不启动 GUI，不把构建通过表述为彩球问题实机验收。
+result：passed。release 构建 3m14s，标准脚本退出 0；最终副本 /Users/mac/Downloads/Codux-2.0.3-beta.24.app，bundle ID com.duxweb.codux，plist 2.0.3-beta.24，二进制 --version 为 codux 2.0.3-beta.24，架构 arm64，签名 adhoc，codesign --verify --deep --strict --verbose=2 通过。交付目录树 fingerprint SHA-256 7edc02ed3a7a7a30bf96a31b2de10f2c2f55810e90feaf23706f06afca150308；最终二进制 SHA-256 082ac147eda1f2b23f3c4f0c5ee9120610620f5790d2e34ec8913cf9a2c61172。日志 /private/tmp/codux-desktop-delivery.0h2aIj/build.log。临时 DMG/updater 目录已由脚本清理；Downloads 原 beta.23.app 和原 DMG 均保留，仅新增 beta.24.app。构建前后 tracked diff hash 相同，10 个 tracked 改动 / 827 个 untracked 数量未变。未启动 GUI、安装、进行新版 NAS 现场验收，兼容表仍 pending。依赖 block v0.1.6 提示未来 Rust 不兼容警告，当前构建成功，未变更依赖。
+
+## Checkpoint
+
+latest_verified：真实 FIFO 未修改实现失败；修复后 transcript_discovery 2 passed。store 65（含 FIFO/过滤）+ monitor 2 + OMP paths 3 + supervisor 10 + desktop ai_runtime_status 4 passed；cargo check -p codux-agent 通过；rustfmt/check 和 git diff --check 通过。Cargo 生成 headless beta.21 lock；桌面沿用本轮 beta.24，mobile 无依赖影响。调用点扫描确认唯一生产 caller 仍为 supervisor.after_mutation；predicate 另一个 caller 已锁外。自审三问通过：生产只 clone/drop，未改状态判定/解析/持久化/错误处理，无新增 owner/cache；原语义过滤对照通过。证据绑定反驳：是否只把锁等待换成旧状态覆盖？FIFO 期间真实 snapshot/移除成功，旧发现结果返回后 core 仍空，未写回；候选为时间点快照，与现有 supervisor probe 模式一致。额外克隆量限于现有会话元数据，无日志正文。无修复后应用安装/现场 UI 采样证据，不声称当前旧进程改善。
+contract_state：complete
+active_capability：none
+next_action：已授权的桌面 .app 构建及最终副本校验完成；源码保持冻结。等待用户试用或下一授权；不把构建通过表述为彩球问题全部解决。仍无安装、commit/push、headless/mobile 交付授权。

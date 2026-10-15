@@ -1,6 +1,109 @@
 use super::super::*;
 use super::fixtures::*;
 
+#[cfg(unix)]
+#[test]
+fn transcript_discovery_releases_state_lock_during_slow_io() {
+    use std::{
+        ffi::CString,
+        fs::OpenOptions,
+        io::Write,
+        os::unix::{ffi::OsStrExt, fs::OpenOptionsExt},
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    let directory = std::env::temp_dir().join(format!("codux-discovery-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&directory).unwrap();
+    let path = directory.join("session.jsonl");
+    let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+    // A real driver read, held until this test releases the writer. No test
+    // callback, clock threshold, or production API change is needed.
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+    let store = Arc::new(AIRuntimeStateStore::default());
+    store.apply_hook(test_hook("promptSubmitted", 1000.0));
+    {
+        let mut core = store.core.lock().unwrap();
+        let session = core.sessions.get_mut("terminal-1").unwrap();
+        session.tool = "omp".to_string();
+        session.project_path = Some(directory.to_string_lossy().into_owned());
+        session.transcript_path = Some(directory.to_string_lossy().into_owned());
+        session.ai_session_id = None;
+        session.started_at = None;
+    }
+    let reader = std::thread::spawn({
+        let store = Arc::clone(&store);
+        move || store.transcript_monitored_sessions()
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut writer = loop {
+        match OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+        {
+            Ok(writer) => break writer,
+            Err(error)
+                if error.raw_os_error() == Some(libc::ENXIO) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => panic!("discovery did not reach FIFO: {error}"),
+        }
+    };
+    // Opening the writer proves the driver has reached the FIFO. Withhold EOF
+    // while checking the state lock; do not infer lock contention from timing.
+    let state_is_accessible = store.core.try_lock().is_ok();
+    let (snapshot_count, removed) = if state_is_accessible {
+        (
+            store.snapshot().sessions.len(),
+            store.remove_session("terminal-1"),
+        )
+    } else {
+        (0, false)
+    };
+    let row = serde_json::json!({"type":"session", "id":"slow-session", "cwd":directory});
+    writeln!(writer, "{row}").unwrap();
+    drop(writer);
+    let discovered = reader.join().unwrap();
+    fs::remove_file(&path).unwrap();
+    fs::remove_dir(&directory).unwrap();
+
+    assert!(
+        state_is_accessible,
+        "resource discovery held the UI state lock during I/O"
+    );
+    assert_eq!(snapshot_count, 1);
+    assert!(removed);
+    assert_eq!(discovered.len(), 1);
+    assert_eq!(discovered[0].terminal_id, "terminal-1");
+    assert!(
+        store.snapshot().sessions.is_empty(),
+        "discovery must not resurrect a removed session"
+    );
+}
+
+#[test]
+fn transcript_discovery_preserves_resource_filtering() {
+    let store = AIRuntimeStateStore::default();
+    store.apply_hook(test_hook("promptSubmitted", 1000.0));
+    let expected = {
+        let mut core = store.core.lock().unwrap();
+        let session = core.sessions.get_mut("terminal-1").unwrap();
+        session.tool = "claude".to_string();
+        session.transcript_path = Some("/transcripts/claude.jsonl".to_string());
+        let expected = session.clone();
+        let mut unsupported = expected.clone();
+        unsupported.terminal_id = "unsupported".to_string();
+        unsupported.tool = "not-a-runtime-tool".to_string();
+        core.sessions
+            .insert(unsupported.terminal_id.clone(), unsupported);
+        expected
+    };
+    assert_eq!(store.transcript_monitored_sessions(), vec![expected]);
+}
+
 #[test]
 fn first_prompt_notifies_when_terminal_already_has_detected_session() {
     // Process detection creates an idle session first; the first prompt event
