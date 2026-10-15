@@ -23,3 +23,7 @@
 /apps/relay-server/*.sqlite3
 /apps/relay-server/build/
 /apps/relay-server/target/
+
+# Python tooling artifacts
+**/__pycache__/
+**/*.pyc
