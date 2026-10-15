@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SDK = Path.home() / "Library/Android/sdk"
 ADB = SDK / "platform-tools/adb"
 DOWNLOADS = Path.home() / "Downloads"
+MACOS_SIGNING_IDENTITY_FILE = Path.home() / ".config/codux/macos-signing-identity"
 
 
 def run(*args, cwd=ROOT, env=None, capture=False):
@@ -181,7 +182,50 @@ def android(serial):
         print("Verified installed sideload APK; existing app data retained.")
 
 
+def macos_signing_identity():
+    identity = (
+        os.environ.get("MACOS_SIGNING_IDENTITY", "").strip()
+        or os.environ.get("APPLE_SIGNING_IDENTITY", "").strip()
+    )
+    if not identity and MACOS_SIGNING_IDENTITY_FILE.exists():
+        identity = MACOS_SIGNING_IDENTITY_FILE.read_text().strip()
+    guidance = (
+        "Local desktop delivery requires an Apple-issued app signing identity. "
+        "Install an Apple Development or Developer ID Application certificate "
+        "with its private key, then set MACOS_SIGNING_IDENTITY to its full name "
+        "or SHA-1 from 'security find-identity -v -p codesigning', or save it in "
+        f"{MACOS_SIGNING_IDENTITY_FILE}. "
+        "Ad-hoc signing does not preserve macOS permission identity across builds."
+    )
+    if not identity or identity == "-":
+        raise RuntimeError(guidance)
+    available = run(
+        "security", "find-identity", "-v", "-p", "codesigning", capture=True
+    )
+    matches = {
+        digest.upper()
+        for digest, name in re.findall(
+            r'^\s*\d+\) ([0-9A-Fa-f]{40}) "([^"]+)"\s*$', available, re.M
+        )
+        if name.startswith(
+            ("Apple Development:", "Mac Developer:", "Developer ID Application:")
+        )
+        and (identity == name or identity.upper() == digest.upper())
+    }
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"Signing identity is missing, invalid or ambiguous. {guidance}"
+        )
+    return matches.pop()
+
+
 def desktop():
+    signing_identity = macos_signing_identity()
+    print(f"Using macOS signing certificate: {signing_identity}", flush=True)
+    requirement = (
+        '=anchor apple generic and identifier "com.duxweb.codux" '
+        f'and certificate leaf = H"{signing_identity}"'
+    )
     version = cargo_version("desktop")
     run("cargo", "build", "--locked", "--release", "-p", "codux")
     with tempfile.TemporaryDirectory(prefix="codux-desktop-") as temporary:
@@ -190,14 +234,23 @@ def desktop():
             RELEASE_STAGE_DIR=os.path.relpath(temporary, ROOT),
             RELEASE_BUILD_ID="local",
             RELEASE_WRITE_STABLE_ALIAS="false",
-            MACOS_SIGNING_IDENTITY="-",
+            MACOS_SIGNING_IDENTITY=signing_identity,
         )
         run("node", "apps/desktop/scripts/release/package-gpui.mjs", env=env)
         stage = Path(temporary) / "local"
         (archive,) = stage.glob("*-updater.app.tar.gz")
         run("tar", "-xzf", str(archive), "-C", str(stage))
+        verify = (
+            "codesign",
+            "--verify",
+            "--deep",
+            "--strict",
+            "--test-requirement",
+            requirement,
+        )
+        run(*verify, str(stage / "Codux.app"))
         delivered = deliver(stage / "Codux.app", f"Codux-{version}.app")
-        run("codesign", "--verify", "--deep", "--strict", str(delivered))
+        run(*verify, str(delivered))
         actual = run(str(delivered / "Contents/MacOS/Codux"), "--version", capture=True)
         if actual != f"codux {version}":
             raise RuntimeError("Delivered desktop version differs from source")
