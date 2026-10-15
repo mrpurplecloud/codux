@@ -2617,6 +2617,7 @@ fn terminal(id: &str, project_id: &str) -> RemoteRuntimeTerminal {
     RemoteRuntimeTerminal {
         id: id.to_string(),
         title: id.to_string(),
+        custom_title: false,
         project_id: project_id.to_string(),
         worktree_id: None,
         layout_order: None,
@@ -2626,4 +2627,21 @@ fn terminal(id: &str, project_id: &str) -> RemoteRuntimeTerminal {
         created_at: Some(id.to_string()),
         buffer_characters: None,
     }
+}
+
+#[test]
+fn terminal_custom_title_defaults_false_for_older_snapshots() {
+    let old = serde_json::json!({
+        "id": "terminal-1",
+        "title": "Terminal",
+        "projectId": "project-1"
+    });
+    let terminal: RemoteRuntimeTerminal = serde_json::from_value(old).unwrap();
+    assert!(!terminal.custom_title);
+    let renamed = RemoteRuntimeTerminal {
+        title: "Build logs".to_string(),
+        custom_title: true,
+        ..terminal
+    };
+    assert_eq!(serde_json::to_value(renamed).unwrap()["customTitle"], true);
 }

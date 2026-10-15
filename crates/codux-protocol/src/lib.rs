@@ -62,6 +62,7 @@ pub const REMOTE_TERMINAL_SUBSCRIBE: &str = "terminal.subscribe";
 pub const REMOTE_TERMINAL_UNSUBSCRIBE: &str = "terminal.unsubscribe";
 pub const REMOTE_TERMINAL_CREATE: &str = "terminal.create";
 pub const REMOTE_TERMINAL_CREATED: &str = "terminal.created";
+pub const REMOTE_TERMINAL_RENAME: &str = "terminal.rename";
 pub const REMOTE_TERMINAL_CLOSE: &str = "terminal.close";
 pub const REMOTE_TERMINAL_CLOSED: &str = "terminal.closed";
 pub const REMOTE_TERMINAL_BUFFER: &str = "terminal.buffer";
@@ -1155,6 +1156,7 @@ pub fn host_capabilities() -> Value {
         "terminalUpload": {
             "requestId": true,
         },
+        "terminalRename": true,
         "terminalViewport": {
             "ownership": true,
             "state": true,

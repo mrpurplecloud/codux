@@ -107,6 +107,7 @@ pub struct TerminalViewportState {
 pub struct TerminalSessionSnapshot {
     pub id: String,
     pub title: String,
+    pub custom_title: bool,
     pub slot_id: String,
     pub session_key: Option<String>,
     pub project_id: String,

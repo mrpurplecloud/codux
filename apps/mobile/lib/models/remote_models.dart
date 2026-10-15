@@ -387,6 +387,7 @@ class TerminalInfo {
   const TerminalInfo({
     required this.id,
     required this.title,
+    this.customTitle = false,
     required this.projectId,
     this.worktreeId,
     this.layoutOrder,
@@ -398,6 +399,7 @@ class TerminalInfo {
   });
   final String id;
   final String title;
+  final bool customTitle;
   final String projectId;
   final String? worktreeId;
   final int? layoutOrder;
@@ -410,6 +412,7 @@ class TerminalInfo {
   factory TerminalInfo.fromJson(Map<String, dynamic> json) => TerminalInfo(
     id: '${json['id'] ?? ''}',
     title: '${json['title'] ?? 'Terminal'}',
+    customTitle: json['customTitle'] == true,
     projectId: '${json['projectId'] ?? ''}',
     worktreeId: json['worktreeId']?.toString(),
     layoutOrder: json['layoutOrder'] is num

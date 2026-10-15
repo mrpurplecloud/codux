@@ -28,6 +28,41 @@ extension _HomePageWorkspace on HomeController {
     _terminalActions.closeTerminal(terminal);
   }
 
+  Future<void> _renameTerminal(TerminalInfo terminal) async {
+    final prefs = AppPreferences.of(context);
+    if (!_terminalRenameSupported) {
+      _showToast(prefs.t('terminal.renameUnsupported'));
+      return;
+    }
+    final nextTitle = await showDialog<String>(
+      context: context,
+      builder: (ctx) => FileRenameDialog(
+        title: prefs.t('terminal.renameTitle'),
+        label: prefs.t('terminal.renameLabel'),
+        cancelLabel: prefs.t('file.cancel'),
+        saveLabel: prefs.t('file.save'),
+        initialName: terminal.customTitle ? terminal.title : '',
+      ),
+    );
+    final title = nextTitle?.trim();
+    if (title == null ||
+        title.isEmpty ||
+        (terminal.customTitle && title == terminal.title)) {
+      return;
+    }
+    final current = _terminalById(terminal.id);
+    if (!mounted || current == null || !_isAccessibleTerminal(current)) return;
+    _sendTerminalEnvelope(
+      RelayEnvelope(
+        type: 'terminal.rename',
+        sessionId: terminal.id,
+        requestId: 'terminal-rename-${const Uuid().v4()}',
+        payload: {'title': title},
+      ),
+      terminal: current,
+    );
+  }
+
   Future<void> _openTerminalSwitcher() async {
     await _terminalActions.openTerminalSwitcher(_showTerminalSwitcher);
   }

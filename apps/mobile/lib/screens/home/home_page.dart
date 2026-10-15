@@ -379,6 +379,7 @@ class _CoduxHomePageState extends State<CoduxHomePage>
       onSelectTerminal: c._selectTerminalFromSwitcher,
       onCreateTerminal: c._createCurrentProjectTerminal,
       onCloseTerminal: c._closeTerminal,
+      onRenameTerminal: c._renameTerminal,
       onSelectWorktree: c._selectWorktree,
       onCreateWorktree: c._createWorktree,
       onMergeWorktree: c._mergeWorktree,

@@ -270,6 +270,52 @@ impl RemoteHostRuntime {
         }
     }
 
+    pub(super) fn handle_terminal_rename(&self, envelope: &RemoteEnvelope) {
+        let Some(session_id) = envelope.session_id.as_deref() else {
+            self.send_error(envelope, "Terminal session is required.");
+            return;
+        };
+        let Some(title) = envelope.payload.get("title").and_then(Value::as_str) else {
+            self.send_error(envelope, "Terminal name is required.");
+            return;
+        };
+        let title = title.trim();
+        if title.is_empty() || title.chars().any(char::is_control) {
+            self.send_error(
+                envelope,
+                "Terminal name must be nonempty and contain no control characters.",
+            );
+            return;
+        }
+        if !self
+            .terminals
+            .list()
+            .iter()
+            .any(|terminal| terminal.id == session_id && terminal.is_running)
+        {
+            self.send_error(envelope, "Terminal session not found.");
+            return;
+        }
+        let Some(scope) = self.remote_terminal_layout_scopes().remove(session_id) else {
+            self.send_error(envelope, "Terminal layout entry not found.");
+            return;
+        };
+        if let Err(error) = TerminalLayoutService::new(self.support_dir.clone()).rename_terminal(
+            &scope.layout_key,
+            session_id,
+            title,
+        ) {
+            self.send_error(envelope, &error);
+            return;
+        }
+        if let Err(error) = self.terminals.rename(session_id, title) {
+            self.send_error(envelope, &error.to_string());
+            return;
+        }
+        self.publish_remote_terminal_layout_changed();
+        self.broadcast_terminal_list(envelope.device_id.as_deref());
+    }
+
     pub(super) fn handle_terminal_buffer(self: &Arc<Self>, envelope: &RemoteEnvelope) {
         let Some(session_id) = envelope.session_id.as_deref() else {
             self.send_error(envelope, "Terminal session is required.");
@@ -663,6 +709,10 @@ impl RemoteTerminalDispatch for DesktopTerminalCtx<'_> {
 
     fn handle_terminal_create_msg(&self, _msg: &TerminalMessage) {
         self.host.handle_terminal_create(self.envelope);
+    }
+
+    fn handle_terminal_rename_msg(&self, _msg: &TerminalMessage) {
+        self.host.handle_terminal_rename(self.envelope);
     }
 
     fn handle_terminal_buffer_msg(&self, _msg: &TerminalMessage) {

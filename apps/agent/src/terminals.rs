@@ -1080,6 +1080,32 @@ impl RemoteTerminalDispatch for AgentTerminalCtx<'_> {
         }
     }
 
+    fn handle_terminal_rename_msg(&self, msg: &TerminalMessage) {
+        let result = (|| {
+            let session_id = msg.session_id.ok_or("Terminal session is required.")?;
+            let title = msg
+                .payload
+                .get("title")
+                .and_then(Value::as_str)
+                .ok_or("Terminal name is required.")?;
+            self.driver
+                .rename(session_id, title)
+                .map_err(|error| error.to_string())?;
+            Ok::<(), String>(())
+        })();
+        match result {
+            Ok(()) => broadcast_terminal_list(self.driver, self.transport, self.fanout),
+            Err(error) => reply(
+                self.transport,
+                msg.device_id,
+                msg.session_id,
+                msg.request_id,
+                REMOTE_ERROR,
+                json!({ "message": error }),
+            ),
+        }
+    }
+
     fn handle_terminal_input_msg(&self, msg: &TerminalMessage) {
         let data = msg
             .payload
@@ -1516,6 +1542,72 @@ mod tests {
             Some(session_id.as_str())
         );
 
+        let _ = driver.kill_and_wait(&session_id, Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_rename_reconciles_every_connected_device() {
+        let (transport, received) = test_transport(&["phone-a", "phone-b"]);
+        let driver = Arc::new(TerminalManager::new());
+        let fanout = test_fanout();
+        let session_id = driver
+            .create(
+                TerminalPtyConfig {
+                    command: Some("cat".to_string()),
+                    terminal_id: Some(format!("rename-{}", uuid::Uuid::new_v4())),
+                    ..Default::default()
+                },
+                |_| {},
+            )
+            .expect("create terminal");
+
+        handle_terminal(
+            &driver,
+            &transport,
+            &fanout,
+            Some("phone-a"),
+            codux_protocol::REMOTE_TERMINAL_RENAME,
+            &json!({ "requestId": "rename-1" }),
+            &json!({ "sessionId": session_id, "title": "Build logs" }),
+        );
+
+        for device in ["phone-a", "phone-b"] {
+            wait_for_message(&received, device, |message| {
+                message.get("type").and_then(Value::as_str) == Some(REMOTE_TERMINAL_LIST)
+            });
+            let messages = received.lock().unwrap();
+            let list = messages[device]
+                .iter()
+                .find(|message| {
+                    message.get("type").and_then(Value::as_str) == Some(REMOTE_TERMINAL_LIST)
+                })
+                .expect("terminal list");
+            assert_eq!(
+                list.pointer("/payload/terminals/0/title"),
+                Some(&json!("Build logs"))
+            );
+            assert_eq!(
+                list.pointer("/payload/terminals/0/customTitle"),
+                Some(&json!(true))
+            );
+        }
+        assert_eq!(driver.list()[0].id, session_id);
+        assert_eq!(driver.list()[0].title, "Build logs");
+
+        handle_terminal(
+            &driver,
+            &transport,
+            &fanout,
+            Some("phone-a"),
+            codux_protocol::REMOTE_TERMINAL_RENAME,
+            &json!({ "requestId": "rename-2" }),
+            &json!({ "sessionId": session_id, "title": " " }),
+        );
+        wait_for_message(&received, "phone-a", |message| {
+            message.get("type").and_then(Value::as_str) == Some(REMOTE_ERROR)
+        });
+        assert_eq!(driver.list()[0].title, "Build logs");
         let _ = driver.kill_and_wait(&session_id, Duration::from_secs(2));
     }
 

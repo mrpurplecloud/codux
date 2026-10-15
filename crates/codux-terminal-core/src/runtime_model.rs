@@ -18,6 +18,8 @@ pub struct RemoteRuntimeTerminal {
     pub id: String,
     #[serde(default)]
     pub title: String,
+    #[serde(default)]
+    pub custom_title: bool,
     #[serde(rename = "projectId")]
     pub project_id: String,
     #[serde(

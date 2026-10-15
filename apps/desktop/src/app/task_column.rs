@@ -466,6 +466,13 @@ impl CoduxApp {
     fn task_terminal_list_snapshot(&self) -> TaskTerminalListSnapshot {
         let labels = task_column_labels(&self.state.settings.language);
         let ai_titles = terminal_ai_titles_by_terminal_id(&self.state.ai_runtime_state.sessions);
+        let custom_titles: HashMap<String, String> = self
+            .terminal_manager
+            .list()
+            .into_iter()
+            .filter(|terminal| terminal.custom_title)
+            .map(|terminal| (terminal.id, terminal.title))
+            .collect();
         let active_terminal_id = self.active_terminal_runtime_id();
         let mut terminals = self
             .main_terminal()
@@ -478,12 +485,18 @@ impl CoduxApp {
                         let osc_title = terminal_id
                             .as_deref()
                             .and_then(|id| self.terminal_osc_titles.get(id));
-                        let (title, subtitle) = terminal_pane_display_title(
-                            slot,
-                            &ai_titles,
-                            osc_title.map(String::as_str),
-                            &labels.language,
-                        );
+                        let (title, subtitle) = terminal_id
+                            .as_ref()
+                            .and_then(|id| custom_titles.get(id))
+                            .map(|title| (title.clone(), None))
+                            .unwrap_or_else(|| {
+                                terminal_pane_display_title(
+                                    slot,
+                                    &ai_titles,
+                                    osc_title.map(String::as_str),
+                                    &labels.language,
+                                )
+                            });
                         let lifecycle = terminal_id
                             .as_deref()
                             .and_then(|id| self.pane_agent_lifecycle.get(id))
@@ -510,12 +523,19 @@ impl CoduxApp {
                 .terminal_id
                 .as_deref()
                 .and_then(|id| self.terminal_osc_titles.get(id));
-            let (title, subtitle) = terminal_pane_display_title(
-                slot,
-                &ai_titles,
-                osc_title.map(String::as_str),
-                &labels.language,
-            );
+            let (title, subtitle) = slot
+                .terminal_id
+                .as_ref()
+                .and_then(|id| custom_titles.get(id))
+                .map(|title| (title.clone(), None))
+                .unwrap_or_else(|| {
+                    terminal_pane_display_title(
+                        slot,
+                        &ai_titles,
+                        osc_title.map(String::as_str),
+                        &labels.language,
+                    )
+                });
             terminals.push(TaskTerminalRow {
                 terminal_id: slot.terminal_id.clone(),
                 pane_index: 0,

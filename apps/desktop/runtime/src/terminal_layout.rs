@@ -157,6 +157,38 @@ impl TerminalLayoutService {
         self.save_summary(project_id, layout)
     }
 
+    pub fn rename_terminal(
+        &self,
+        project_id: &str,
+        terminal_id: &str,
+        title: &str,
+    ) -> Result<TerminalLayoutSummary, String> {
+        let mut layout = self.load(Some(project_id));
+        let mut found = false;
+        for pane in &mut layout.top_panes {
+            if pane.terminal_id == terminal_id {
+                pane.title = title.to_string();
+                found = true;
+            }
+        }
+        for pane in &mut layout.collapsed_panes {
+            if pane.terminal_id == terminal_id {
+                pane.title = title.to_string();
+                found = true;
+            }
+        }
+        for tab in &mut layout.tabs {
+            if tab.terminal_id == terminal_id {
+                tab.label = title.to_string();
+                found = true;
+            }
+        }
+        if !found {
+            return Err("Terminal layout entry not found.".to_string());
+        }
+        self.save_summary(project_id, layout)
+    }
+
     pub fn load_many<'a, I>(
         &self,
         project_ids: I,

@@ -1,0 +1,152 @@
+# 任务
+
+ID: mobile-terminal-rename
+类型：bug
+状态：done
+创建：2026-10-15
+更新：2026-10-15
+一句话描述：移动端终端切换列表的滑动操作只有删除，无法给存活终端固定自定义名称。
+
+## 等级
+
+grade：Guarded
+依据：新增跨客户端终端协议命令；共享 PTY 快照、桌面布局镜像和两种宿主均受影响。
+升级触发证据：none
+
+## Active Contract
+
+state：frozen
+
+### 目标
+
+移动端终端左滑可改名。改后本机列表刷新、重进列表、其他已连接客户端及桌面当前布局显示相同固定名称；终端关闭后名称随会话消失。默认未改名终端仍显示序号。
+
+### 证据
+
+beta.17/code66 真机 VGBridge 终端左滑仅有删除。`terminal_switcher_screen.dart` 主标题硬编码序号且 actions 仅删除。`TerminalSessionSnapshot.title` 创建时写入，`TerminalManager` 没有改名方法。桌面和 headless 的列表均来自该快照；已有 `terminal.list` 广播。桌面另有布局标题，现有 `TerminalLayoutService.ensure_terminal` 只在新 pane 写标题，`reconcile_remote_terminal_layout` 跳过已显示 pane。现有正确路径及缺口详见 Guarded Fix。
+
+### 授权变更
+
+新增 `terminal.rename` 请求；宿主验证并更新会话标题，桌面同步布局标题及已显示 pane；复用 `terminal.list` 广播给所有订阅客户端。移动端复用现有改名对话框并显示自定义标题。仅改名相关错误返回、能力声明、版本和兼容记录。
+
+### 范围
+
+owner / invariant：`TerminalManager` 内存会话快照为存活期间标题 owner；桌面布局和各客户端列表为镜像；终端 ID 不变。改名成功前不得广播新标题；关闭后不保留独立别名。
+allowed_files：`apps/agent/src/terminals.rs`；`apps/agent/Cargo.toml`；`apps/desktop/Cargo.toml`；`apps/desktop/runtime/src/remote/host/terminal_dispatch.rs`、`tests/terminal_lifecycle.rs`、`remote/tests.rs`、`terminal_layout.rs`、`runtime_state/service_hosted_runtime.rs`、`runtime_state/service_core_tests/remote_projects.rs`；`apps/desktop/src/app/task_column.rs`、`terminal_actions.rs`；`apps/mobile/pubspec.yaml`、`lib/i18n.dart`、`lib/models/remote_models.dart`、`lib/screens/home/home_controller.dart`、`home_page.dart`、`state/connection.dart`、`state/protocol.dart`、`state/workspace.dart`、`lib/services/remote_runtime_store.dart`、`lib/widgets/components/terminal_switcher_screen.dart`、`test/remote_runtime_store_test.dart`、`test/widgets/terminal_switcher_screen_test.dart`；`crates/codux-protocol/src/lib.rs`；`crates/codux-runtime-core/src/terminal.rs`；`crates/codux-runtime-live/src/remote_terminal_dispatch.rs`、`terminal_pty/manager.rs`、`terminal_pty/session.rs`；`crates/codux-terminal-core/src/runtime_model.rs`、`terminal_driver.rs`、`tests.rs`；`crates/codux-terminal-pty/src/lib.rs`；`Cargo.lock`；`docs/version-compatibility.md`。`service_hosted_runtime.rs` 仅更新已存在的 hosted 终端布局标题并发出原有布局变更事件。
+out_of_scope：滚动历史复发、其他终端操作、现有业务终端、安装/提交/推送。
+
+### 验证
+
+baseline：真机 beta.17 菜单仅删除；新增 host/Flutter 目标测试在修改前失败。
+target_check：Rust host 单测验证改名后 `terminal.list` 跨设备广播、布局与快照一致、空名/无会话拒绝、关闭清理；Flutter widget 测试验证左滑改名入口、自定义名称和默认序号。
+nearest_regression_check：`cargo test -p codux-runtime remote::host::tests::terminal_lifecycle`、`cargo test -p codux-agent terminals::tests`、`flutter test test/widgets/terminal_switcher_screen_test.dart`；受影响 Rust package check 与 Flutter analyze；桌面已显示 pane 的标题更新专项测试。
+broader_check_reason：none
+broader_checks：none
+
+## 当前阶段
+
+phase：done
+
+### 现象与复现
+
+环境：Honor FCP-AN10 Android 16，sideload beta.17/code66，Mac Studio 宿主；VGBridge 独立测试终端。
+步骤：终端切换页左滑终端 2。
+实际：只显示“删除”。
+期望：另有“改名”，输入后在该终端生命周期内固定显示。
+频率：always
+结果：succeeded
+基础设施问题：none
+
+### 真实链
+
+last-known-good：终端列表正常显示默认“终端 1/2”。
+first-wrong：终端卡片 actions 仅构建删除动作；宿主无名称修改命令。
+因果链：移动端没有改名入口，终端会话 title 只在创建时设定；因此跨客户端无法在存活期间更新固定名称。
+观察证据：真机截图 /private/tmp/codux-beta17-cleanup-swipe.png；该测试终端已删除。
+
+### 根因
+
+statement：菜单缺改名动作，且共享会话层无改名命令；桌面布局标题不会更新已显示 pane。
+first-wrong condition：左滑动作集合仅含删除，协议 router 未定义 `terminal.rename`。
+evidence_grade：A
+evidence_reference：真机截图；`terminal_switcher_screen.dart:299-316`；`remote_terminal_dispatch.rs` 路由；`terminal_pty/session.rs:201`；`terminal_actions.rs:205-220`。
+
+### 其他
+
+excluded：none
+missing_information：none
+completion：succeeded
+
+## Guarded Fix
+
+### 现有正确路径证据
+
+examined_existing_paths：移动 AI 会话复用 `FileRenameDialog` 并经宿主修改；`TerminalSessionSnapshot.title` 和 `terminal_snapshot_payload` 已是两宿主列表名称源；桌面 `TerminalLayoutService.ensure_terminal` 持久化 pane 标题；两宿主创建/关闭后均广播 `terminal.list`。查 `git log -10` 终端协议与布局历史，未见改名现成路径。
+reuse_decision：extend-existing PTY 会话标题、共享协议 router、现有 terminal.list 广播、桌面布局和移动端对话框。
+decision_evidence：无会话标题 setter、`terminal.rename` 或布局标题更新；现有 `ensure_terminal` 对已有 pane 无操作，桌面 reconcile 对已显示 pane 跳过。
+
+### 根因与 owner
+
+causal_chain：菜单缺动作，协议缺写入，快照标题无法改变；现有列表广播只传播创建时标题。
+first-wrong condition：左滑仅删除；共享协议 router 无改名分支。
+A_evidence：真机截图和上述代码路径。
+owner：`TerminalManager` 当前会话标题；桌面布局、移动端列表是派生视图。
+invariant：成功改名后同一存活会话各视图标题一致，ID 保持不变；默认列表仍可按序号展示。
+
+### 授权机制
+
+causal_unit：存活终端缺跨客户端改名能力。
+mechanism：共享会话标题 setter 与协议路由；两宿主处理并广播现有列表；桌面布局同步及已显示 pane 更新；移动端左滑入口和名称显示。
+evidence_binding：每处机制对应上述读写链缺口。
+why_minimal_and_sufficient：沿已有列表广播和对话框处理；不建额外名称库。
+
+### 备选（仅真实存在时）
+
+alternatives：移动端本地别名不能同步其他客户端；仅改创建时 title 不能处理已运行会话。
+
+### 实际命中风险
+
+contract / data / concurrency / compatibility / rollback：新增可选协议命令及能力位，旧宿主不支持时移动端明确提示升级；会话存活期间内存标题，桌面布局镜像；布局写失败须报错，避免假成功；关闭按既有路径清理。旧客户端忽略新字段、仍能读 `title`。
+verification_only：真机旧包仅验证当前缺口；更新包安装需另行授权。
+out_of_scope：滚动历史复发、业务终端、部署。
+
+### 修改前方案审查
+
+existing_path_check：pass — 复用共享会话标题、列表广播、桌面布局和移动端对话框；新增 setter/router 只补缺失写路径。
+owner_and_evidence：pass — 共享快照写入解释无法跨端改名的 A 级证据。
+semantic_scope：pass — 仅存活会话标题，不改终端 ID、历史和其他操作。
+verification_power：pass — host 广播/布局测试、移动 UI 测试及桌面已有 pane 测试覆盖验收。
+result：pass
+
+## Checkpoint
+
+latest_verified：hosted 桌面列表标题回归修复前超时、修复后通过；桌面 host 改名/广播/错误/关闭 1 项通过；agent 18 项、core 旧快照 1 项、Flutter widget/store 32 项通过。`cargo check -p codux-agent -p codux-runtime --tests`、`cargo check -p codux`、`flutter analyze` 通过。桌面 terminal_lifecycle 14 通过、1 个 viewport 尺寸断言失败，独立未修改 HEAD 同样 `(72,32)` 对 `(72,18)`，确认为既有失败。Android release sideload APK 构建成功，包名 `com.duxweb.codux.sideload`、版本 `2.0.3-beta.18.sideload`/code67、SHA-256 `eded822239c17de316f0133897eff6b4941e32372a5566da983e7ea92424bedc`；apksigner 验证，签名 SHA-256 与 Honor 当前 beta.17/code66 相同。Mac Studio 当前 headless `2.0.3-beta.20`；本地 `cargo build --locked --release -p codux-agent` 完成 beta.22 arm64 二进制，`codesign --verify --strict` 通过，SHA-256 `bc907997a2c4b51575c11a6882532b2b5d174984a5f1e33cb2951fe235a7e4f9`。尚未安装/部署、提交或推送；其余未跟踪项保留。
+contract_state：frozen
+active_capability：none
+next_action：三端安装与部署已完成；实机跨客户端改名操作尚未手动验证，后续可在隔离终端复核。
+
+## Delivery Gate
+
+authorization：2026-10-15 用户明确要求“提交安装部署三端”；目标为本机 macOS 桌面 `/Applications/Codux.app`、Honor `AD7B024702000799` sideload 包、Mac Studio `mac@10.10.10.18` 现有 headless 服务。此前已批准跨客户端名称同步。
+frozen：Active Contract 为 frozen；生产改动及专项、最近回归、兼容测试已完成。桌面 viewport 1 项失败在未修改 HEAD 同样复现，非本次改名回归。
+scope：34 个已跟踪改动文件逐项落于 allowed_files；仅本任务文件与版本兼容记录随本次提交。滚动历史任务及其余未跟踪项保留。
+compatibility：新增能力位和可选命令；旧客户端可读取现有 `title`，旧宿主明确拒绝改名。名称只存活于会话；无数据迁移。Mac Studio 脚本先备份现有二进制，重启将结束其存活终端；Android 使用原包名和相同签名保留应用数据。桌面旧包 ad-hoc，升级为有效 Apple Development 证书签名时需核对实际安装副本及权限。
+artifact_identity：待按 `tools/local-delivery.py` 核对三端最终副本的版本、签名、架构和哈希。已独立验证系统钥匙串内有效 Apple Development 证书 `AA34D1C9A8FB46C6352FEB9A9FA09AFB5E8E06A9`；沙箱内 keychain 不可见，桌面脚本需系统权限运行。
+preflight：`git diff --check` 通过；交付脚本 9 项单测通过。交付失败保持可观察，不修改签名校验或静默回退。
+result：pass — `python3 tools/local-delivery.py android --serial AD7B024702000799` 安装 beta.18/code67；Downloads APK SHA-256 `eded822239c17de316f0133897eff6b4941e32372a5566da983e7ea92424bedc` 与设备 base.apk 一致，原签名匹配、数据保留，启动后 PID 7688。`python3 tools/local-delivery.py headless mac@10.10.10.18` 备份旧二进制为 `~/.local/bin/codux.backup-2e8637893861`，运行 beta.22 PID 59503，执行文件 inode、配置、配对及身份核对通过。`python3 tools/local-delivery.py desktop` 交付 Downloads `Codux-2.0.3-beta.25.app`，SHA-256 `423978b7a5e50e14a608dddc9239b236073052db6f3554f8b21c698f88ea65dd`；复制并安装到 `/Applications/Codux.app`，保留 beta.24 原包 `/Applications/Codux-before-beta.25.app` 和 `/Applications/Codux-retired-beta.24.app`。最终安装副本通过 Apple 证书要求校验，运行进程 PID 26116 映射安装二进制 inode 121148081，二进制 SHA-256 与 Downloads 副本同为 `69ab23044dbf543d633bc7f1d1d1cb799ddb81bda1104c6b1a999353dbc26e9a`。Android/Mac Studio/桌面均完成安装或部署；真实跨客户端改名 UI 操作未跑，自动化同步测试通过。仅本地提交，不推送。
+
+## 停止与修订
+
+trigger：首次生产修改后发现新增 `customTitle` 字段从宿主 payload 到移动端列表经 Dart `RemoteRuntimeStore._terminalToJson` 和 Rust `RemoteRuntimeTerminal`，两者均会丢弃该字段；这两个生产文件未在原 allowed_files。
+current_diff：共享快照/manager、协议路由、桌面/agent host 处理、桌面布局与显示已部分修改；移动端仅新增失败测试。Rust 双宿主及测试目标编译通过，功能未完成。
+old_contract：只在原 allowed_files 内新增自定义名称标记并经现有列表同步。
+revised_contract：目标、owner、协议和验证不变；允许上述两文件仅透传 `customTitle`，含旧数据 `serde(default)` 兼容；继续原授权机制。需用户明确批准后恢复生产修改。
+approval：2026-10-15 用户回复“批准。继续”；新版 Gate 生效。
+
+## 第二次停止与修订
+
+trigger：已有 `terminal.list` 在桌面作为 headless 宿主客户端时进入 `service_hosted_runtime.rs`；该函数对已存在终端直接 `continue`，不更新标题，也不发 `TerminalLayoutChanged`。该生产文件未列入已批准 Gate；验收“所有客户端”无法通过。
+current_diff：上一版已批准范围内生产 diff 仍未提交；移动 widget 2 项、Dart/Rust 运行时读链 30 项、Rust core 1 项、agent 广播 1 项、桌面宿主广播/布局 1 项通过。桌面历史 viewport 尺寸断言 1 项失败，未归因于改名。`git diff --check` 通过。
+old_contract：桌面作为宿主可通过本机布局事件更新名称；未覆盖桌面作为 headless 宿主客户端。
+revised_contract：五项 Gate 的目标、证据、owner 与验证不变；授权变更新增在 hosted 列表处理里对现存 ID 的标题差异调用已新增 `TerminalLayoutService.rename_terminal`，并复用已有布局变更事件；范围仅增加上述生产文件及专项测试。保持当前 diff，不回滚；同一名称同步因果单元。
+approval：2026-10-15 用户回复“批准”；第二次修订生效。

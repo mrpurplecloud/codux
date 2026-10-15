@@ -99,6 +99,9 @@ extension _HomePageProtocol on HomeController {
             _terminalUploadCapability = TerminalUploadCapability.fromHostInfo(
               payload,
             );
+            final capabilities = payload['capabilities'];
+            _terminalRenameSupported =
+                capabilities is Map && capabilities['terminalRename'] == true;
             _resourceSubscriptionCoordinator.configure(
               RemoteResourceSubscriptionCapability.fromHostInfo(payload),
             );
@@ -454,6 +457,10 @@ extension _HomePageProtocol on HomeController {
         (payload is Map
             ? '${payload['message'] ?? _t('remote.error')}'
             : _t('remote.error'));
+    if (message.requestId?.startsWith('terminal-rename-') == true) {
+      _showToast(errorMessage);
+      return;
+    }
     if (_terminalUploadReplyGuard.consumeAmbiguousLegacyReply(
       message,
       hostId: _activeDevice?.hostId,

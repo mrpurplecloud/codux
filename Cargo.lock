@@ -1295,7 +1295,7 @@ dependencies = [
 
 [[package]]
 name = "codux"
-version = "2.0.3-beta.24"
+version = "2.0.3-beta.25"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1326,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "codux-agent"
-version = "2.0.3-beta.21"
+version = "2.0.3-beta.22"
 dependencies = [
  "async-trait",
  "base64",

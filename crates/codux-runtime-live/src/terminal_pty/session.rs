@@ -201,6 +201,7 @@ impl TerminalPtySession {
         let info = Arc::new(parking_lot::Mutex::new(TerminalSessionSnapshot {
             id: id.clone(),
             title: title.clone(),
+            custom_title: false,
             slot_id: slot_id.clone(),
             session_key: session_key.clone(),
             project_id: project_id.clone(),
@@ -529,6 +530,16 @@ impl TerminalPtySession {
         info.buffer_characters = self.buffer_characters();
         info.has_buffer = info.buffer_characters > 0;
         info
+    }
+
+    pub fn rename(&self, title: &str) -> Result<()> {
+        let mut info = self.info.lock();
+        if !info.is_running {
+            return Err(anyhow::anyhow!("terminal session is not running: {}", self.id));
+        }
+        info.title = title.to_string();
+        info.custom_title = true;
+        Ok(())
     }
 
     pub fn matches_config(

@@ -81,6 +81,7 @@ class HomeController extends ChangeNotifier with WidgetsBindingObserver {
       TerminalBufferCapability.fallback;
   TerminalUploadCapability _terminalUploadCapability =
       TerminalUploadCapability.fallback;
+  bool _terminalRenameSupported = false;
   String? _hostRuntimeInstanceId;
   MobileSettings _settings = const MobileSettings(localName: '');
   String _detectedDeviceName = 'Codux Mobile';

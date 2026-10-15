@@ -19,9 +19,9 @@
 
 use codux_protocol::{
     REMOTE_TERMINAL_BUFFER, REMOTE_TERMINAL_CLOSE, REMOTE_TERMINAL_CREATE, REMOTE_TERMINAL_INPUT,
-    REMOTE_TERMINAL_LIST, REMOTE_TERMINAL_OUTPUT_ACK, REMOTE_TERMINAL_RESIZE,
-    REMOTE_TERMINAL_SIGNAL, REMOTE_TERMINAL_SUBSCRIBE, REMOTE_TERMINAL_UNSUBSCRIBE,
-    REMOTE_TERMINAL_VIEWPORT_CLAIM, REMOTE_TERMINAL_VIEWPORT_RELEASE,
+    REMOTE_TERMINAL_LIST, REMOTE_TERMINAL_OUTPUT_ACK, REMOTE_TERMINAL_RENAME,
+    REMOTE_TERMINAL_RESIZE, REMOTE_TERMINAL_SIGNAL, REMOTE_TERMINAL_SUBSCRIBE,
+    REMOTE_TERMINAL_UNSUBSCRIBE, REMOTE_TERMINAL_VIEWPORT_CLAIM, REMOTE_TERMINAL_VIEWPORT_RELEASE,
     REMOTE_TERMINAL_VIEWPORT_RESIZE, REMOTE_TERMINAL_VIEWPORT_SCROLL,
     REMOTE_TERMINAL_VIEWPORT_SCROLLED, REMOTE_TERMINAL_VIEWPORT_STATE,
 };
@@ -165,6 +165,7 @@ pub fn is_terminal_kind(kind: &str) -> bool {
             | REMOTE_TERMINAL_SUBSCRIBE
             | REMOTE_TERMINAL_UNSUBSCRIBE
             | REMOTE_TERMINAL_CREATE
+            | REMOTE_TERMINAL_RENAME
             | REMOTE_TERMINAL_BUFFER
             | REMOTE_TERMINAL_OUTPUT_ACK
             | REMOTE_TERMINAL_INPUT
@@ -215,6 +216,7 @@ pub trait RemoteTerminalDispatch {
     fn handle_terminal_subscribe_msg(&self, msg: &TerminalMessage);
     fn handle_terminal_unsubscribe_msg(&self, msg: &TerminalMessage);
     fn handle_terminal_create_msg(&self, msg: &TerminalMessage);
+    fn handle_terminal_rename_msg(&self, msg: &TerminalMessage);
     fn handle_terminal_buffer_msg(&self, msg: &TerminalMessage);
     fn handle_terminal_input_msg(&self, msg: &TerminalMessage);
     fn handle_terminal_resize_msg(&self, msg: &TerminalMessage);
@@ -392,6 +394,7 @@ pub trait RemoteTerminalDispatch {
             REMOTE_TERMINAL_SUBSCRIBE => self.handle_terminal_subscribe_msg(msg),
             REMOTE_TERMINAL_UNSUBSCRIBE => self.handle_terminal_unsubscribe_msg(msg),
             REMOTE_TERMINAL_CREATE => self.handle_terminal_create_msg(msg),
+            REMOTE_TERMINAL_RENAME => self.handle_terminal_rename_msg(msg),
             REMOTE_TERMINAL_BUFFER => self.handle_terminal_buffer_msg(msg),
             REMOTE_TERMINAL_OUTPUT_ACK => self.handle_terminal_output_ack_msg(msg),
             REMOTE_TERMINAL_INPUT => self.handle_terminal_input_msg(msg),

@@ -528,6 +528,21 @@ fn remote_project_connection_subscribes_to_terminal_list() {
             .any(|pane| pane.terminal_id == "host-terminal-2")
     });
 
+    // Another client renames the same live terminal. Its existing desktop
+    // pane must follow the host's next authoritative list.
+    {
+        let mut host = catalog.lock().unwrap();
+        host.terminals[0]["title"] = json!("Build logs");
+        host.publish_terminals();
+    }
+    wait_until(&service, "renamed terminal layout sync", || {
+        let layout = crate::terminal_layout::TerminalLayoutService::new(support_dir.clone())
+            .load(Some(&layout_key));
+        layout.top_panes.len() == 1
+            && layout.top_panes[0].terminal_id == "host-terminal-2"
+            && layout.top_panes[0].title == "Build logs"
+    });
+
     drop(service);
     fs::remove_dir_all(support_dir).ok();
 }

@@ -78,6 +78,31 @@ void main() {
     expect(plan.requestProjectSelectId, isNull);
   });
 
+  test('custom terminal name survives runtime model snapshots', () {
+    final store = RemoteRuntimeStore();
+    store.applyProjectList(
+      projects: _projects,
+      remoteSelectedProjectId: 'project-2',
+      remoteSelectedWorktreeId: null,
+      terminalVisible: false,
+      terminalListLoaded: false,
+    );
+    store.applyTerminalList(
+      terminals: const [
+        TerminalInfo(
+          id: 'session-2',
+          title: 'Build logs',
+          customTitle: true,
+          projectId: 'project-2',
+        ),
+      ],
+      terminalVisible: false,
+      terminalListLoaded: true,
+    );
+    expect(store.terminals.single.title, 'Build logs');
+    expect(store.terminals.single.customTitle, isTrue);
+  });
+
   test('worktree selection binds controller active terminal memory', () {
     final store = RemoteRuntimeStore();
     store.applyProjectList(

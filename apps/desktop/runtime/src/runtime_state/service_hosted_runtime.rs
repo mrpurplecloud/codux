@@ -163,19 +163,30 @@ impl RuntimeService {
                 }
                 for (layout_key, terminal_id, title) in updates {
                     let layout = layout_service.load(Some(&layout_key));
-                    if layout
+                    let current_title = layout
                         .top_panes
                         .iter()
-                        .any(|pane| pane.terminal_id == terminal_id)
-                        || layout
-                            .tabs
-                            .iter()
-                            .any(|tab| tab.terminal_id == terminal_id)
-                        || layout
-                            .collapsed_panes
-                            .iter()
-                            .any(|pane| pane.terminal_id == terminal_id)
-                    {
+                        .find(|pane| pane.terminal_id == terminal_id)
+                        .map(|pane| pane.title.as_str())
+                        .or_else(|| {
+                            layout
+                                .tabs
+                                .iter()
+                                .find(|tab| tab.terminal_id == terminal_id)
+                                .map(|tab| tab.label.as_str())
+                        })
+                        .or_else(|| {
+                            layout
+                                .collapsed_panes
+                                .iter()
+                                .find(|pane| pane.terminal_id == terminal_id)
+                                .map(|pane| pane.title.as_str())
+                        });
+                    if let Some(current_title) = current_title {
+                        if current_title != title {
+                            layout_service.rename_terminal(&layout_key, &terminal_id, &title)?;
+                            changed = true;
+                        }
                         continue;
                     }
                     layout_service.ensure_terminal(&layout_key, &terminal_id, &title)?;

@@ -509,6 +509,7 @@ fn remote_terminal_snapshot_payload_uses_compact_terminal_identity_shape() {
         TerminalSessionSnapshot {
             id: "term-1".to_string(),
             title: "Shell".to_string(),
+            custom_title: false,
             slot_id: "slot-1".to_string(),
             session_key: Some("session-key-1".to_string()),
             project_id: "project-1".to_string(),

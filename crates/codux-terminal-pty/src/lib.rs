@@ -305,6 +305,7 @@ impl LocalPtySession {
                 .title
                 .clone()
                 .unwrap_or_else(|| "Terminal".to_string()),
+            custom_title: false,
             slot_id: config.slot_id.clone().unwrap_or_default(),
             session_key: config.session_key.clone(),
             project_id,

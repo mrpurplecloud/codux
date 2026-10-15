@@ -179,6 +179,30 @@ impl CoduxApp {
             self.invalidate_task_column(cx);
         }
 
+        let mut title_changed = false;
+        for pane in &layout.top_panes {
+            for tab in &mut self.terminals {
+                for slot in &mut tab.panes {
+                    if slot.terminal_id.as_deref() == Some(pane.terminal_id.as_str())
+                        && slot.title != pane.title
+                    {
+                        slot.title = pane.title.clone();
+                        title_changed = true;
+                    }
+                }
+            }
+        }
+        for pane in &layout.collapsed_panes {
+            for slot in &mut self.collapsed_terminal_panes {
+                if slot.terminal_id.as_deref() == Some(pane.terminal_id.as_str())
+                    && slot.title != pane.title
+                {
+                    slot.title = pane.title.clone();
+                    title_changed = true;
+                }
+            }
+        }
+
         let shown_ids: std::collections::HashSet<String> = self
             .terminals
             .iter()
@@ -233,9 +257,10 @@ impl CoduxApp {
         }
 
         if pending.is_empty() {
-            if removed_stale {
+            if removed_stale || title_changed {
                 self.sync_terminal_state_after_layout_change(cx);
                 self.refresh_terminal_slot_snapshots();
+                self.invalidate_task_column(cx);
                 self.invalidate_terminal_workspace(cx);
             }
             return;

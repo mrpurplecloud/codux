@@ -25,6 +25,7 @@ class TerminalSwitcherScreen extends StatefulWidget {
     required this.onSelectTerminal,
     required this.onCreateTerminal,
     required this.onCloseTerminal,
+    required this.onRenameTerminal,
     required this.onSelectWorktree,
     required this.onCreateWorktree,
     required this.onMergeWorktree,
@@ -49,6 +50,7 @@ class TerminalSwitcherScreen extends StatefulWidget {
   final ValueChanged<TerminalInfo> onSelectTerminal;
   final VoidCallback onCreateTerminal;
   final ValueChanged<TerminalInfo> onCloseTerminal;
+  final ValueChanged<TerminalInfo> onRenameTerminal;
   final ValueChanged<RemoteWorktreeInfo> onSelectWorktree;
   final VoidCallback onCreateWorktree;
   final ValueChanged<RemoteWorktreeInfo> onMergeWorktree;
@@ -139,6 +141,7 @@ class _TerminalSwitcherScreenState extends State<TerminalSwitcherScreen> {
                   onAdd: widget.onCreateTerminal,
                   onSelect: widget.onSelectTerminal,
                   onClose: widget.onCloseTerminal,
+                  onRename: widget.onRenameTerminal,
                 ),
                 TerminalSwitcherSection.worktrees => _WorktreeList(
                   accent: accent,
@@ -247,6 +250,7 @@ class _TerminalList extends StatelessWidget {
     required this.onAdd,
     required this.onSelect,
     required this.onClose,
+    required this.onRename,
   });
 
   final List<TerminalInfo> terminals;
@@ -257,6 +261,7 @@ class _TerminalList extends StatelessWidget {
   final VoidCallback onAdd;
   final ValueChanged<TerminalInfo> onSelect;
   final ValueChanged<TerminalInfo> onClose;
+  final ValueChanged<TerminalInfo> onRename;
 
   @override
   Widget build(BuildContext context) {
@@ -301,7 +306,9 @@ class _TerminalList extends StatelessWidget {
         final active = terminal.id == activeTerminalId;
         return SwipeListTile(
           key: ValueKey('terminal-switcher-terminal-${terminal.id}'),
-          title: '$itemPrefix ${index + 1}',
+          title: terminal.customTitle
+              ? terminal.title
+              : '$itemPrefix ${index + 1}',
           subtitle: _terminalSubtitle(terminal),
           leadingIcon: Icons.terminal_rounded,
           active: active,
@@ -310,6 +317,12 @@ class _TerminalList extends StatelessWidget {
               ? Icon(Icons.check_rounded, color: accent, size: 20)
               : null,
           actions: [
+            SwipeListAction(
+              label: prefs.t('session.menuRename'),
+              color: accent,
+              icon: Icons.drive_file_rename_outline_rounded,
+              onTap: () => onRename(terminal),
+            ),
             SwipeListAction(
               label: prefs.t('app.delete'),
               color: AppColors.danger,
@@ -462,7 +475,8 @@ class _InlineLoader extends StatelessWidget {
 
 String _terminalSubtitle(TerminalInfo terminal) {
   final parts = <String>[
-    if (terminal.title.trim().isNotEmpty) terminal.title.trim(),
+    if (!terminal.customTitle && terminal.title.trim().isNotEmpty)
+      terminal.title.trim(),
     if (terminal.status?.trim().isNotEmpty == true) terminal.status!.trim(),
   ];
   if (parts.isEmpty) return terminal.id;

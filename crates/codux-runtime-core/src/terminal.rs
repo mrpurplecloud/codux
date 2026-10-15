@@ -15,6 +15,7 @@ pub fn terminal_snapshot_payload(terminal: TerminalSessionSnapshot) -> Value {
     json!({
         "id": terminal.id,
         "title": terminal.title,
+        "customTitle": terminal.custom_title,
         "displayTitle": if terminal.project_name.trim().is_empty() {
             terminal.title.clone()
         } else {
@@ -70,6 +71,7 @@ mod tests {
         let payload = terminal_snapshot_payload(TerminalSessionSnapshot {
             id: "term-1".to_string(),
             title: "Codex".to_string(),
+            custom_title: false,
             slot_id: "slot".to_string(),
             session_key: None,
             project_id: "project-1".to_string(),

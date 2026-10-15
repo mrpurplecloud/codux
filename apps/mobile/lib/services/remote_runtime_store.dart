@@ -377,6 +377,7 @@ Map<String, dynamic> _projectToJson(ProjectInfo project) => project.toJson();
 Map<String, dynamic> _terminalToJson(TerminalInfo terminal) => {
   'id': terminal.id,
   'title': terminal.title,
+  'customTitle': terminal.customTitle,
   'projectId': terminal.projectId,
   if (terminal.worktreeId != null) 'worktreeId': terminal.worktreeId,
   if (terminal.layoutOrder != null) 'layoutOrder': terminal.layoutOrder,

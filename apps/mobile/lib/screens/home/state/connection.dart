@@ -477,6 +477,7 @@ extension _HomePageConnection on HomeController {
 
   void _resetRemoteSyncState() {
     _remoteRuntimeEpoch += 1;
+    _terminalRenameSupported = false;
     _cancelRemoteSyncTimers();
     _remoteSyncController.resetSyncForCurrentGeneration();
     _remoteRuntime.reset();

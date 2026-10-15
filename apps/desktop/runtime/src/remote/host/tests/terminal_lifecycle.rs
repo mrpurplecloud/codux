@@ -312,6 +312,115 @@ fn remote_terminal_layout_is_persisted_to_project_worktree_scope() {
 }
 
 #[test]
+fn remote_terminal_rename_updates_layout_and_broadcasts_to_subscribers() {
+    let support_dir = temp_support_dir("codux-remote-terminal-rename");
+    write_two_project_state(&support_dir);
+    let terminals = Arc::new(TerminalManager::new());
+    let runtime = RemoteHostRuntime::new_with_ai_history_and_terminals(
+        support_dir.clone(),
+        Default::default(),
+        Arc::clone(&terminals),
+    );
+    let transport = Arc::new(CapturingTransport::default());
+    runtime.set_transport_for_test(transport.clone());
+    let session_id = terminals
+        .create(
+            TerminalPtyConfig {
+                command: Some("cat".to_string()),
+                project_id: Some("worktree-b".to_string()),
+                terminal_id: Some(format!("rename-{}", uuid::Uuid::new_v4())),
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .expect("create terminal");
+    let layout_key = terminal_layout_storage_key("project-b", "worktree-b");
+    runtime.persist_remote_terminal_layout(&layout_key, &session_id, "Terminal");
+    for device in ["phone-a", "phone-b"] {
+        runtime.resource_subscriptions.subscribe(
+            REMOTE_RESOURCE_TERMINALS,
+            Some("project-b"),
+            None,
+            device,
+        );
+    }
+    runtime.drain_events();
+
+    runtime.handle_terminal_rename(&RemoteEnvelope {
+        kind: codux_protocol::REMOTE_TERMINAL_RENAME.to_string(),
+        device_id: Some("phone-a".to_string()),
+        session_id: Some(session_id.clone()),
+        request_id: Some("rename-empty".to_string()),
+        seq: None,
+        payload: json!({ "title": " " }),
+    });
+    assert_eq!(terminals.list()[0].title, "Terminal");
+    assert!(transport.take_messages().iter().any(|(_, bytes)| {
+        let value: Value = serde_json::from_slice(bytes).expect("error json");
+        value.get("type").and_then(Value::as_str) == Some(REMOTE_ERROR)
+    }));
+
+    runtime.handle_terminal_rename(&RemoteEnvelope {
+        kind: codux_protocol::REMOTE_TERMINAL_RENAME.to_string(),
+        device_id: Some("phone-a".to_string()),
+        session_id: Some(session_id.clone()),
+        request_id: Some("rename-1".to_string()),
+        seq: None,
+        payload: json!({ "title": "Build logs" }),
+    });
+
+    let snapshot = terminals
+        .list()
+        .into_iter()
+        .find(|item| item.id == session_id)
+        .unwrap();
+    assert_eq!(snapshot.title, "Build logs");
+    assert!(snapshot.custom_title);
+    let layout = TerminalLayoutService::new(support_dir.clone()).load(Some(&layout_key));
+    assert_eq!(layout.top_panes[0].title, "Build logs");
+    assert!(runtime
+        .drain_events()
+        .iter()
+        .any(|event| { matches!(event, RemoteHostEvent::TerminalLayoutChanged(_)) }));
+    let messages = transport.take_messages();
+    for device in ["phone-a", "phone-b"] {
+        assert!(messages.iter().any(|(target, bytes)| {
+            let value: Value = serde_json::from_slice(bytes).expect("terminal list json");
+            target.as_deref() == Some(device)
+                && value.get("type").and_then(Value::as_str) == Some(REMOTE_TERMINAL_LIST)
+                && value.pointer("/payload/terminals/0/title") == Some(&json!("Build logs"))
+                && value.pointer("/payload/terminals/0/customTitle") == Some(&json!(true))
+        }));
+    }
+
+    runtime.handle_terminal_close(&RemoteEnvelope {
+        kind: "terminal.close".to_string(),
+        device_id: Some("phone-a".to_string()),
+        session_id: Some(session_id),
+        request_id: None,
+        seq: None,
+        payload: json!({}),
+    });
+    assert!(TerminalLayoutService::new(support_dir.clone())
+        .load(Some(&layout_key))
+        .top_panes
+        .is_empty());
+    runtime.handle_terminal_rename(&RemoteEnvelope {
+        kind: codux_protocol::REMOTE_TERMINAL_RENAME.to_string(),
+        device_id: Some("phone-a".to_string()),
+        session_id: None,
+        request_id: Some("rename-missing".to_string()),
+        seq: None,
+        payload: json!({ "title": "Build logs" }),
+    });
+    assert!(transport.take_messages().iter().any(|(_, bytes)| {
+        let value: Value = serde_json::from_slice(bytes).expect("error json");
+        value.get("type").and_then(Value::as_str) == Some(REMOTE_ERROR)
+    }));
+    fs::remove_dir_all(support_dir).ok();
+}
+
+#[test]
 fn remote_terminal_create_plan_carries_project_env() {
     let support_dir = temp_support_dir("codux-remote-project-env");
     write_two_project_state(&support_dir);

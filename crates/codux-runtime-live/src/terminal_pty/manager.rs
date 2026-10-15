@@ -76,6 +76,14 @@ impl TerminalManager {
             .collect()
     }
 
+    pub fn rename(&self, session_id: &str, title: &str) -> Result<()> {
+        let title = title.trim();
+        if title.is_empty() || title.chars().any(char::is_control) {
+            return Err(anyhow!("Terminal name must be nonempty and contain no control characters."));
+        }
+        self.session(session_id)?.rename(title)
+    }
+
     pub fn create<F>(&self, config: TerminalPtyConfig, emit: F) -> Result<String>
     where
         F: Fn(TerminalEvent) + Send + Sync + 'static,
