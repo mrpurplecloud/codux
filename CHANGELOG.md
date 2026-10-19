@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Fixed the bundled OpenCode dmux runtime plugin so OpenCode V2 loads it through the required default plugin definition; V2 session, usage, and permission events are reported while the legacy V1 entrypoint remains available.
 - Paused automatic memory queue processing when no eligible extraction provider is configured, preventing repeated failures and UI refresh churn while preserving queued work until a provider becomes available.
 
 ## [2.0.3] - 2026-07-21

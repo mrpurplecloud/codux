@@ -121,9 +121,9 @@ function basePayload({ externalSessionID, responseState, model, status }) {
     updatedAt: currentTime,
     startedAt: activePromptStartedAt ?? Number(process.env.DMUX_ACTIVE_AI_STARTED_AT ?? currentTime),
     finishedAt: null,
-    inputTokens: 0,
-    outputTokens: 0,
-    totalTokens: 0,
+    inputTokens: lastUsage?.input ?? 0,
+    outputTokens: lastUsage?.output ?? 0,
+    totalTokens: lastUsage?.total ?? 0,
     contextWindow: null,
     contextUsedTokens: null,
     contextUsagePercent: null,
@@ -163,9 +163,23 @@ function pickDirectString(input, keys) {
 }
 
 function sessionIDFrom(properties) {
-  return pickDirectString(properties, ["sessionID", "sessionId"])
+  const direct = pickDirectString(properties, ["sessionID", "sessionId"])
     ?? pickDirectString(readObject(properties.session), ["id", "sessionID", "sessionId"])
-    ?? pickDirectString(properties, ["id"])
+  if (direct) return direct
+  // Only trust a bare `id` when it looks like a session id: in the OpenCode V2
+  // event envelope `id` is the event id (`evt_...`), not the session.
+  const fallback = pickDirectString(properties, ["id"])
+  return fallback && fallback.startsWith("ses") ? fallback : null
+}
+
+// OpenCode V1 nests event fields under `properties`; V2 puts them on the event
+// itself (`event.data` plus envelope fields). Normalize both to one object.
+function eventFields(event) {
+  const properties = readObject(event?.properties)
+  if (properties) return properties
+  const data = readObject(event?.data)
+  if (data) return { ...event, ...data }
+  return readObject(event) ?? {}
 }
 
 function messageRoleFrom(properties) {
@@ -202,6 +216,7 @@ let lastUserMessageID = null
 let lastSignature = null
 let hasActivePrompt = false
 let activePromptStartedAt = null
+let lastUsage = null
 
 function dispatchUpdate({ externalSessionID, responseState, model, status, reason }) {
   const nextExternalSessionID = readString(externalSessionID) ?? currentSessionID
@@ -264,19 +279,7 @@ function dispatchAIHook({
   })
 }
 
-export const DmuxRuntimePlugin = async ({ client }) => {
-  await client.app.log({
-    body: {
-      service: "dmux-opencode-plugin",
-      level: "info",
-      message: "Plugin initialized",
-      extra: {
-        hasEventDir: Boolean(runtimeEventDir),
-        hasSession: Boolean(process.env.DMUX_SESSION_ID),
-      },
-    },
-  })
-
+function initRuntime() {
   log("initialized", {
     hasEventDir: Boolean(runtimeEventDir),
     sessionID: process.env.DMUX_SESSION_ID ?? null,
@@ -285,29 +288,13 @@ export const DmuxRuntimePlugin = async ({ client }) => {
   if (currentSessionID) {
     writeSessionMap({ externalSessionID: currentSessionID, model: currentModel })
   }
+}
 
-  return {
-    "experimental.chat.system.transform": async (_input, output) => {
-      const prompt = readManagedPrompt()
-      if (!prompt) {
-        log("system-transform-skip", { reason: "missing-prompt" })
-        return
-      }
-      if (!Array.isArray(output.system)) {
-        output.system = []
-      }
-      if (output.system.includes(prompt)) {
-        return
-      }
-      output.system.unshift(prompt)
-      log("system-transform-injected", { chars: prompt.length })
-    },
+async function handleEvent(event) {
+  const type = event?.type
+  const properties = eventFields(event)
 
-    event: async ({ event }) => {
-      const type = event?.type
-      const properties = readObject(event?.properties) ?? {}
-
-      switch (type) {
+  switch (type) {
         case "session.created": {
           dispatchAIHook({
             kind: "sessionStarted",
@@ -456,6 +443,9 @@ export const DmuxRuntimePlugin = async ({ client }) => {
           return
         }
         case "permission.asked": {
+          const resources = Array.isArray(properties.resources)
+            ? properties.resources.map((value) => readString(value)).filter(Boolean)
+            : []
           dispatchAIHook({
             kind: "needsInput",
             externalSessionID: sessionIDFrom(properties),
@@ -463,8 +453,8 @@ export const DmuxRuntimePlugin = async ({ client }) => {
             totalTokens: null,
             notificationType: "permission-request",
             reason: type,
-            targetToolName: toolNameFrom(properties),
-            message: messageFrom(properties),
+            targetToolName: toolNameFrom(properties) ?? readString(properties.action),
+            message: messageFrom(properties) ?? (resources.length ? resources.join(", ") : null),
           })
           return
         }
@@ -478,9 +468,179 @@ export const DmuxRuntimePlugin = async ({ client }) => {
           })
           return
         }
+        // ---- OpenCode V2 event names ----
+        case "session.execution.started": {
+          hasActivePrompt = true
+          activePromptStartedAt = activePromptStartedAt ?? nowSeconds()
+          emitTerminalProgressOsc("3")
+          dispatchUpdate({
+            externalSessionID: sessionIDFrom(properties),
+            responseState: "responding",
+            model: modelFrom(properties),
+            reason: type,
+          })
+          return
+        }
+        case "session.execution.succeeded":
+        case "session.execution.failed":
+        case "session.execution.interrupted": {
+          const sessionID = sessionIDFrom(properties)
+          if (hasActivePrompt) {
+            emitTerminalProgressOsc("0")
+          }
+          hasActivePrompt = false
+          activePromptStartedAt = null
+          dispatchAIHook({
+            kind: "turnCompleted",
+            externalSessionID: sessionID,
+            model: modelFrom(properties),
+            totalTokens: lastUsage?.total ?? null,
+            reason: type,
+          })
+          dispatchUpdate({
+            externalSessionID: sessionID,
+            responseState: "idle",
+            model: modelFrom(properties),
+            status: "completed",
+            reason: type,
+          })
+          return
+        }
+        case "session.step.started": {
+          const model = modelFrom(properties)
+          if (model && model !== currentModel) {
+            currentModel = model
+            dispatchUpdate({
+              externalSessionID: sessionIDFrom(properties),
+              responseState: "responding",
+              model,
+              reason: type,
+            })
+          }
+          return
+        }
+        case "session.inbox.enqueued": {
+          const item = readObject(properties.item)
+          if (!item || item.type !== "user") return
+          const sessionID = sessionIDFrom(properties)
+          const text = readString(readObject(item.payload)?.text)
+          const messageID = readString(properties.inboxID) ?? `user-${Date.now()}`
+          if (messageID === lastUserMessageID) return
+          lastUserMessageID = messageID
+          hasActivePrompt = true
+          activePromptStartedAt = nowSeconds()
+          emitTerminalProgressOsc("3")
+          dispatchUpdate({
+            externalSessionID: sessionID,
+            responseState: "responding",
+            model: modelFrom(properties),
+            reason: type,
+          })
+          dispatchAIHook({
+            kind: "promptSubmitted",
+            externalSessionID: sessionID,
+            model: modelFrom(properties),
+            totalTokens: null,
+            reason: type,
+            message: text,
+          })
+          return
+        }
+        case "session.usage.updated": {
+          const tokens = readObject(properties.tokens)
+          if (!tokens) return
+          const input = Number.isInteger(tokens.input) ? tokens.input : 0
+          const output = Number.isInteger(tokens.output) ? tokens.output : 0
+          lastUsage = { input, output, total: input + output }
+          return
+        }
+        case "session.renamed": {
+          const title = readString(properties.title)
+          if (title) {
+            log("session-renamed", { externalSessionID: sessionIDFrom(properties) ?? null, title })
+          }
+          return
+        }
         default:
           return
       }
+}
+
+function injectManagedPrompt(output) {
+  const prompt = readManagedPrompt()
+  if (!prompt) {
+    log("system-transform-skip", { reason: "missing-prompt" })
+    return
+  }
+  if (!Array.isArray(output.system)) {
+    output.system = []
+  }
+  if (output.system.includes(prompt)) {
+    return
+  }
+  output.system.unshift(prompt)
+  log("system-transform-injected", { chars: prompt.length })
+}
+
+// OpenCode V1 entrypoint (kept for older loaders).
+export const DmuxRuntimePlugin = async () => {
+  initRuntime()
+
+  return {
+    "experimental.chat.system.transform": async (_input, output) => {
+      injectManagedPrompt(output)
+    },
+
+    event: async ({ event }) => {
+      await handleEvent(event)
     },
   }
+}
+
+// OpenCode V2 entrypoint: a default export with an id and a setup function.
+export default {
+  id: "dmux-runtime",
+  async setup(ctx) {
+    initRuntime()
+
+    if (ctx?.session && typeof ctx.session.hook === "function") {
+      await ctx.session.hook("context", (event) => {
+        const prompt = readManagedPrompt()
+        if (!prompt) {
+          log("system-transform-skip", { reason: "missing-prompt" })
+          return
+        }
+        if (!Array.isArray(event.system)) {
+          event.system = []
+        }
+        const already = event.system.some(
+          (part) => part && typeof part === "object" && part.type === "text" && part.text === prompt,
+        )
+        if (already || event.system.includes(prompt)) {
+          return
+        }
+        event.system.unshift({ type: "text", text: prompt })
+        log("system-transform-injected", { chars: prompt.length })
+      })
+    } else {
+      log("context-hook-unavailable")
+    }
+
+    const controller = new AbortController()
+    if (ctx?.event && typeof ctx.event.subscribe === "function") {
+      void (async () => {
+        try {
+          for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+            await handleEvent(event)
+          }
+        } catch (error) {
+          log("event-stream-error", { message: error instanceof Error ? error.message : String(error) })
+        }
+      })()
+    } else {
+      log("event-subscribe-unavailable")
+    }
+
+    return () => controller.abort()
+  },
 }
