@@ -1,4 +1,4 @@
-use super::agent_display::ping_dot;
+use super::agent_display::agent_lifecycle_status_dot;
 use super::ai_runtime_status::AgentLifecycleState;
 use super::app_state::CoduxTooltipPlacement;
 use super::ui_helpers::{codux_tooltip_container_with_placement, titlebar_drag_area};
@@ -181,10 +181,7 @@ impl Render for ProjectColumnView {
                                 .as_deref()
                                 .map(|selected| selected == project.id)
                                 .unwrap_or(false);
-                            let lifecycle_state = lifecycle
-                                .get(project.id.as_str())
-                                .copied()
-                                .filter(|state| *state != AgentLifecycleState::Idle);
+                            let lifecycle_state = lifecycle.get(project.id.as_str()).copied();
                             let link_state = project
                                 .remote_device_id()
                                 .map(|device_id| links.get(device_id).copied());
@@ -1020,44 +1017,12 @@ fn project_row_context_menu(
 }
 
 fn project_lifecycle_badge(state: AgentLifecycleState) -> AnyElement {
-    match state {
-        AgentLifecycleState::Working => div()
-            .absolute()
-            .right(px(-2.0))
-            .top(px(-2.0))
-            .child(ping_dot(color(theme::ORANGE), 10.0))
-            .into_any_element(),
-        AgentLifecycleState::Waiting | AgentLifecycleState::Warning => div()
-            .absolute()
-            .right(px(-2.0))
-            .top(px(-2.0))
-            .w(px(10.0))
-            .h(px(10.0))
-            .rounded_full()
-            .border_2()
-            .border_color(color(theme::ORANGE))
-            .bg(color(theme::BG_COLUMN))
-            .into_any_element(),
-        AgentLifecycleState::Completed => div()
-            .absolute()
-            .right(px(-2.0))
-            .top(px(-2.0))
-            .w(px(10.0))
-            .h(px(10.0))
-            .rounded_full()
-            .bg(color(theme::GREEN))
-            .into_any_element(),
-        AgentLifecycleState::Error => div()
-            .absolute()
-            .right(px(-2.0))
-            .top(px(-2.0))
-            .w(px(10.0))
-            .h(px(10.0))
-            .rounded_full()
-            .bg(color(theme::RED))
-            .into_any_element(),
-        AgentLifecycleState::Idle => div().into_any_element(),
-    }
+    div()
+        .absolute()
+        .right(px(-3.0))
+        .top(px(-3.0))
+        .child(agent_lifecycle_status_dot(state))
+        .into_any_element()
 }
 
 /// Disconnected-link badge color (no theme constant — danger red is local here).

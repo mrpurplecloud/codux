@@ -12,6 +12,11 @@
 const REMOTE_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
 
 impl RuntimeService {
+    pub fn remote_agent_activity_snapshots(
+        &self,
+    ) -> std::collections::HashMap<String, Option<codux_protocol::AgentActivitySnapshot>> {
+        self.remote_controllers.agent_activity_snapshots()
+    }
     pub fn local_host_metrics(&self) -> codux_protocol::RemoteHostMetrics {
         codux_runtime_live::host_metrics::sample_host_metrics()
     }

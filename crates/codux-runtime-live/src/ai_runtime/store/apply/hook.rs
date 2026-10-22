@@ -77,6 +77,33 @@ pub(in crate::ai_runtime::store) fn apply_hook_unlocked(
     };
     let ai_session_id = normalized_string(event.ai_session_id.as_deref())
         .or_else(|| base.and_then(|session| session.ai_session_id.clone()));
+    if event.updated_at > 0.0
+        && matches!(
+            event.kind.as_str(),
+            "sessionStarted" | "needsInput" | "promptSubmitted" | "turnCompleted" | "sessionEnded"
+        )
+    {
+        // Screen/probe timestamps describe other sources, not Hook event order.
+        let identity = (
+            terminal_instance_id
+                .clone()
+                .or_else(|| base.and_then(|session| session.terminal_instance_id.clone())),
+            ai_session_id.clone(),
+        );
+        if core.hook_order.get(&terminal_id).is_some_and(|last| {
+            last.tool == tool && last.identity == identity && event.updated_at < last.updated_at
+        }) {
+            return false;
+        }
+        core.hook_order.insert(
+            terminal_id.clone(),
+            super::super::activity::HookOrder {
+                tool: tool.clone(),
+                identity,
+                updated_at: event.updated_at,
+            },
+        );
+    }
     let logical_key = ai_session_id
         .as_ref()
         .map(|session_id| format!("{tool}:{session_id}"));
@@ -283,6 +310,14 @@ pub(in crate::ai_runtime::store) fn apply_hook_unlocked(
     if previous.as_ref() == Some(&next) {
         return false;
     }
-    core.sessions.insert(terminal_id, next);
+    core.sessions.insert(terminal_id.clone(), next);
+    super::super::activity::note_input(
+        core,
+        &terminal_id,
+        matches!(
+            event.kind.as_str(),
+            "promptSubmitted" | "sessionStarted" | "sessionEnded"
+        ),
+    );
     true
 }

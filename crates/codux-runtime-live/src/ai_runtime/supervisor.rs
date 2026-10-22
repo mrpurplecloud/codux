@@ -163,6 +163,13 @@ impl AIRuntimeSupervisor {
         self.state.snapshot()
     }
 
+    pub fn agent_activity(
+        &self,
+        bindings: &[super::registry::AIRuntimeTerminalBinding],
+    ) -> Result<Vec<codux_protocol::AgentActivityRecord>, String> {
+        self.state.agent_activity(bindings)
+    }
+
     pub fn dismiss_completion(&self, project_id: &str) -> bool {
         self.state.dismiss_completion(project_id)
     }
@@ -498,9 +505,9 @@ fn poll_runtime_sessions(
     // Interval poll only (keeps `ps` to once per interval): detect each terminal's AI tool and create an idle session the loop below refines.
     if terminal_ids.is_none() && detection_enabled() {
         let shell_pids = registry.shell_pids_snapshot();
-        if let Some(detected) =
-            crate::ai_runtime::process_detect::detect_terminal_tools(&shell_pids)
-        {
+        let detected = crate::ai_runtime::process_detect::detect_terminal_tools(&shell_pids);
+        state.record_agent_processes(&terminal_snapshot, &shell_pids, detected.as_ref());
+        if let Some(detected) = detected {
             mutation.merge(state.ensure_detected_sessions(&terminal_snapshot, &detected, now));
             mutation.merge(state.retire_undetected_hookless_sessions(
                 &terminal_snapshot,
@@ -510,6 +517,19 @@ fn poll_runtime_sessions(
             ));
         }
     }
+    // Completed turns leave runtime_tracked_sessions, but their live Agent
+    // still needs an output preview. Sample each known Agent screen once and
+    // reuse that result for the existing state detector below.
+    let screen_texts = state
+        .agent_screen_targets()
+        .into_iter()
+        .filter(|(id, _)| terminal_ids.is_none_or(|ids| ids.contains(id)))
+        .map(|(id, instance)| {
+            let text = registry.screen_text(&id);
+            state.record_agent_output(&id, instance.as_deref(), text.as_deref());
+            (id, text)
+        })
+        .collect::<HashMap<_, _>>();
     let sessions = terminal_ids
         .map(|ids| state.sessions_for_terminals(ids))
         .unwrap_or_else(|| state.runtime_tracked_sessions(now));
@@ -571,7 +591,18 @@ fn poll_runtime_sessions(
         if matches!(session.state.as_str(), "responding" | "needsInput")
             || screen_starts_idle_tool(&session.tool)
         {
-            mutation.merge(apply_screen_signal_for_session(state, registry, session));
+            // Hook-backed sessions can precede their first process scan. Keep
+            // their existing screen detector even before presence is known.
+            let fallback = (!screen_texts.contains_key(&session.terminal_id))
+                .then(|| registry.screen_text(&session.terminal_id))
+                .flatten();
+            let signal = screen_texts
+                .get(&session.terminal_id)
+                .and_then(|text| text.as_deref())
+                .or(fallback.as_deref())
+                .map(|text| detect_screen_signal(text, &runtime_screen_patterns(&session.tool)))
+                .unwrap_or(crate::ai_runtime::screen_signal::ScreenSignal::Unknown);
+            mutation.merge(state.apply_screen_signal(&session.terminal_id, signal));
         }
     }
     mutation
@@ -594,9 +625,15 @@ fn apply_screen_signal_for_session(
     registry: &AIRuntimeRegistry,
     session: &crate::ai_runtime::AISessionSnapshot,
 ) -> AIRuntimeStateMutation {
-    let signal = registry
-        .screen_text(&session.terminal_id)
-        .map(|text| detect_screen_signal(&text, &runtime_screen_patterns(&session.tool)))
+    let text = registry.screen_text(&session.terminal_id);
+    state.record_agent_output(
+        &session.terminal_id,
+        session.terminal_instance_id.as_deref(),
+        text.as_deref(),
+    );
+    let signal = text
+        .as_deref()
+        .map(|text| detect_screen_signal(text, &runtime_screen_patterns(&session.tool)))
         .unwrap_or(crate::ai_runtime::screen_signal::ScreenSignal::Unknown);
     state.apply_screen_signal(&session.terminal_id, signal)
 }
@@ -812,6 +849,51 @@ fn now_seconds() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_activity_samples_completed_idle_agent_without_inferring_a_question() {
+        let state = AIRuntimeStateStore::default();
+        let registry = AIRuntimeRegistry::shared();
+        let binding = crate::ai_runtime::registry::AIRuntimeTerminalBinding {
+            terminal_id: "idle-agent".into(),
+            terminal_instance_id: Some("instance".into()),
+            project_id: "project".into(),
+            tool: Some("codex".into()),
+            ..Default::default()
+        };
+        registry.upsert(binding.clone());
+        let screen = Arc::new(parking_lot::Mutex::new(
+            codux_terminal_core::HeadlessTerminalScreen::new(80, 24, 100),
+        ));
+        screen
+            .lock()
+            .process("Done.\r\nWhich option do you prefer?".as_bytes());
+        registry.register_screen("idle-agent", Arc::downgrade(&screen));
+        state.apply_hook(serde_json::from_value(serde_json::json!({
+            "kind": "turnCompleted", "terminalID": "idle-agent", "terminalInstanceID": "instance",
+            "projectID": "project", "projectName": "Project", "sessionTitle": "Agent",
+            "tool": "codex", "updatedAt": now_seconds()
+        })).unwrap());
+        state.record_agent_processes(
+            &registry.snapshot(),
+            &[("idle-agent".into(), 123)],
+            Some(&HashMap::from([("idle-agent".into(), "codex".into())])),
+        );
+        assert!(state.runtime_tracked_sessions(now_seconds()).is_empty());
+        poll_runtime_sessions(
+            &state,
+            &registry,
+            "transcript",
+            Some(&HashSet::from(["idle-agent".into()])),
+            &mut ClaudeProbeCache::default(),
+        );
+        let record = state.agent_activity(&[binding]).unwrap().remove(0);
+        assert_eq!(record.state, codux_protocol::AgentActivityState::Idle);
+        assert_eq!(
+            record.recent_output.as_deref(),
+            Some("Done.\nWhich option do you prefer?")
+        );
+    }
 
     #[test]
     fn supervisor_applies_hook_frames_and_drains_events() {

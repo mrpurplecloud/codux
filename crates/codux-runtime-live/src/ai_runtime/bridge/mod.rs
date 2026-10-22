@@ -74,6 +74,7 @@ pub struct AIRuntimeBridge {
     started: AtomicBool,
     start_lock: Mutex<()>,
     hook_config_lock: Mutex<()>,
+    activity_snapshot: Mutex<codux_protocol::AgentActivitySnapshot>,
 }
 
 impl AIRuntimeBridge {
@@ -105,6 +106,7 @@ impl AIRuntimeBridge {
             started: AtomicBool::new(false),
             start_lock: Mutex::new(()),
             hook_config_lock: Mutex::new(()),
+            activity_snapshot: Mutex::default(),
         }
     }
 
@@ -200,6 +202,17 @@ impl AIRuntimeBridge {
 
     pub fn runtime_state_snapshot(&self) -> super::AIRuntimeStateSnapshot {
         self.supervisor.state_snapshot()
+    }
+
+    /// One versioned, in-memory projection serves local UI and remote hosts.
+    pub fn agent_activity_snapshot(&self) -> Result<codux_protocol::AgentActivitySnapshot, String> {
+        let mut snapshot = self
+            .activity_snapshot
+            .lock()
+            .map_err(|_| "Agent activity snapshot lock poisoned.".to_string())?;
+        let bindings = self.registry.bindings_snapshot()?;
+        snapshot.replace(self.supervisor.agent_activity(&bindings)?);
+        Ok(snapshot.clone())
     }
 
     pub fn dismiss_completion(&self, project_id: &str) -> bool {

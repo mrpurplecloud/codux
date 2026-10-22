@@ -1,6 +1,6 @@
 use gpui_component::{InteractiveElementExt as _, menu::ContextMenuExt as _};
 
-use super::agent_display::{agent_lifecycle_color, agent_lifecycle_status_dot, spin_icon};
+use super::agent_display::{agent_lifecycle_color, agent_lifecycle_status_dot};
 use super::ai_runtime_status::AgentLifecycleState;
 use super::scroll_compat::codux_uniform_list_with_sizing;
 use super::ui_helpers::{codux_tooltip_container, titlebar_drag_area};
@@ -499,8 +499,7 @@ impl CoduxApp {
                             });
                         let lifecycle = terminal_id
                             .as_deref()
-                            .and_then(|id| self.pane_agent_lifecycle.get(id))
-                            .map(|lifecycle| lifecycle.state);
+                            .and_then(|id| self.pane_agent_state(id));
                         let active = !active_terminal_id.is_empty()
                             && terminal_id.as_deref() == Some(active_terminal_id.as_str());
                         TaskTerminalRow {
@@ -544,8 +543,7 @@ impl CoduxApp {
                 lifecycle: slot
                     .terminal_id
                     .as_deref()
-                    .and_then(|id| self.pane_agent_lifecycle.get(id))
-                    .map(|lifecycle| lifecycle.state),
+                    .and_then(|id| self.pane_agent_state(id)),
                 active: false,
                 collapsed: true,
                 collapsed_index: Some(collapsed_index),
@@ -1009,8 +1007,6 @@ fn terminal_compact_row(
     let collapsed = terminal.collapsed;
     let collapsed_index = terminal.collapsed_index;
     let pane_index = terminal.pane_index;
-    let terminal_id = terminal.terminal_id.clone();
-    let lifecycle = terminal.lifecycle;
     let row_id = if collapsed {
         SharedString::from(format!(
             "compact-terminal-collapsed-{}",
@@ -1050,16 +1046,6 @@ fn terminal_compact_row(
         .hover(|style| style.bg(theme::elevate(color(theme::BG_COLUMN), 0.07)))
         .on_click(move |_, window, cx| {
             cx.update_entity(&app_entity, |app, cx| {
-                if lifecycle == Some(AgentLifecycleState::Completed)
-                    && terminal_id
-                        .as_deref()
-                        .is_some_and(|id| app.dismiss_pane_agent_lifecycle_completion(id))
-                {
-                    // Mirror the status tick: the project-rail dot reads the
-                    // same lifecycle map and would otherwise keep stale green.
-                    app.sync_project_lifecycle_state(cx);
-                    app.invalidate_task_column(cx);
-                }
                 if app.workspace_view != WorkspaceView::Terminal {
                     app.set_workspace_view(WorkspaceView::Terminal, window, cx);
                 }
@@ -1086,27 +1072,9 @@ fn terminal_compact_row(
                 .truncate()
                 .child(terminal.title),
         )
-        .when_some(
-            terminal
-                .lifecycle
-                .filter(|state| *state != AgentLifecycleState::Idle),
-            |this, state| this.child(agent_lifecycle_status_dot(state)),
-        )
-        .when(
-            collapsed
-                && terminal
-                    .lifecycle
-                    .is_none_or(|state| state == AgentLifecycleState::Idle),
-            |this| {
-                this.child(
-                    div()
-                        .flex_none()
-                        .size(px(6.0))
-                        .rounded_full()
-                        .bg(color(theme::GREEN).opacity(0.85)),
-                )
-            },
-        )
+        .when_some(terminal.lifecycle, |this, state| {
+            this.child(agent_lifecycle_status_dot(state))
+        })
         .when_some(terminal.subtitle, |this, subtitle| {
             this.child(
                 div()
@@ -1196,11 +1164,6 @@ fn worktree_compact_row(
     let menu_worktree_id = worktree.id.clone();
     let menu_worktree_path = worktree.path.clone();
     let is_default = worktree.is_default;
-    let lifecycle_dismiss_id = if worktree.is_default {
-        worktree.project_id.clone()
-    } else {
-        worktree.id.clone()
-    };
     let lifecycle = worktree.lifecycle;
     let select_entity = app_entity.clone();
     div()
@@ -1223,12 +1186,6 @@ fn worktree_compact_row(
         .hover(|style| style.bg(theme::elevate(color(theme::BG_COLUMN), 0.07)))
         .on_click(move |_, window, cx| {
             cx.update_entity(&select_entity, |app, cx| {
-                if lifecycle == Some(AgentLifecycleState::Completed)
-                    && app.dismiss_worktree_pane_agent_lifecycle_completion(&lifecycle_dismiss_id)
-                {
-                    app.sync_project_lifecycle_state(cx);
-                    app.invalidate_task_column(cx);
-                }
                 app.select_worktree(worktree_id.clone(), window, cx)
             });
         })
@@ -1332,25 +1289,12 @@ fn worktree_compact_row(
 }
 
 fn worktree_activity_dot(lifecycle: Option<AgentLifecycleState>) -> AnyElement {
-    // Fixed-width slot centring the indicator, so the row text never shifts as
-    // it swaps between a 10px static dot and the 12px ring spinner.
-    let dot = div().size(px(10.0)).rounded_full();
-    let inner = match lifecycle {
-        Some(AgentLifecycleState::Working) => spin_icon(color(theme::ORANGE), 12.0),
-        Some(AgentLifecycleState::Waiting) | Some(AgentLifecycleState::Warning) => {
-            dot.bg(color(theme::ORANGE)).into_any_element()
-        }
-        Some(AgentLifecycleState::Completed) => dot.bg(color(theme::GREEN)).into_any_element(),
-        Some(AgentLifecycleState::Error) => dot.bg(color(theme::RED)).into_any_element(),
-        Some(AgentLifecycleState::Idle) | None => dot.bg(color(theme::ACCENT)).into_any_element(),
-    };
     div()
         .flex_none()
-        .size(px(12.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(inner)
+        .size(px(18.0))
+        .when_some(lifecycle, |this, state| {
+            this.child(agent_lifecycle_status_dot(state))
+        })
         .into_any_element()
 }
 

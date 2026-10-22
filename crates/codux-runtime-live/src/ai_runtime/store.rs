@@ -16,6 +16,7 @@ use std::{
     sync::Mutex,
 };
 
+mod activity;
 mod apply;
 mod helpers;
 mod resolve;
@@ -38,6 +39,9 @@ use summary::{
 
 #[derive(Default)]
 struct AIRuntimeStateCore {
+    agent_processes: HashMap<String, activity::AgentProcess>,
+    agent_input: activity::AgentInput,
+    hook_order: HashMap<String, activity::HookOrder>,
     sessions: HashMap<String, AISessionSnapshot>,
     logical_baselines: HashMap<String, i64>,
     logical_cached_baselines: HashMap<String, i64>,
@@ -297,6 +301,9 @@ impl AIRuntimeStateStore {
             return AIRuntimeStateMutation::default();
         };
         let did_change = apply_runtime_snapshot_unlocked(&mut core, terminal_id, snapshot);
+        if did_change {
+            activity::note_input(&mut core, terminal_id, false);
+        }
         if did_change && let Some(session) = core.sessions.get(terminal_id) {
             super::runtime_log_line(
                 "runtime-state",
@@ -340,6 +347,9 @@ impl AIRuntimeStateStore {
             .unwrap_or(false);
         let did_change =
             apply_screen_signal_unlocked(&mut core, terminal_id, signal, allow_idle_start);
+        if did_change {
+            activity::note_input(&mut core, terminal_id, false);
+        }
         mutation_from_change(did_change, &mut core)
     }
 

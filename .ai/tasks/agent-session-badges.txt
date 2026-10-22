@@ -1,0 +1,226 @@
+# 任务
+
+ID: agent-session-badges
+类型：feature
+状态：active
+创建：2026-10-21
+更新：2026-10-22
+一句话描述：统一本地和远程项目的 Agent 会话状态，让用户一眼识别工作中、明确待介入和普通空闲。
+
+## 等级
+
+grade：Guarded
+依据：跨共享运行时、远程协议和桌面 UI；涉及多会话聚合、连接重建、实例身份和独立产品兼容。
+升级触发证据：none
+
+## Active Contract
+
+state：frozen；当前有效契约为原基础目标加已批准 revision 3/4；原目标 4 的“不新增面板或窗口”已由 revision 3 的独立会话总览替代。
+
+### 目标
+
+1. 本地与远程项目使用相同的会话状态含义；普通 shell 不冒充 Agent。
+2. 区分工作中、明确待用户输入、空闲、无 Agent 和未知。回合结束不自动表示待输入、任务完成或应该退出进程。
+3. 同项目任一会话有明确用户待办时优先提示；空闲不掩盖其他工作中会话。
+4. 所有确实待用户输入的情况使用同一色系；复用项目角标和终端列表标识，不新增面板或窗口状态栏。
+5. 已连接的远程项目无需先打开终端即可显示状态；首次连接、重连、后台变化及会话关闭后都应收敛到当前事实。
+6. 彩墨屏下不依赖动画或颜色单独辨识；具体尺寸和配色需通过静态样稿及实机验收。
+
+### 证据
+
+- 现状与差距：docs/project-badge-investigation-2026-10-20.md 第 1–6、9 节。角标当前由 OSC TerminalStatus 进入 pane_agent_lifecycle 后聚合；错误优先于工作中，工作中优先于等待，完成状态可由点击清除。
+- 已确认新语义：同报告第 8、10 节和 CONTEXT.md。明确用户操作待办才属于待输入；进程存活、输入框可用和 turnCompleted 均不足以证明需要介入或任务已完成。
+- 现有正确路径：共享 AIRuntimeStateStore 已维护会话事实，desktop 与 headless 使用同一个 AIRuntimeBridge；通用远程资源已有订阅、baseline、项目 ID 转换和连接生命周期。
+- 具体缺口：terminal.status 为瞬时变化推送，无首次/重连快照；ai.stats 虽含具体状态，但当前按设备单项目订阅，不满足全项目角标。isRunning 表示回合工作中，不是进程存活。
+- 邻近消费者：crates/codux-runtime-live/src/agent_worktree/task_monitor.rs:63 仍使用 TerminalStatus；apps/desktop/src/app/desktop_pet.rs:164 也读取它。不能为角标直接覆盖通用终端信号含义。
+- 历史正确路径：.ai/tasks/desktop-terminal-list-sync.txt 已记录 resource.subscribe + baseline + host 权威集合的同步修复；这条路径优先查证和复用，不先发明另一套传输。
+- 历史约束：.ai/tasks/ai-state-lock-isolation.txt 与 git 3577aa16 的 store.rs 修复要求 core 锁只保护内存，资源发现 I/O 在锁外。新增快照必须保持这一边界。
+- 桌宠现有开关：settings/service_pet.rs:36–45 已有 pet_enabled、pet_desktop_widget、pet_static_mode；settings_actions.rs:819–889 将开关持久化并同步窗口。尚未测量本次状态方案下桌宠的性能成本。
+
+### 授权变更
+
+用户“继续啊”授权继续本任务，实现并验证目标内的产品行为；不授权提交、安装或部署。
+机制绑定：共享 store 内存事实和进程探测对应目标 1–3；通用 resource.subscribe 增加全 host Agent 活动资源及全量基线对应目标 5；UI 统一投影和静态样式对应目标 4、6。复用已有 1 秒 runtime tick 发布完整小快照，版本不变时 UI 不重绘；不新增轮询线程。
+用户补充授权：桌宠若影响性能或可维护性，可以移除或禁用。优先评估既有禁用路径；没有成本证据时，不把完整删除桌宠并入角标任务。
+用户指定执行协议：bhchange；不使用 Superpowers，不挂载其子技能。
+用户已明确“批准” Stop revision 的新版差异：恢复原 sessionStarted 判断，并以同一 terminal/session/instance 的已接受 Hook 时间排序，替换跨屏幕/probe 更新时间排序。其余目标、范围和交付边界不变。
+
+### 范围
+
+owner / invariant：现有 AIRuntimeStateStore 拥有会话事实；本地和远程 UI 只镜像、投影和汇总，不独立从 OSC、已读状态或计时器推断另一套 Agent 真相。快照失败、失联和旧数据不能发布为确定无会话。
+allowed_files：.ai/tasks/agent-session-badges.txt；docs/project-badge-investigation-2026-10-20.md；CONTEXT.md；docs/version-compatibility.md；Cargo.lock；apps/desktop/Cargo.toml；apps/agent/Cargo.toml；
+crates/codux-protocol/src/lib.rs；crates/codux-protocol/src/agent_activity.rs；crates/codux-runtime-core/src/ai_stats.rs；
+crates/codux-runtime-live/src/ai_runtime/mod.rs；crates/codux-runtime-live/src/ai_runtime/store.rs；crates/codux-runtime-live/src/ai_runtime/store/activity.rs；crates/codux-runtime-live/src/ai_runtime/store/apply/hook.rs；crates/codux-runtime-live/src/ai_runtime/store/tests/mod.rs；crates/codux-runtime-live/src/ai_runtime/store/tests/agent_activity.rs；crates/codux-runtime-live/src/ai_runtime/supervisor.rs；crates/codux-runtime-live/src/ai_runtime/registry.rs；crates/codux-runtime-live/src/ai_runtime/bridge/mod.rs；
+apps/desktop/runtime/src/runtime_state/service_bootstrap.rs；apps/desktop/runtime/src/runtime_state/service_ai_runtime.rs；apps/desktop/runtime/src/runtime_state/service_remote_controller.rs；apps/desktop/runtime/src/remote/host/mod.rs；apps/desktop/runtime/src/remote/host/terminal_dispatch.rs；apps/desktop/runtime/src/remote/host/agent_activity.rs；apps/desktop/runtime/src/remote/host/tests/mod.rs；apps/desktop/runtime/src/remote/host/tests/agent_activity.rs；apps/desktop/runtime/src/remote/controller.rs；apps/desktop/runtime/src/remote/controller_manager.rs；apps/agent/src/host.rs；
+apps/desktop/src/app/ai_runtime_status.rs；apps/desktop/src/app/agent_lifecycle.rs；apps/desktop/src/app/agent_display.rs；apps/desktop/src/app/project_column.rs；apps/desktop/src/app/project_column_actions.rs；apps/desktop/src/app/task_column.rs；apps/desktop/src/app/ssh_remote_actions.rs；apps/desktop/src/app/app_state.rs；apps/desktop/src/app/app_lifecycle.rs；apps/desktop/src/app/window_actions/windows.rs；apps/desktop/src/app/terminal_worktree_actions/terminal_mount.rs。
+精确语义边界：仅把角标和会话列表从通用终端信号改为统一 Agent 快照；既有桌宠、任务监控、历史统计仍使用其原契约。UI 镜像按设备隔离终端身份；当前连接对象持有最新远端快照，旧连接不写新对象。
+out_of_scope：自动判断整个业务任务完成；自动关闭会话；用新模型分类所有自然语言问题；新增独立传输框架或每项目轮询器；移动端 UI 改版；全量桌宠删除、全库性能治理及无关重构；修改既有桌宠数据；commit、push、PR、打包、安装或部署。
+
+### 验证
+
+baseline：e74d31aa；cargo test -p codux-runtime-live ai_runtime::store --lib：65 passed，0 failed。已核对 hookless 运行时沿用进程探测、transcript probe 与当前屏幕信号；codex/claude/kiro/kimi probe 已有 needsInput 分支。未识别自然语言问题不凭问号推断。远程和 UI 基线在各自修改前执行。未连接远端、未测桌宠性能。
+target_check（计划）：为普通 shell、回合结束空闲、明确待办跨回合结束仍保留、回复解除待办、超过 30 秒仍待处理、实例替换、探测失败、多会话聚合建立最小 fixture 测试；cargo test -p codux-runtime-live agent_activity。没有测试匹配不能记通过。
+target_check（远程计划）：首次订阅含连接前已有状态；未打开项目仍更新；重连无新输出仍恢复；全量结果移除关闭会话；旧连接/旧版本结果不能覆盖当前状态；多 host 相同 ID 隔离。cargo test -p codux-runtime agent_activity；cargo test -p codux-agent agent_activity。
+target_check（UI计划）：cargo test -p codux agent_activity；真实尺寸静态/灰度样稿和实际彩墨屏辨识。点击项目或已读不清真实待办，空闲会话保留存活标识；无设备验收时不能声称彩墨屏已通过。
+nearest_regression_check（计划）：cargo test -p codux-runtime-live ai_runtime::store；cargo test -p codux-runtime remote::controller；cargo test -p codux ai_runtime_status；cargo check -p codux-agent。旧通用 terminal.status 的任务监控语义不得改变；若实际设计不触及该路径，不增加无关桌宠检查。
+broader_check_reason：共享运行时与远程契约可能同时影响桌面 host、headless host 和控制端，验证仅按实际命中范围扩展。
+broader_checks：既有慢 I/O 锁隔离检查、对应产品编译和协议兼容检查，在精确 Gate 中绑定具体改动。当前不跑全库、不打包、不交付。
+
+## 当前阶段
+
+phase：verification / revision 4 automated checks passed; production frozen; device acceptance pending
+
+### Define 结果
+
+用户可观察需求、旧/新行为、非目标、约束已记录于上述 Active Contract 和报告。
+可执行验收：
+- 本地普通 shell、工作中 Agent、普通回答结束和明确提问分别触发不同状态；通过 fixture 与真实 CLI 事件对照。
+- A 工作、B 明确等用户输入时，同项目显示待介入；B 只是空闲时，项目显示工作中；通过同项目双会话序列验证。
+- 远端连接前已有 A 工作、B 等待，不打开 A/B 即能获得状态；断连变未知，重连无新输出仍恢复；通过 host/controller 场景验证。
+- 用户回复、会话退出或实例替换后，旧待办不复活；已读/点击不清除未回复问题；通过事件序列验证。
+- 彩墨实机上静态扫描多项目，能区分有会话、工作中、待介入与空闲；无需动画、文字角标或悬停。
+completion：complete
+
+### Guarded Design
+
+examined_existing_paths：AIRuntimeStateStore/Bridge 的共享会话 owner；通用 terminal.status 的任务监控和桌宠消费者；remote 的 resource.subscribe / baseline / ID 映射；desktop-terminal-list-sync 历史修复；ai-state-lock-isolation 与 3577aa16 的锁外 I/O 修复；已有桌宠开关。
+reuse_decision：extend-existing AIRuntimeStateStore + 现有远程资源订阅/baseline + 现有项目和终端 UI。
+decision_evidence：上述路径已分别拥有会话事实、连接和集合收敛、界面显示职责；角标应接入它们，不新建 UI owner 或传输框架。terminal.status 缺少业务语义及 baseline，ai.stats 的订阅范围不足，二者不能不经扩展直接当成最终方案。
+owner：共享运行时会话 owner；远程 host 发布权威状态，控制端仅保存有来源身份的镜像。
+invariant：明确用户待办优先；工作中和空闲由真实回合/进程证据区分；未确认不等于不存在；旧实例/旧连接不发布当前状态。
+selected_design：统一 store 活动投影，进程探测事实单独于工作状态；明确待办身份保存在同一 core，回复/恢复执行/会话替换解除，回合结束本身不制造或清除待办。Bridge 为内存投影赋单调 version；新增 agent.activity 资源名，复用 resource.subscribe 的 global scope 与现有 router。复用当前 1 秒 runtime tick 发完整小快照，首连/重连订阅立即应答；无增量补丁或新传输线程。Controller 当前连接对象缓存最新版本的 host ID 原始快照，读取时通过当前 ProjectIdBridge 转换，避免目录基线到达前固化错误 ID。
+acceptance_binding：进程/待办证据服务于状态准确性；快照基线服务于远程首连/重连；来源与实例身份服务于防串状态；统一聚合和静态样式服务于一眼辨识。
+why_minimal_and_sufficient：优先扩现有 owner、资源和 UI；没有新的业务完成判定、自动退出、独立轮询或模型分类。完整小快照省去增量删除和补丁恢复的复杂度。
+alternatives：直接复用现有 raw terminal.status 不足，其输入混有普通 shell/进度语义且被任务监控消费；直接使用现有 ai.stats 不足，其当前订阅按单项目/可能单 worktree。其他备选 none，不为模板发明方案。
+interface：增加 agent.activity 资源/消息和共享 serde 类型；现有 RemoteAICurrentSessionProvider 增加默认不支持的活动快照方法，desktop/headless provider 提供共享 Bridge 结果。老 host 无回复时 UI 未知，不影响其余连接。
+data_model：需要独立的进程存在性与回合/待办事实，以及来源设备、项目、worktree、终端和实例身份；复用已有身份机制。
+compatibility：桌面和 headless 独立版本；旧 host 不支持准确状态时显示未知，不能以空数组或 raw OSC 假装新语义可用。
+migration：当前设计不需要持久化数据迁移。
+feature_flag：不新增 flag；桌宠评估只优先使用已有开关。
+rollback：当前没有生产 diff；实施后仅回退本任务可证明拥有的改动，不改历史会话和宠物数据。
+verification_only：自然语言提问缺少结构化事件的工具能力差异；快照发布时序；跨 host ID；未知与空闲的辨识；彩墨实机效果；桌宠实际性能/维护成本。
+out_of_scope：同 Active Contract。
+
+### 修改前方案审查
+
+existing_path_check：pass — generic resource target 支持任意资源字符串，已有 router 拥有 global subscribe/unsubscribe 与连接清理。新增资源只补缺失的全 host Agent 语义，不复制传输、项目映射或终端信号消费者。
+owner_and_evidence：pass — 进程扫描在 supervisor、状态和待办在 store、Bridge version 仅为发布元数据；新快照仅锁内读取内存，不执行路径或 transcript I/O。
+semantic_scope：pass — 仅会话存在性、参与提示和本地/远程统一显示；不自动判定业务完成或退出。
+verification_power：pass — 已有 65 项 store 基线；新增行为以真实 hook/probe/进程检测序列测试；远程以资源订阅 baseline、空集合、重连对象和版本反序测试；UI 以聚合和静态样式契约测试，实机效果单列未证明。
+result：pass
+
+## Stop revision
+
+stop_evidence：修改前 store 基线为 65 passed、0 failed。当前 cargo test -p codux-runtime-live ai_runtime::store --lib 为 69 passed、1 failed；screen_signal_refines_active_turn_only 在 screen_signal_kiro.rs:54 期望 idle，实际 responding。当前 hook.rs 将原来仅 sessionStarted 的旧事件判断扩大到 needsInput、promptSubmitted、turnCompleted、sessionEnded，并比较 session.updated_at。屏幕信号也写入这个字段，使用当前时间；因此有效 turnCompleted 被错误拒绝。停止后未修改、回滚或格式化生产文件。
+refuted_fields：修改前方案审查的 verification_power 及既有 screen/hook 正确路径保持结论被实际回归反驳；用户可观察目标不变。不能通过修改原有测试时间或预期掩盖回归。
+current_diff：git diff --stat 显示 31 个已跟踪文件，418 insertions、954 deletions；另有 5 个新增生产/测试文件：codux-protocol/src/agent_activity.rs、codux-runtime-live/src/ai_runtime/store/activity.rs、同目录 tests/agent_activity.rs、desktop/runtime/src/remote/host/agent_activity.rs 及其 tests/agent_activity.rs。现有 diff 包含共享投影、进程事实、明确待办、远程快照订阅与镜像、静态 UI、desktop/headless 独立版本更新。报告和 CONTEXT.md 为新增文档。未提交、未交付；不包含其他任务和用户未跟踪文件。
+verification_status：store 69 passed、1 failed（上述新增回归）；cargo test -p codux-runtime agent_activity --lib 最新 4 passed；cargo test -p codux agent_activity 最新 3 passed、252 filtered out；cargo test -p codux-agent agent_activity 较早 1 passed，晚于该次验证的小修改尚未复核。远程 controller 修改前基线为 73 passed、4 ignored。尚未格式化；版本兼容文档、完整最近回归和真实远端/彩墨实机验收未完成。
+
+### Proposed Active Contract
+
+state：locked / approved
+目标：沿用原目标 1–6；同时保证用户回复后旧提问不能恢复待办，屏幕活动之后的有效回合完成事件仍可进入空闲。
+证据：上述旧问题重放测试 agent_activity_old_question_cannot_restore_answered_action 与既有 screen_signal_refines_active_turn_only 共同约束事件排序。session.updated_at 混合了 hook、probe 和屏幕来源，不足以判断同源 hook 是否过期。现有实例替换和 sessionStarted 判断继续承担原身份边界，不用新的排序字段替代全部生命周期判断。
+授权变更（已批准）：撤回本次扩大 session.updated_at 比较范围的改动，恢复原 sessionStarted 判断；在现有 store owner 中记录按 terminal/session/instance 身份隔离的已接受 hook 时间戳，仅用于拒绝同源过期生命周期事件。屏幕和 probe 更新时间不参与 hook 顺序判断。排序元数据不是新的状态 owner；不改变状态定义、聚合规则或远程/UI 契约。
+范围：owner / invariant、allowed_files、out_of_scope 沿用原合同。此次修正仅涉及已声明的 store.rs、store/activity.rs、store/apply/hook.rs、store/tests/agent_activity.rs 及任务/报告记录；不修改既有 screen_signal_kiro.rs 预期，不增加文件，不修改桌宠，不安装 hook。原同源之外的实例防护仅维持已有语义。
+验证：先验证 agent_activity_old_question_cannot_restore_answered_action 与 screen_signal_refines_active_turn_only 均通过；再执行 cargo test -p codux-runtime-live ai_runtime::store --lib，要求 0 failed。保持实例替换与待办跨回合完成测试。之后按原合同完成 runtime/headless/UI 针对性检查和最近回归；不把真实设备未验证写成通过。
+差异：删除跨来源通用更新时间排序；增加同源、身份隔离的 hook 顺序元数据；无新增产品行为、文件、传输、线程或外部操作。增加明确绑定既有屏幕回归的验证。
+diff_disposition：建议保留其余待验证实现，替换错误时间戳判断。已有两项互补测试可直接证明修正；整体回滚会丢失已授权功能且不解决旧提问重放问题。此建议不授权在批准前改动生产文件。
+approval：approved — 用户明确回复“批准”。
+
+## Stop revision 2 — final-answer semantics
+
+stop_evidence：用户明确要求补齐普通回答中的必要提问识别缺口。旧合同将“自然语言提问缺少结构化事件”记为未证明范围，并排除自动判断整个业务任务完成；上一版生产代码已经 frozen。补齐该缺口需要新增收尾报告约定、提示内容及 probe/store 事实，不能静默并入已冻结合同。本轮未修改生产文件。
+refuted_fields：不是旧 Store 回归重现，而是用户将原已知限制提升为必须处理的功能。旧授权变更、allowed_files 和验证范围不再足以覆盖本次新增语义。
+current_diff：保留上一版完整未提交 diff；新增本节前 git diff --stat 为 32 个已跟踪文件、658 insertions、937 deletions，另有原记录中的 5 个新增生产/测试文件及任务、报告、CONTEXT.md。上一版自动化结果仍是本节前的验证边界；没有提交、打包、安装或部署。
+existing_path_evidence：desktop service_ai_memory.rs 的 extra_context 与 headless memory.rs 已复用 MemoryService::prepare_launch_artifacts，memory 关闭时环境规则仍可注入；Codex/Claude/OpenCode/MiMo 的 driver 已有注入及完整 assistant 正文读取能力。preview.rs 截断为前三行/180 字，不能据其判定回答末尾。原生 parser 已有用户/完成/中断边界。无代码索引或 projectmem 工具，本次使用 context-mode 与源码验证。详情见调研报告第 13 节。
+reuse_decision：建议扩展现有托管指令、原生回合解析和共享 store，不增加分类模型、命令/RPC、轮询线程、远程资源或 UI 状态 owner。
+
+### Proposed Active Contract 2
+
+state：withdrawn / rolled back by user
+目标：将本次请求必须由用户补充信息才能继续的最终回答归入 NeedsInput；Agent 明确报告本次请求完成且没有待办时保留 Idle；没有可靠报告时显示 Unknown，不能冒充无需介入。原生待办优先。保持原项目聚合、颜色/形状、本地/远程一致性和不自动退出约束。
+证据：报告第 13 节的注入、原生最终回答读取和预览截断路径。Codex/Claude 当前 runtime_state_for_hook_kind 与 probe 完成仅给 idle/has_completed_turn，不含业务收尾事实；故不能只调现有颜色或优先级补齐。现有启动指令可复用，额外分类 provider 和独立工具上报协议尚无必要。
+授权变更（已批准）：在托管启动指令中约定最终回答末尾的独立状态行：〔需要你参与〕、〔本次请求已完成〕、〔尚不能判断〕。只解释当前已结束回合的最新 assistant 完整正文，提取有来源与回合归属的类型化报告后再截断预览。报告进入现有 AIRuntimeStateStore；不让显示字符串或 UI 另作业务判断。完成报告仅是 Agent 对本次请求的声明，不保证项目客观完成，不自动结束进程。既有原生明确待办不得被报告完成覆盖。
+范围：owner 仍为共享 store；回合归属复用各工具现有用户/完成/中断与实例/会话身份。首轮确定支持 Codex、Claude、OpenCode/MiMo；其余 driver 没有可信完整报告时显示 Unknown，不另行新增未知的 CLI 提示注入方式。新建未开始任务的存活会话仍是普通 Idle；已结束且缺少可靠报告的回合才使用新的 Unknown 语义。当前远程协议和 UI 不新增形状或资源。
+allowed_files（本节新增/修正清单，原合同的无关文件不因此重新授权）：.ai/tasks/agent-session-badges.txt；docs/project-badge-investigation-2026-10-20.md；CONTEXT.md；docs/version-compatibility.md；crates/codux-runtime-core/src/ai_stats.rs；crates/codux-runtime-live/src/ai_runtime/mod.rs；crates/codux-runtime-live/src/ai_runtime/snapshot.rs；crates/codux-runtime-live/src/ai_runtime/probe/preview.rs；crates/codux-runtime-live/src/ai_runtime/probe/codex.rs；crates/codux-runtime-live/src/ai_runtime/probe/codex/parse.rs；crates/codux-runtime-live/src/ai_runtime/probe/codex/preview.rs；crates/codux-runtime-live/src/ai_runtime/probe/codex/types.rs；crates/codux-runtime-live/src/ai_runtime/probe/claude.rs；crates/codux-runtime-live/src/ai_runtime/probe/opencode.rs；crates/codux-runtime-live/src/ai_runtime/probe/omp.rs；crates/codux-runtime-live/src/ai_runtime/probe/kimi.rs；crates/codux-runtime-live/src/ai_runtime/probe/kiro.rs；crates/codux-runtime-live/src/ai_runtime/probe/agy.rs；crates/codux-runtime-live/src/ai_runtime/probe/codewhale.rs；crates/codux-runtime-live/src/ai_runtime/store.rs；crates/codux-runtime-live/src/ai_runtime/store/activity.rs；crates/codux-runtime-live/src/ai_runtime/store/apply/hook.rs；crates/codux-runtime-live/src/ai_runtime/store/apply/snapshot.rs；crates/codux-runtime-live/src/ai_runtime/store/tests/agent_activity.rs；crates/codux-runtime-live/src/ai_runtime/store/tests/bindings.rs；crates/codux-runtime-live/src/ai_runtime/store/tests/fixtures.rs；crates/codux-runtime-live/src/ai_runtime/store/tests/isolation.rs；crates/codux-runtime-live/src/ai_runtime/store/tests/codex.rs；crates/codux-runtime-live/src/ai_runtime/store/tests/needs_input.rs；crates/codux-runtime-live/src/ai_runtime/store/tests/completion_notify.rs；crates/codux-runtime-live/src/ai_runtime/store/tests/codewhale.rs；crates/codux-runtime-live/src/ai_runtime/store/tests/screen_signal_kiro.rs；crates/codux-runtime-live/src/ai_runtime/store/tests/hook_lifecycle.rs；apps/desktop/runtime/src/runtime_state/service_ai_memory.rs；apps/desktop/runtime/src/runtime_state/service_core_tests/launch.rs；apps/agent/src/memory.rs。其余 probe/fixture 仅补可选字段缺省值，不顺手改变工具生命周期或原测试预期。本节不新增文件。
+out_of_scope：自动退出；保证客观业务完成；关键词或问号分类；额外模型调用；后台工具/RPC 报告；新增 UI、资源、线程、未知 CLI 注入适配；修改用户仓库的 AGENTS.md；全量历史回填；宠物和移动端改版；提交/交付。
+验证：新增严格收尾解析检查，覆盖必要提问、可选邀请、明确完成、无报告/冲突报告、180 字后标识、代码块/引用/工具/推理伪标识、未完成回合和回合归属。新增 store 序列检查，覆盖原生待办优先、回复清除、旧报告晚到、实例替换和中断。基线 cargo test -p codux-runtime-live ai_runtime::probe --lib 为 73 passed；cargo test -p codux-runtime launch_artifacts --lib 为 2 passed；cargo test -p codux-agent memory::tests --bin codux-agent 为 2 passed；此前 store 71 passed。实施后先运行新增命名检查，再运行上述最近回归及 store、runtime/headless agent_activity 和 desktop agent_activity；无匹配项不得记通过。注入路径检查必须包括 memory 关闭和既有用户参数保持。真实 CLI/远端/彩墨仍需设备证据。
+before_after：增加显式最终回答报告和已结束但无报告的 Unknown；从原非目标中仅移出“本次请求收尾状态声明”，不移出“保证整个业务任务完成”或“自动退出”。增加上述已确认的注入、正文读取、快照与 fixture 文件；无新资源或传输。保留上一版完整 diff，不回滚排序、远程或 UI 修正。
+design_review：pass。复用托管 extra_context、完整 assistant 原文与原生回合边界；类型化报告只进入现有 store，预览和 UI 不独立推断；保持已有原生待办优先及核心锁外 I/O。缺少报告、工具适配不足或中断保留 Unknown；不挂载外部能力，不新增分类调用或传输。
+approval：withdrawn。曾由用户“好，试试效果”批准试验，后因逐 Agent 适配成本明确撤回；本节仅保留历史，不再授权实施。
+
+## User-directed rollback — final-answer semantics
+
+目标：撤回刚新增的回答末尾状态行和按 Agent 解析收尾报告，恢复第 12 节的统一角标基础实现。
+证据：用户明确“如果要逐个agent支持，那太麻烦了，还是撤了吧”。最近讨论及实施对象为 Proposed Active Contract 2；此前本地/远程角标和 Hook 排序修正不属于此次撤回。该层未提交、未打包、未安装或部署。
+授权变更：用户明确授权撤回第 2 次修订；不再要求状态行、不再解析最终回答来推断收尾、不再把仅缺少收尾报告的空闲回合改为 Unknown。原生明确待办、进程存在性、远程快照、静态 UI 和同源 Hook 排序保留。不增加替代分类或支持方案。
+范围：仅回退 Proposed Active Contract 2 可证明拥有的生产和测试改动；其独有的 23 个既有文件在本修订前与 HEAD 一致，恢复其 HEAD 内容；共享 ai_stats.rs、store.rs、store/activity.rs 和 store/tests/agent_activity.rs 按层移除报告相关增量，保留基础活动投影及 6 项测试。CONTEXT.md 恢复基础含义；报告和任务保留历史并标撤回，兼容文档去除状态行契约。产品版本仍服务于保留的基础改动，不回退。其他任务与用户未跟踪文件不动。
+验证：确认独有 23 个文件再次与 HEAD 一致，生产源码不再引用 AgentTurnDisposition / assistant_turn_disposition / agent_activity_ai_directive 或固定状态行；cargo test -p codux-runtime-live ai_runtime::store --lib 恢复 71 passed，ai_runtime::probe 恢复 73 passed；runtime/headless/desktop agent_activity 及启动上下文针对性检查保持通过，git diff --check 通过。
+review：pass。撤回的是本任务最近新增的协议层；不使用整体 git reset/checkout，不覆盖基础角标、远程或无关文件。记录每项内容来源，使用 native apply_patch 回退。
+approval：approved — 用户当前明确撤回指令，不再重复索取回退许可。
+
+## Proposed revision 3 — session overview window
+
+state：stopped；用户已明确批准本修订，源码已实施；自审发现导航准备完成条件不足，停止生产修改。
+stop_evidence：用户提出半透明浮窗、动态显示所有会话最后一句话及点击跳转。原目标 4 明确“不新增面板或窗口状态栏”，且目标已冻结。现有 activity 记录没有文本字段，现有 assistant preview 也不是回答末句。不能在冻结 diff 上直接叠加 UI 和数据契约。
+refuted_fields：原 out_of_scope 中无新增窗口的范围不足以覆盖新需求；并非推翻已实现的基础角标。逐 Agent 收尾解析仍已撤回。
+current_diff：保留上一 checkpoint 的基础实现及其验证结果；本轮仅增加调查报告和本记录，没有生产修改，没有重跑此前相同源码检查。
+
+### 新版五项 Active Contract（提案）
+
+目标：在独立、可关闭、可拖动、置顶的半透明浮窗中展示 Codux 管理的本地和已连接远端 Agent 会话，包含未打开项目。每行显示设备、项目、会话、既有状态及最多三个非空行/240 字符的最近终端输出。明确待输入优先，其后空闲、未知、工作中；同组顺序稳定。点击后准确定位并聚焦该会话，迟到的旧点击不得覆盖新点击。
+证据：报告第 16 节记录实际窗口、screen_text、activity 资源及 worktree/terminal 聚焦路径。通用屏幕文本无需逐 Agent 适配，但可能含提示、日志或状态栏；因此不承诺精确 assistant 最后一句话。当前没有浮窗，也没有全 host 文本传输。
+授权变更：拟新增独立会话总览视图和开关入口；为现有 agent.activity 增加可选有界最近输出字段，复用已有屏幕采样、资源快照和约一秒发布节奏；接入现有跨项目/worktree/终端定位流程。只展示内容，不从内容判定需要参与或业务完成；不恢复状态行实验，不增加模型调用或 Agent 专用解析。
+范围：AIRuntimeStateStore/Bridge 继续拥有活动投影；host 的终端屏幕拥有输出来源；主窗口既有项目/worktree 切换流程拥有导航意图，浮窗不复制运行时、连接或终端实体。候选 allowed_files 限于现有 activity 协议、共享 runtime 的 registry/supervisor/store/bridge、桌面与 headless 的现有 activity provider/资源测试、desktop app 的新 session_overview 模块及其模块声明/窗口入口/现有导航完成接入点，以及本任务、报告、兼容文档和受影响产品版本文件。精确文件清单和复用采样/导航接入点在生产修改前随 design Gate 核对，不以本候选清单授权扩大职责。out_of_scope：外部未管理会话、未连接设备、精确 assistant 句末解析、语义分类、自动退出、桌宠改造、移动端 UI、独立传输/轮询框架、提交、打包、安装或部署。
+验证：基线沿用此前基础检查；新增机制实施前运行对应最小基线。target_check 包括片段空/多行/超长、字段缺失兼容、相同状态下文本更新、未打开远程项目、退出/重连/跨 host 身份、浮窗生命周期、跨 scope 精确导航及 A/B 迟到完成。nearest_regression_check 为 cargo test -p codux-runtime-live ai_runtime::store --lib、cargo test -p codux-runtime agent_activity --lib、cargo test -p codux agent_activity、cargo test -p codux-agent agent_activity --bin codux-agent；新增测试使用实际命名，匹配零项不算通过。静态/灰度样稿及真实远端/彩墨屏验收结果分别记录，不声称源码检查覆盖实机。
+
+差异：增加一个展示窗口、可选片段字段及精确导航接入；保留既有状态 owner、角标、远端资源和撤回结论。没有删除基础行为。需要额外处理文本兼容、屏幕锁外 I/O、窗口关闭及异步导航意图；这些风险只授权对应验收，不授权无关治理。
+design_status：ready。用户“是”明确批准新增浮窗及最近输出语义。screen_text 在 supervisor 既有采样路径读取；扩展既有进程记录保存有界片段，活动快照仅读内存。普通 idle 会话也需采样，复用同一次采样供现有状态检测，不为浮窗重复采样或新增线程。协议增加 default 可选 tool/recentOutput 字段，以区别 Unknown shell 与已有 Agent，旧 host 缺片段仍显示状态。独立小型 GPUI view 只保存显示行，复用主窗口已有 tick 推送差异；没有独立 runtime 或定时器。主窗口保存唯一当前导航目标，现有 tick 延后调用窗口上下文协调项目/worktree/终端，沿用 generation 和挂载状态；过期操作不保存各自的焦点目标。窗口关闭移除 view，主窗口关闭同时关浮窗。
+allowed_files_exact：crates/codux-protocol/src/agent_activity.rs；crates/codux-runtime-live/src/ai_runtime/store/activity.rs；crates/codux-runtime-live/src/ai_runtime/store/tests/agent_activity.rs；crates/codux-runtime-live/src/ai_runtime/supervisor.rs；apps/desktop/runtime/src/remote/host/tests/agent_activity.rs；apps/desktop/runtime/src/remote/controller.rs（仅活动测试 fixture）；apps/desktop/src/app.rs；apps/desktop/src/app/session_overview.rs（新增）；apps/desktop/src/app/agent_lifecycle.rs；apps/desktop/src/app/app_state.rs；apps/desktop/src/app/app_lifecycle.rs；apps/desktop/src/app/window_actions/windows.rs（构造器）；apps/desktop/src/app/status_bar.rs（入口）；apps/desktop/src/app/runtime_actions.rs（既有 tick）；本任务、docs/project-badge-investigation-2026-10-20.md、docs/version-compatibility.md、CONTEXT.md。基础未发布 Desktop beta.27/headless beta.23 已相对 HEAD 分别升版，本修订仍在这两个未发布源码版本中，不新增 mobile 变更。
+existing_path_review：pass。现有 supervisor 拥有屏幕采样，store 拥有进程和活动，activity 资源拥有远程同步；浮窗仅有显示镜像。导航复用 select_project/select_worktree、select_terminal_pane、restore_collapsed_terminal 和已有 generation/terminal_layout_loading，不另建加载器或会话。已核对工作区/pet 历史修复 1116460e 和 desktop-terminal-list-sync；不复制桌宠完整 app、50ms 穿透、动画或模型循环。
+pre_edit_review：pass。新增字段直接满足通用片段/会话识别；新 view 满足总览；单一导航意图满足点击定位。Unknown 来源只保留先前 Agent 行并清掉实时文本，不凭普通 shell 猜测存在 Agent。风险绑定片段身份、兼容、断连、关闭及跨 scope 导航验收。没有挂载外部能力。
+approval：approved — 用户“是”批准本修订。只授权此范围内设计/实施和验证，不授权提交、交付或撤销此前回退。
+
+## Proposed revision 4 — publish project loads before session navigation
+
+state：frozen / approved — 已完成本修订源码和已声明自动化检查，保留实机验收边界。
+stop_evidence：report 第 16 节的自审因果链。select_project 先发布本地缓存工作区/布局，再在 project_actions/switch_load.rs 并行请求最新工作区目录和终端布局。首次远程项目的目标 worktree 可不在缓存；当前导航只看 terminal_layout_loading，下一 tick 可在目录尚未发布时错误失败。相同 generation 的稍后目录/布局也可覆盖过早完成的导航。
+refuted_fields：revision 3 design_status / pre_edit_review 中“沿用 generation 和挂载状态即可确保跨项目导航”的充分性结论；本轮 3 项浮窗纯逻辑测试不能证明异步跨 scope 导航。目标与用户已批准行为不变。
+current_diff：基础实现与浮窗 UI、通用片段生产/传输、当前来源和实例复核均保留；共 35 个已跟踪文件、818 insertions、965 deletions，另有本任务新增源文件和文档。停止时没有修改 project_actions/switch_load.rs，没有回滚基础层或浮窗，也未提交、打包、安装或部署。
+
+目标：只补齐已批准的点击定位验收。首次打开未缓存远程工作区时等待目录与终端布局真实发布；连续点击 A/B、旧加载迟到和加载失败后，不误报不可定位、不跳错、不丢失新意图、不永久等待。
+证据：现有正确路径为 spawn_project_switch_load 的 task_load 和 terminal_load，以及 apply_project_switch_task_load / apply_project_switch_terminal_load 的 generation 检查。cached_worktrees_from_state 对 hosted 项目先读本地缓存，hosted_worktree_summary 才执行远端目录查询和同步。加载完成点属于现有项目加载 owner，不能由浮窗的旧缓存或延时推断。相关正确路径和历史范围仍为 revision 3 记录，不新建加载器。
+授权变更（提案）：让现有项目加载 owner 发布当前 generation 的目录、终端布局完成与失败；只增加必要的协调元数据。浮窗在这两个结果已发布后才选择目标 scope/pane，读取最新导航意图；旧完成不解除新等待，失败保留信号并终止对应导航且显示原因。保留其余 revision 3 行为，不增加延时补偿、第二套加载或 Agent 解析。
+范围：增加 apps/desktop/src/app/project_actions/switch_load.rs 至精确 allowed_files；现有 app_state.rs、app_lifecycle.rs、window_actions/windows.rs 和 session_overview.rs 仅增加/消费对应加载协调元数据，其他 revision 3 文件不扩大职责。owner 仍为主窗口既有项目加载流程；事实发布和失败传播属于完成，UI 行不是导航授权。out_of_scope 沿用 revision 3。
+验证：保留已通过检查。新增针对未缓存远程 worktree 的目录/布局反序发布、同项目 A/B 最新目标、generation 替换、旧完成不解新等待、加载失败结束等待的最小协调检查；desktop session_overview / agent_activity 检查必须实际匹配，验证时编译现有调用点。最近回归限于项目选择/恢复的已有相关测试；真实跨项目/worktree/pane 点击、实际远端和彩墨屏单列，不以纯逻辑检查代替。
+差异：只增加现有项目加载完成接入文件及必要的发布协调；无新用户功能、协议字段、线程或外部操作。保留已通过的通用片段/状态/远端测试与当前 diff。不能通过等待固定毫秒、忽略缺失工作区、自动选首个会话或刷新重试提示掩盖缺口。
+review：pass。已核对 spawn_project_switch_load 的两条 worker：它们重复调用 reload_worktrees_from_state，终端布局仅需同一次目录结果确定 owner 后读取现有布局存储。复用原 worker/类型，合并这次重复读取，由一个现有回调先发布目录再发布该目录对应的布局；不增加加载器、线程或复制目标。project_session_load 只记录当前 generation 的等待、已发布结果或失败，主窗口现有 generation 继续保护 scope，terminal_layout_loading 只保护随后挂载。已有 terminal_restored_generation / layout cache 防止正常切换重建，但不能遮蔽已确认的导航目标；仅当该目标缺失且本次布局包含它时，让原加载 owner 使用这次布局恢复，不覆盖无关活跃布局。已核对 sidebar/primary/full load，它们不改变终端目标，继续用既有 generation/scope 保护。
+selected_mechanism：现有项目加载 worker 一次读取目录及该目录的终端布局，在同一窗口回调发布；成功信号必须晚于两个原 apply 方法，源错误和后台失败必须保留。单一导航意图等待当前发布结果，再走既有 worktree/pane 路径。增加的发布协调只负责项目载入，不替代挂载完成或实际 pane 实例校验；这三者分别保护不同前提。
+allowed_files_exact：revision 3 原清单，加 apps/desktop/src/app/project_actions/switch_load.rs。此修订实际生产改动限于该 owner 文件、app_state.rs、app_lifecycle.rs、window_actions/windows.rs 和 session_overview.rs；文档沿用原授权。无额外产品或交付变更。
+verification_detail：已有 baseline 为 session_overview 3、desktop activity 3；旧 loader 无对应命名的独立协调测试，不把零匹配计通过。新增 owner 发布结果测试覆盖待发布、失败、A/B/A generation 替换与迟到结果；新用例验证缓存缺少目标时既有 restore guard 不得阻挡已确认布局。同项目新的点击仍读取当前意图，不重设正在进行的项目加载。最近回归运行 cargo test -p codux terminal_restore、cargo test -p codux active_terminal、cargo test -p codux agent_activity；target 为 cargo test -p codux session_overview。实机远端/彩墨屏验收独立保留。
+approval：approved — 用户“批准”明确批准第 4 次修订，恢复本范围实现及验证，不授权提交、安装或部署。
+
+result：implemented。原两条重复读取目录的 worker 合并为一次目录/布局读取和同一回调内有序发布；失败不置成功。项目发布协调只有一个 generation/result，原生的挂载状态和 pane 实例分别继续保护挂载与实际焦点。目标被当前布局确认、却被当前 scope 过时缓存遮蔽时，复用原恢复路径，不新建加载器或 UI 会话真相。
+target_check：cargo test -p codux session_overview 为 9 passed。新增 6 项绑定发布等待、A/B/A 迟到结果、失败持久可见、新 worktree 不受旧项目等待阻挡、已确认目标不被缓存遮蔽及 collapsed/worktree 布局。
+nearest_regression_check：cargo test -p codux terminal_restore 为 4 passed；active_terminal 为 2 passed；agent_activity 为 3 passed。桌面编译包含在检查内。rustfmt 针对本轮 5 文件 --check 和 git diff --check 通过。共享 runtime/protocol/headless 未变，不重跑此前同代码检查。
+evidence_bound_review：pass，限上述自动化及源码证据。尝试反驳：若缓存骨架已挂载但目录未发布，readiness 仍为 false；若旧 A 在 B/A 新 generation 后结束，既有 generation guard 与发布结果 identity 均不释放当前等待；若失败被其他旧成功覆盖，测试保持 Err；若已确认目标只在新布局，restore token/cache 必须让位，但其他 scope 和已有目标布局不重建。独立目录/布局反序由合并一次读取/发布消除。没有新增 UI timer、模型调用或 Agent 解析。真实鼠标/远端设备验收未证明，不扩实现。
+verification_artifact：docs/agent-session-overview-preview.svg 为已声明静态样稿，不属于新增产品机制。SVG XML 检查通过；94% 不透明暗色底叠加白色背景时正文/次要文字对比约 12.62:1 / 5.84:1。浏览器工具 inventory 为空，未做截图视觉核验；样稿不代替 GPUI 和彩墨设备验收。
+
+## Checkpoint
+
+latest_verified：用户已批准 revision 4；已完成目录/布局一次发布及导航等待，失败保留、旧 generation 隔离、过时缓存让位。浮窗、通用片段、统一状态及此前回退结论保留。生产代码冻结，没有提交、安装、部署，也未动其他任务和用户文件。
+current_contract：有效契约为基础角标加 revision 3/4 的独立浮窗、最近三个非空终端行/240 字符、精确当前目标导航。原生待办优先，不从自然语言推断或恢复逐 Agent 收尾解析。实机远端/CLI 和彩墨屏效果尚未证明；不新增功能或继续生产修改。
+verification：本轮 session_overview 9、terminal_restore 4、active_terminal 2、desktop agent_activity 3 passed；桌面编译、rustfmt 和 git diff --check 通过。此前未改的 store 73、supervisor 11、protocol 2、runtime activity 5、headless activity 1 等结果保留，不声称本轮重跑。静态 SVG 已保存并检查 XML/对比度数值；浏览器工具 inventory 为空，未做截图视觉或设备验收。
+self_review：已有加载 owner 一次读取并发布目录/布局后才释放导航；generation/result 仅为协调。挂载状态与实际实例继续保护其不同前提；缺少已确认目标的 scope 缓存不阻断正确恢复，其他缓存保留。没有第二套发现、传输、状态判断、加载器、定时器或模型调用。自动化反驳检查通过，实际远端与彩墨设备继续单列待验收。
+contract_state：frozen；proposed_contract_1：approved and implemented；proposed_contract_2：withdrawn and rolled back；proposed_contract_3：approved and implemented；proposed_contract_4：approved and implemented
+active_capability：none
+next_action：按 2026-10-22 用户授权提交本任务、创建 desktop/headless 版本标签并推送 lan；不打包、安装或部署。之后继续等待真实远端导航和彩墨设备验收，不恢复收尾状态行实验；实机验收未完成，不标 done。
+
+## 交付授权（2026-10-22）
+
+用户明确授权：提交、创建版本标签、推送到配置的 LAN remote，并更新协作文档。此授权覆盖此前“commit、push 未授权”的状态，只作用于本任务变更；不得推送 origin/upstream，也不得纳入其他未完成任务或 private/.scratch 用户数据。
+
+协作文档入口：AGENTS.md 指向 CONTEXT.md 和 docs/agent-session-overview-development.md；后者记录状态契约、代码 owner、协作不变量、验证命令和未完成设备验收。
+
+交付后本任务继续保持 active，直到真实远端导航与彩墨屏验收完成；提交和推送不代表设备验收通过。

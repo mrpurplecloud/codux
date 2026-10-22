@@ -3,6 +3,10 @@ use serde_json::{Value, json};
 
 pub trait RemoteAICurrentSessionProvider: Send + Sync {
     fn current_sessions(&self, project_id: &str) -> Vec<RemoteAICurrentSession>;
+
+    fn agent_activity(&self) -> Result<codux_protocol::AgentActivitySnapshot, String> {
+        Err("Agent activity is unavailable.".to_string())
+    }
 }
 
 pub fn ai_stats_payload_from_state_value(

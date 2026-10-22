@@ -52,6 +52,10 @@ struct DesktopAICurrentSessionProvider {
 impl codux_runtime_core::ai_stats::RemoteAICurrentSessionProvider
     for DesktopAICurrentSessionProvider
 {
+    fn agent_activity(&self) -> Result<codux_protocol::AgentActivitySnapshot, String> {
+        self.ai_runtime.agent_activity_snapshot()
+    }
+
     fn current_sessions(&self, project_id: &str) -> Vec<codux_protocol::RemoteAICurrentSession> {
         let snapshot = self.ai_runtime.runtime_state_snapshot();
         let summary =

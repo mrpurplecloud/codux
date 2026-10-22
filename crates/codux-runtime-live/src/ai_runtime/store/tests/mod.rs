@@ -1,3 +1,4 @@
+mod agent_activity;
 mod bindings;
 mod codewhale;
 mod codex;

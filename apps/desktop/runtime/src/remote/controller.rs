@@ -21,13 +21,13 @@ use codux_protocol::{
     REMOTE_PAIRING_REJECTED, REMOTE_PAIRING_REQUEST, REMOTE_PROJECT_ADD, REMOTE_PROJECT_EDIT,
     REMOTE_PROJECT_LIST, REMOTE_PROJECT_REMOVE, REMOTE_PROJECT_UPDATED, REMOTE_RESOURCE_PROJECTS,
     REMOTE_RESOURCE_SUBSCRIBE, REMOTE_RESOURCE_TERMINALS, REMOTE_TERMINAL_BUFFER,
-    REMOTE_TERMINAL_BUFFER_MAX_CHARS,
-    REMOTE_TERMINAL_CLOSE, REMOTE_TERMINAL_CLOSED, REMOTE_TERMINAL_CREATE, REMOTE_TERMINAL_CREATED,
-    REMOTE_TERMINAL_INPUT, REMOTE_TERMINAL_LIST, REMOTE_TERMINAL_OUTPUT, REMOTE_TERMINAL_STATUS,
-    REMOTE_TERMINAL_VIEWPORT_CLAIM, REMOTE_TERMINAL_VIEWPORT_RELEASE,
-    REMOTE_TERMINAL_VIEWPORT_RESIZE, REMOTE_TERMINAL_VIEWPORT_STATE, REMOTE_TRANSPORT_IROH,
-    REMOTE_WORKTREE_CREATE, REMOTE_WORKTREE_LIST, REMOTE_WORKTREE_MERGE, REMOTE_WORKTREE_REMOVE,
-    REMOTE_WORKTREE_UPDATED, RemoteHostMetrics,
+    REMOTE_TERMINAL_BUFFER_MAX_CHARS, REMOTE_TERMINAL_CLOSE, REMOTE_TERMINAL_CLOSED,
+    REMOTE_TERMINAL_CREATE, REMOTE_TERMINAL_CREATED, REMOTE_TERMINAL_INPUT, REMOTE_TERMINAL_LIST,
+    REMOTE_TERMINAL_OUTPUT, REMOTE_TERMINAL_STATUS, REMOTE_TERMINAL_VIEWPORT_CLAIM,
+    REMOTE_TERMINAL_VIEWPORT_RELEASE, REMOTE_TERMINAL_VIEWPORT_RESIZE,
+    REMOTE_TERMINAL_VIEWPORT_STATE, REMOTE_TRANSPORT_IROH, REMOTE_WORKTREE_CREATE,
+    REMOTE_WORKTREE_LIST, REMOTE_WORKTREE_MERGE, REMOTE_WORKTREE_REMOVE, REMOTE_WORKTREE_UPDATED,
+    RemoteHostMetrics,
 };
 use codux_remote_transport::{
     RemoteControllerTransportConfig, RemoteTransport, RemoteTransportCandidate,
@@ -231,6 +231,7 @@ type TerminalOutputForwarder = Box<dyn Fn(Vec<u8>) + Send + Sync>;
 
 #[derive(Default)]
 struct ControllerInner {
+    agent_activity: Mutex<AgentActivityCache>,
     waiters: Mutex<Vec<Waiter>>,
     events: Mutex<VecDeque<(String, Value)>>,
     // Desktop project id <-> host project id for this host's projections.
@@ -241,6 +242,12 @@ struct ControllerInner {
     terminal_streams: Mutex<HashMap<String, RuntimeTerminalStreamForwarder>>,
     // Shared consumer state retains stream coverage across baseline refreshes.
     terminal_output: Mutex<ControllerTerminalOutput>,
+}
+
+#[derive(Default)]
+struct AgentActivityCache {
+    version: u64,
+    snapshot: Option<codux_protocol::AgentActivitySnapshot>,
 }
 
 struct ControllerTerminalOutput {
@@ -363,6 +370,15 @@ fn terminal_stream_event(update: RemoteTerminalEmulatorUpdate) -> RuntimeTermina
 }
 
 impl ControllerInner {
+    fn agent_activity_snapshot(&self) -> Option<codux_protocol::AgentActivitySnapshot> {
+        let snapshot = self.agent_activity.lock().ok()?.snapshot.clone()?;
+        let mut payload = serde_json::to_value(snapshot).ok()?;
+        // Resolve IDs at read time: the catalog baseline can arrive after the
+        // activity baseline, and later catalog reconciliation replaces the map.
+        self.project_ids.to_local(&mut payload);
+        serde_json::from_value(payload).ok()
+    }
+
     fn forward_terminal_stream(&self, session_id: &str, event: RuntimeTerminalStreamEvent) -> bool {
         let Ok(forwarders) = self.terminal_streams.lock() else {
             return false;
@@ -387,6 +403,26 @@ impl ControllerInner {
             .to_string();
         let mut payload = envelope.get("payload").cloned().unwrap_or(Value::Null);
         let request_id = envelope.get("requestId").and_then(Value::as_str);
+        if kind == codux_protocol::REMOTE_RESOURCE_AGENT_ACTIVITY {
+            if let Ok(mut current) = self.agent_activity.lock() {
+                match serde_json::from_value::<codux_protocol::AgentActivitySnapshot>(
+                    payload.clone(),
+                ) {
+                    Ok(next)
+                        if next.version >= current.version
+                            && (next.version > current.version || current.snapshot.is_none()) =>
+                    {
+                        current.version = next.version;
+                        current.snapshot = Some(next);
+                    }
+                    Ok(_) => {}
+                    Err(_) => current.snapshot = None,
+                }
+            }
+            if request_id.is_none() {
+                return;
+            }
+        }
         // Output and viewport authority share one per-session callback and one
         // transport lane, so `output/state/output` cannot reorder at this seam.
         if kind == REMOTE_TERMINAL_OUTPUT {
@@ -1145,6 +1181,21 @@ impl RemoteController {
         )
     }
 
+    pub fn subscribe_agent_activity(&self) -> bool {
+        let envelope = self.envelope_with_request_id(
+            REMOTE_RESOURCE_SUBSCRIBE,
+            json!({ "resource": codux_protocol::REMOTE_RESOURCE_AGENT_ACTIVITY, "baseline": true }),
+            Some("agent-activity-subscribe"),
+        );
+        serde_json::to_vec(&envelope)
+            .ok()
+            .is_some_and(|bytes| self.transport.send(bytes, None))
+    }
+
+    pub fn agent_activity_snapshot(&self) -> Option<codux_protocol::AgentActivitySnapshot> {
+        self.inner.agent_activity_snapshot()
+    }
+
     /// Subscribe to one remote project's authoritative terminal list. The host
     /// answers with an unsolicited `terminal.list` that reconciles the desktop
     /// layout, then pushes the same kind after other clients create or close
@@ -1453,11 +1504,14 @@ impl RemoteController {
     pub fn terminal_buffer_tail(&self, session_id: &str) -> bool {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let request_id = format!("terminal-buffer-{id}");
-        let started = self.inner.terminal_output.lock().ok().is_some_and(
-            |mut terminal_output| {
+        let started = self
+            .inner
+            .terminal_output
+            .lock()
+            .ok()
+            .is_some_and(|mut terminal_output| {
                 terminal_output.start_baseline(session_id, &request_id)
-            },
-        );
+            });
         if !started {
             return false;
         }
@@ -2612,12 +2666,14 @@ mod tests {
         );
 
         assert_eq!(*seen.lock().unwrap(), [b"held".to_vec(), b"later".to_vec()]);
-        assert!(!inner
-            .terminal_output
-            .lock()
-            .unwrap()
-            .router
-            .has_active_buffer_request("session-1"));
+        assert!(
+            !inner
+                .terminal_output
+                .lock()
+                .unwrap()
+                .router
+                .has_active_buffer_request("session-1")
+        );
     }
 
     #[test]
@@ -3268,5 +3324,97 @@ mod tests {
         );
         assert_eq!(controller.drain_pushed_ai_stats().len(), 1);
         assert_eq!(controller.drain_pushed_terminal_status().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod agent_activity_tests {
+    use super::*;
+    use codux_protocol::{
+        AgentActivityRecord, AgentActivitySnapshot, AgentActivityState,
+        REMOTE_RESOURCE_AGENT_ACTIVITY,
+    };
+
+    fn push(inner: &ControllerInner, version: u64, state: AgentActivityState) {
+        let snapshot = AgentActivitySnapshot {
+            version,
+            terminals: vec![AgentActivityRecord {
+                terminal_id: "terminal".into(),
+                terminal_instance_id: Some("instance".into()),
+                project_id: "host-project".into(),
+                worktree_id: Some("host-project".into()),
+                state,
+                tool: Some("codex".into()),
+                recent_output: Some("latest output".into()),
+            }],
+        };
+        inner.route(
+            &serde_json::to_vec(
+                &json!({"type": REMOTE_RESOURCE_AGENT_ACTIVITY, "payload": snapshot}),
+            )
+            .unwrap(),
+        );
+    }
+
+    #[test]
+    fn agent_activity_cache_orders_versions_and_translates_late_catalog_ids() {
+        let inner = ControllerInner::default();
+        push(&inner, 2, AgentActivityState::Working);
+        assert_eq!(
+            inner.agent_activity_snapshot().unwrap().terminals[0].project_id,
+            "host-project"
+        );
+        inner
+            .project_ids
+            .replace(vec![("local-project".into(), "host-project".into())]);
+        let mapped = inner.agent_activity_snapshot().unwrap();
+        assert_eq!(mapped.terminals[0].project_id, "local-project");
+        assert_eq!(
+            mapped.terminals[0].worktree_id.as_deref(),
+            Some("local-project")
+        );
+        push(&inner, 3, AgentActivityState::NeedsInput);
+        push(&inner, 2, AgentActivityState::Idle);
+        assert_eq!(
+            inner.agent_activity_snapshot().unwrap().terminals[0].state,
+            AgentActivityState::NeedsInput
+        );
+        inner.route(
+            &serde_json::to_vec(&json!({
+                "type": REMOTE_RESOURCE_AGENT_ACTIVITY,
+                "payload": {"version": 4, "terminals": []}
+            }))
+            .unwrap(),
+        );
+        assert!(
+            inner
+                .agent_activity_snapshot()
+                .unwrap()
+                .terminals
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn agent_activity_new_connection_and_unavailable_state_are_unknown() {
+        let old_connection = ControllerInner::default();
+        push(&old_connection, 8, AgentActivityState::Working);
+        let new_connection = ControllerInner::default();
+        assert!(new_connection.agent_activity_snapshot().is_none());
+        push(&new_connection, 1, AgentActivityState::NeedsInput);
+        push(&old_connection, 9, AgentActivityState::Idle);
+        assert_eq!(
+            new_connection.agent_activity_snapshot().unwrap().terminals[0].state,
+            AgentActivityState::NeedsInput
+        );
+        new_connection.route(
+            &serde_json::to_vec(&json!({
+                "type": REMOTE_RESOURCE_AGENT_ACTIVITY, "payload": null
+            }))
+            .unwrap(),
+        );
+        assert!(new_connection.agent_activity_snapshot().is_none());
+        push(&new_connection, 0, AgentActivityState::Idle);
+        assert!(new_connection.agent_activity_snapshot().is_none());
     }
 }

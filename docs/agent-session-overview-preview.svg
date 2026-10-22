@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="780" height="620" viewBox="0 0 780 620">
+  <title>Agent 会话总览静态可读性样稿</title>
+  <desc>两个 360 像素宽的浮窗。左侧彩色，右侧灰度。此图不是 GPUI 实机截图。</desc>
+  <defs>
+    <filter id="gray"><feColorMatrix type="saturate" values="0"/></filter>
+    <pattern id="backdrop" width="16" height="16" patternUnits="userSpaceOnUse"><rect width="16" height="16" fill="#bac3d0"/><rect width="8" height="8" fill="#eef0f4"/><rect x="8" y="8" width="8" height="8" fill="#eef0f4"/></pattern>
+    <g id="window" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif">
+      <rect width="360" height="520" rx="8" fill="#131821" fill-opacity=".94" stroke="#2a3040"/>
+      <g fill="#e7eaf0" font-size="13"><text x="12" y="25">Agent 会话总览</text><text x="337" y="25">×</text></g>
+      <text x="12" y="52" fill="#97a1b3" font-size="11">最近终端输出 · 点击定位会话</text>
+      <g stroke="#2d3545"><path d="M0 66H360M0 175H360M0 284H360M0 393H360"/></g>
+      <path d="M2 67V175" stroke="#b45309" stroke-width="4"/>
+      <rect x="12" y="81" width="14" height="14" rx="2" fill="#b45309" stroke="#e7eaf0" stroke-width="2"/>
+      <circle cx="19" cy="197" r="6" fill="#131821" stroke="#97a1b3" stroke-width="2"/>
+      <circle cx="19" cy="306" r="6" fill="none" stroke="#97a1b3" stroke-width="1.5"/>
+      <text x="15" y="310" fill="#97a1b3" font-size="11">?</text>
+      <circle cx="19" cy="415" r="6" fill="#1d4ed8" stroke="#e7eaf0" stroke-width="2"/>
+      <g fill="#e7eaf0" font-size="13" font-weight="bold">
+        <text x="34" y="93">Codux · 本机</text><text x="34" y="202">阅读项目 · Mac Studio</text>
+        <text x="34" y="311">工具项目 · 远端设备</text><text x="34" y="420">文档项目 · 本机</text>
+      </g>
+      <g fill="#e7eaf0" font-size="12" text-anchor="end">
+        <text x="348" y="93">需要输入</text><text x="348" y="202">空闲</text>
+        <text x="348" y="311">状态未知</text><text x="348" y="420">工作中</text>
+      </g>
+      <g fill="#97a1b3" font-size="11">
+        <text x="12" y="114">codex · terminal-1</text><text x="12" y="223">claude · terminal-2</text>
+        <text x="12" y="332">codex · terminal-3</text><text x="12" y="441">Agent · terminal-4</text>
+      </g>
+      <g fill="#e7eaf0" font-size="13">
+        <text x="12" y="139">请选择要保留的配置，然后继续。</text><text x="12" y="158">等待授权</text>
+        <text x="12" y="248">本轮修改已完成，检查通过。</text><text x="12" y="267">是否还需要调整其他内容？</text>
+        <text x="12" y="357">来源不可用，请等待重新连接</text>
+        <text x="12" y="466">正在检查目录和终端布局……</text><text x="12" y="485">运行测试</text>
+      </g>
+    </g>
+  </defs>
+  <rect width="780" height="620" fill="#f1f3f5"/>
+  <g font-family="-apple-system, 'PingFang SC', sans-serif" fill="#202631" font-size="14">
+    <text x="20" y="28">彩色（原尺寸 360 px）</text><text x="400" y="28">灰度（同一布局）</text>
+    <text x="20" y="594" font-size="12">静态可读性样稿，不是实机截图。半透明背景，文字与标识不透明，无动画。</text>
+    <text x="20" y="612" font-size="12">空闲中的自然语言提问不自动变色；通过最近输出帮助用户判断。彩墨屏效果仍需实机验收。</text>
+  </g>
+  <rect x="20" y="48" width="360" height="520" fill="url(#backdrop)"/>
+  <rect x="400" y="48" width="360" height="520" fill="url(#backdrop)"/>
+  <use href="#window" x="20" y="48"/>
+  <use href="#window" x="400" y="48" filter="url(#gray)"/>
+</svg>

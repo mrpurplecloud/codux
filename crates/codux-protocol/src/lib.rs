@@ -3,6 +3,9 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
+mod agent_activity;
+pub use agent_activity::{AgentActivityRecord, AgentActivitySnapshot, AgentActivityState};
+
 pub const REMOTE_PROTOCOL_VERSION: &str = "v3.2";
 pub const REMOTE_TERMINAL_BUFFER_MAX_CHARS: usize = 200_000;
 pub const REMOTE_TERMINAL_BUFFER_CHUNK_CHARS: usize = 16_384;
@@ -21,6 +24,7 @@ pub const REMOTE_RESOURCE_TERMINALS: &str = "terminals";
 pub const REMOTE_RESOURCE_WORKTREES: &str = "worktrees";
 pub const REMOTE_RESOURCE_GIT_STATUS: &str = "git.status";
 pub const REMOTE_RESOURCE_AI_STATS: &str = "ai.stats";
+pub const REMOTE_RESOURCE_AGENT_ACTIVITY: &str = "agent.activity";
 pub const REMOTE_RESOURCE_FILES: &str = "files";
 
 /// `host.info.app` of the headless agent. The shared project catalog is the
@@ -1136,6 +1140,7 @@ pub fn host_capabilities() -> Value {
             "file": true,
             "git": true,
             "aiStats": true,
+            "agentActivity": true,
             "hostMetrics": true,
         },
         "terminalBuffer": {

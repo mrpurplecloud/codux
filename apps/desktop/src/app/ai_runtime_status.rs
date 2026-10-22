@@ -1,15 +1,7 @@
 use super::*;
 use codux_runtime::ai_runtime_state::{AIRuntimeProjectPhaseSummary, AIRuntimeProjectStateSummary};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(in crate::app) enum AgentLifecycleState {
-    Idle,
-    Working,
-    Waiting,
-    Completed,
-    Error,
-    Warning,
-}
+pub(in crate::app) use codux_runtime::ai_runtime::AgentActivityState as AgentLifecycleState;
 
 pub(in crate::app) fn selected_worktree_info(state: &RuntimeState) -> Option<WorktreeInfo> {
     let selected_id = state.worktrees.selected_worktree_id.as_deref()?;

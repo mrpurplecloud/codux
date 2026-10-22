@@ -130,6 +130,13 @@ impl AIRuntimeRegistry {
             })
             .collect()
     }
+
+    pub fn bindings_snapshot(&self) -> Result<Vec<AIRuntimeTerminalBinding>, String> {
+        self.terminals
+            .lock()
+            .map(|terminals| terminals.values().cloned().collect())
+            .map_err(|_| "Agent terminal registry lock poisoned.".to_string())
+    }
 }
 
 #[cfg(test)]

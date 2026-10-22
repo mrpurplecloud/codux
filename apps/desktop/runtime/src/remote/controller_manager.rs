@@ -528,7 +528,7 @@ impl ManagerShared {
     /// leaves the device without a connection, so the caller must keep
     /// reconnecting rather than treat the dial as done.
     fn publish_connection(
-        &self,
+        self: &Arc<Self>,
         device_id: &str,
         epoch: u64,
         controller: Arc<RemoteController>,
@@ -592,6 +592,11 @@ impl ManagerShared {
             Some(replaced) => {
                 if let Some(replaced) = replaced {
                     Self::shutdown_controller(replaced.controller);
+                }
+                if !controller.subscribe_agent_activity() {
+                    self.handle_disconnect(device_id, epoch);
+                    Self::shutdown_controller(controller);
+                    return false;
                 }
                 true
             }
@@ -1172,6 +1177,28 @@ impl RemoteControllerManager {
             .collect()
     }
 
+    /// Read only currently published connection objects. A replacement starts
+    /// with no baseline; callbacks owned by an old connection cannot fill it.
+    pub fn agent_activity_snapshots(
+        &self,
+    ) -> HashMap<String, Option<codux_protocol::AgentActivitySnapshot>> {
+        self.shared
+            .controllers
+            .lock()
+            .map(|lifecycle| {
+                lifecycle
+                    .slots
+                    .iter()
+                    .filter_map(|(device_id, slot)| {
+                        slot.live.as_ref().map(|live| {
+                            (device_id.clone(), live.controller.agent_activity_snapshot())
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn drain_hosted_workspace_updates(&self) -> Vec<(String, String, serde_json::Value)> {
         let controllers: Vec<(String, Arc<RemoteController>)> = self
             .shared
@@ -1726,6 +1753,13 @@ mod tests {
 
     fn test_controller(device_id: &str) -> Arc<RemoteController> {
         let hub = codux_remote_transport::LocalMemoryTransportHub::new();
+        // Published connections now send a baseline subscription to the host.
+        let _host = hub.connect(
+            "host",
+            codux_protocol::RemoteTransportKind::Iroh,
+            Arc::new(|_, _| {}),
+            Arc::new(|_, _| {}),
+        );
         Arc::new(RemoteController::with_test_transport(
             device_id,
             move |route| {
@@ -1798,6 +1832,26 @@ mod tests {
         async fn shutdown(&self) {
             self.stopped.store(true, Ordering::SeqCst);
         }
+    }
+
+    #[test]
+    fn agent_activity_failed_subscription_does_not_leave_connection_published() {
+        let manager = manager("codux-controller-activity-send-failed");
+        save_test_host(&manager, "dev-1");
+        let epoch = manager.shared.next_connection_epoch("dev-1");
+        let stopped = Arc::new(AtomicBool::new(false));
+        let controller = RemoteController::with_test_transport("dev-1", {
+            let stopped = Arc::clone(&stopped);
+            move |_| Arc::new(ShutdownRecordingTransport { stopped })
+        });
+        assert!(
+            !manager
+                .shared
+                .publish_connection("dev-1", epoch, Arc::new(controller))
+        );
+        assert!(manager.connected_controllers().is_empty());
+        assert!(manager.agent_activity_snapshots().is_empty());
+        manager.forget("dev-1").unwrap();
     }
 
     #[test]

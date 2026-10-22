@@ -1,4 +1,31 @@
 use super::*;
+use crate::app::app_state::ProjectSessionLoad;
+
+impl ProjectSessionLoad {
+    fn new(generation: u64) -> Self {
+        Self {
+            generation,
+            result: None,
+        }
+    }
+
+    fn published(&mut self, generation: u64, result: Result<(), String>) {
+        if self.generation == generation {
+            self.result = Some(result);
+        }
+    }
+
+    pub(in crate::app) fn readiness(&self, generation: u64) -> Result<bool, &str> {
+        if self.generation != generation {
+            return Ok(true);
+        }
+        match &self.result {
+            None => Ok(false),
+            Some(Ok(())) => Ok(true),
+            Some(Err(error)) => Err(error),
+        }
+    }
+}
 
 impl CoduxApp {
     pub(in crate::app) fn spawn_project_switch_load(
@@ -19,7 +46,6 @@ impl CoduxApp {
         let projects = self.state.projects.clone();
         let runtime_service = self.runtime_service.clone();
         let terminal_layout_service = runtime_service.clone();
-        let terminal_project = project.clone();
         let task_runtime_service = runtime_service.clone();
         let task_project = project.clone();
         let primary_runtime_service = runtime_service.clone();
@@ -43,82 +69,21 @@ impl CoduxApp {
             ),
         );
 
-        let terminal_queued_at = Instant::now();
-        cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
-            let terminal = codux_runtime::async_runtime::run_limited_blocking_with_priority(
-                codux_runtime::async_runtime::BLOCKING_PRIORITY_FOREGROUND + generation,
-                move || {
-                    let worker_started_at = Instant::now();
-                    codux_runtime::runtime_trace::runtime_trace(
-                        "project-switch",
-                        &format!(
-                            "terminal_load worker_start project={} generation={} queue_wait_ms={}",
-                            terminal_project.id,
-                            generation,
-                            terminal_queued_at.elapsed().as_millis()
-                        ),
-                    );
-                    let worktrees = terminal_layout_service.reload_worktrees_from_state(
-                        Some(&terminal_project.id),
-                        Some(&terminal_project.path),
-                    );
-                    let terminal_owner_id = worktrees
-                        .selected_worktree_id
-                        .as_deref()
-                        .unwrap_or(terminal_project.id.as_str())
-                        .to_string();
-                    let terminal_storage_key =
-                        super::ai_runtime_status::terminal_layout_storage_key(
-                            &terminal_project.id,
-                            &terminal_owner_id,
-                        );
-                    let scope_key = WorktreeScopeKey {
-                        project_id: terminal_project.id.clone(),
-                        worktree_id: terminal_owner_id.clone(),
-                    };
-                    let terminal_layout =
-                        terminal_layout_service.reload_terminal_layout(Some(&terminal_storage_key));
-                    let terminal_runtime = TerminalRuntimeSummary::default();
-                    codux_runtime::runtime_trace::runtime_trace(
-                        "project-switch",
-                        &format!(
-                            "terminal_load worker_done project={} generation={} elapsed_ms={}",
-                            terminal_project.id,
-                            generation,
-                            worker_started_at.elapsed().as_millis()
-                        ),
-                    );
-                    ProjectSwitchTerminalLoad {
-                        project_id: terminal_project.id,
-                        generation,
-                        scope_key,
-                        terminal_layout,
-                        terminal_runtime,
-                    }
-                },
-            )
-            .await
-            .ok();
-            let _ = this.update_in(cx, |app, window, cx| {
-                if let Some(terminal) = terminal {
-                    app.apply_project_switch_terminal_load(terminal, window, cx);
-                }
-            });
-        })
-        .detach();
-
+        // Directory and layout must describe the same load. Publish both in
+        // one callback, then allow the current session navigation to continue.
+        self.project_session_load = Some(ProjectSessionLoad::new(generation));
         let task_project_id = task_project.id.clone();
         let task_project_path = task_project.path.clone();
         let task_queued_at = Instant::now();
         cx.spawn(async move |this: gpui::WeakEntity<Self>, cx| {
-            let task_load = codux_runtime::async_runtime::run_limited_blocking_with_priority(
+            let session_load = codux_runtime::async_runtime::run_limited_blocking_with_priority(
                 codux_runtime::async_runtime::BLOCKING_PRIORITY_FOREGROUND + generation,
                 move || {
                     let worker_started_at = Instant::now();
                     codux_runtime::runtime_trace::runtime_trace(
                         "project-switch",
                         &format!(
-                            "task_load worker_start project={} generation={} queue_wait_ms={}",
+                            "session_load worker_start project={} generation={} queue_wait_ms={}",
                             task_project_id,
                             generation,
                             task_queued_at.elapsed().as_millis()
@@ -128,27 +93,73 @@ impl CoduxApp {
                         Some(&task_project_id),
                         Some(&task_project_path),
                     );
+                    let terminal_owner_id = worktrees
+                        .selected_worktree_id
+                        .clone()
+                        .unwrap_or_else(|| task_project_id.clone());
+                    let terminal_storage_key =
+                        super::ai_runtime_status::terminal_layout_storage_key(
+                            &task_project_id,
+                            &terminal_owner_id,
+                        );
+                    let terminal_layout =
+                        terminal_layout_service.reload_terminal_layout(Some(&terminal_storage_key));
+                    let terminal = ProjectSwitchTerminalLoad {
+                        project_id: task_project_id.clone(),
+                        generation,
+                        scope_key: WorktreeScopeKey {
+                            project_id: task_project_id.clone(),
+                            worktree_id: terminal_owner_id,
+                        },
+                        terminal_layout,
+                        terminal_runtime: TerminalRuntimeSummary::default(),
+                    };
                     codux_runtime::runtime_trace::runtime_trace(
                         "project-switch",
                         &format!(
-                            "task_load worker_done project={} generation={} elapsed_ms={}",
+                            "session_load worker_done project={} generation={} elapsed_ms={}",
                             task_project_id,
                             generation,
                             worker_started_at.elapsed().as_millis()
                         ),
                     );
-                    ProjectSwitchTaskLoad {
-                        project_id: task_project_id,
-                        generation,
-                        worktrees,
-                    }
+                    (
+                        ProjectSwitchTaskLoad {
+                            project_id: task_project_id,
+                            generation,
+                            worktrees,
+                        },
+                        terminal,
+                    )
                 },
             )
             .await
-            .ok();
-            let _ = this.update(cx, |app, cx| {
-                if let Some(task_load) = task_load {
-                    app.apply_project_switch_task_load(task_load, cx);
+            .map_err(|error| error.to_string());
+            let _ = this.update_in(cx, |app, window, cx| {
+                if app.project_switch_generation != generation {
+                    return;
+                }
+                let result = match session_load {
+                    Ok((catalog, terminal)) => {
+                        let error = catalog
+                            .worktrees
+                            .error
+                            .clone()
+                            .or_else(|| terminal.terminal_layout.error.clone());
+                        app.apply_project_switch_task_load(catalog, cx);
+                        match error {
+                            Some(error) => Err(error),
+                            None => {
+                                app.apply_project_switch_terminal_load(terminal, window, cx);
+                                Ok(())
+                            }
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                // Publication, not worker completion, releases navigation.
+                if let Some(load) = &mut app.project_session_load {
+                    load.published(generation, result);
                 }
             });
         })
@@ -310,10 +321,13 @@ impl CoduxApp {
                 ),
             );
         } else {
-            if self
-                .terminal_restored_generation
-                .as_ref()
-                .is_some_and(|token| token == &(load.generation, load.scope_key.clone()))
+            let navigation_needs_layout =
+                self.session_navigation_needs_layout(&load.scope_key, &load.terminal_layout);
+            if !navigation_needs_layout
+                && self
+                    .terminal_restored_generation
+                    .as_ref()
+                    .is_some_and(|token| token == &(load.generation, load.scope_key.clone()))
             {
                 self.runtime_trace(
                     "project-switch",
@@ -323,6 +337,9 @@ impl CoduxApp {
                     ),
                 );
                 return;
+            }
+            if navigation_needs_layout {
+                self.terminal_layout_cache.remove(&load.scope_key);
             }
             self.schedule_terminal_layout_restore(
                 load.terminal_layout,
@@ -453,5 +470,57 @@ impl CoduxApp {
         {
             self.state.worktrees = worktrees;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_overview_waits_for_project_publication_not_cached_layout() {
+        let mut load = ProjectSessionLoad::new(1);
+        // The cached skeleton may already be mounted. Only the owner's single
+        // callback publishing both fresh results can release navigation.
+        assert_eq!(load.readiness(1), Ok(false));
+        load.published(1, Ok(()));
+        assert_eq!(load.readiness(1), Ok(true));
+    }
+
+    #[test]
+    fn session_overview_project_a_b_a_ignores_superseded_completions() {
+        let mut load = ProjectSessionLoad::new(1);
+        assert_eq!(load.readiness(1), Ok(false));
+        load = ProjectSessionLoad::new(2);
+        load.published(1, Ok(()));
+        assert_eq!(load.readiness(2), Ok(false));
+        load = ProjectSessionLoad::new(3);
+        load.published(1, Err("old A failed".into()));
+        load.published(2, Ok(()));
+        assert_eq!(load.readiness(3), Ok(false));
+        load.published(3, Ok(()));
+        load.published(2, Err("old B failed".into()));
+        assert_eq!(load.readiness(3), Ok(true));
+    }
+
+    #[test]
+    fn session_overview_project_load_failure_remains_visible_until_new_load() {
+        let mut load = ProjectSessionLoad::new(4);
+        load.published(4, Err("remote directory unavailable".into()));
+        assert_eq!(load.readiness(4), Err("remote directory unavailable"));
+        load.published(3, Ok(()));
+        assert_eq!(load.readiness(4), Err("remote directory unavailable"));
+        load = ProjectSessionLoad::new(5);
+        assert_eq!(load.readiness(5), Ok(false));
+        load.published(5, Err("terminal layout unavailable".into()));
+        assert_eq!(load.readiness(5), Err("terminal layout unavailable"));
+    }
+
+    #[test]
+    fn session_overview_superseded_project_load_does_not_block_worktree_load() {
+        let load = ProjectSessionLoad::new(1);
+        // A worktree selection owns its newer generation and uses the existing
+        // terminal-layout loading/attach checks, not the old project worker.
+        assert_eq!(load.readiness(2), Ok(true));
     }
 }

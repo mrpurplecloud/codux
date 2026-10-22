@@ -57,6 +57,7 @@ impl RemoteHostRuntime {
         }
         self.resource_subscriptions.subscribe_change(&change);
         match change.resource.as_str() {
+            REMOTE_RESOURCE_AGENT_ACTIVITY => self.reply_agent_activity(envelope),
             REMOTE_RESOURCE_PROJECTS => self.reply_project_list(envelope),
             REMOTE_RESOURCE_TERMINALS => {
                 if change.project_id.is_some() {
@@ -89,7 +90,7 @@ impl RemoteHostRuntime {
         let project_id = change.project_id.as_deref();
         let session_id = change.session_id.as_deref();
         match change.resource.as_str() {
-            REMOTE_RESOURCE_PROJECTS => {
+            REMOTE_RESOURCE_PROJECTS | REMOTE_RESOURCE_AGENT_ACTIVITY => {
                 if project_id.is_some() || session_id.is_some() {
                     return Err("Projects subscriptions must use global scope.".to_string());
                 }

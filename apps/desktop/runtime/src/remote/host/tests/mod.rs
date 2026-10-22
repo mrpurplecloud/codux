@@ -161,6 +161,7 @@ pub(super) fn write_two_project_state(support_dir: &Path) -> (PathBuf, PathBuf) 
     (project_a, project_b)
 }
 
+mod agent_activity;
 mod ai_stats;
 mod memory;
 mod projects;

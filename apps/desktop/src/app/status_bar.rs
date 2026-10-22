@@ -250,7 +250,28 @@ fn status_bar_content(
                         snapshot.memory_label.clone(),
                     ))
                     .child(status_separator())
-                }),
+                })
+                .child(
+                    div()
+                        .id("session-overview-toggle")
+                        .px_2()
+                        .cursor_pointer()
+                        .text_color(color(theme::TEXT))
+                        .child(
+                            if locale_from_language_setting(&snapshot.language).starts_with("zh") {
+                                "会话总览"
+                            } else {
+                                "Sessions"
+                            },
+                        )
+                        .on_click({
+                            let app_entity = app_entity.clone();
+                            move |_, window, cx| {
+                                app_entity
+                                    .update(cx, |app, cx| app.toggle_session_overview(window, cx));
+                            }
+                        }),
+                ),
         )
         .child(
             div()

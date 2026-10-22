@@ -200,6 +200,8 @@ impl CoduxApp {
             toast_revision: 0,
             pending_restart_language: None,
             desktop_pet_window: None,
+            session_overview_window: None,
+            session_navigation: None,
             settings_window: None,
             about_window: None,
             update_dialog_window: None,
@@ -351,7 +353,7 @@ impl CoduxApp {
             pending_runtime_refresh: None,
             ai_runtime_state_save_tick: 0,
             pane_agent_lifecycle: HashMap::new(),
-            agent_pulse_active: false,
+            agent_activity_known_sources: HashSet::new(),
             agent_git_refresh_after: None,
             ai_index_progress_visible_until: 0.0,
             ai_index_progress_generation: 0,
@@ -360,6 +362,7 @@ impl CoduxApp {
             ai_global_history_refreshing: false,
             ai_global_history_refresh_pending: false,
             project_switch_generation: 0,
+            project_session_load: None,
             terminal_restore_epoch: 0,
             terminal_restored_generation: None,
             scheduled_work_in_flight: HashSet::new(),
@@ -691,6 +694,7 @@ impl CoduxApp {
         }
         self.is_exiting = true;
         self.close_desktop_pet_window(cx);
+        self.close_session_overview(cx);
         self.close_auxiliary_windows(cx);
         self.shutdown_runtime_state();
     }

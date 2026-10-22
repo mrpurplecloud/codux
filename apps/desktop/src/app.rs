@@ -129,6 +129,7 @@ mod runtime_actions;
 mod scroll_compat;
 mod settings;
 mod settings_actions;
+mod session_overview;
 mod shell_utils;
 mod shortcuts;
 mod sidebars;

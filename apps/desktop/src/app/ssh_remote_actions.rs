@@ -1338,11 +1338,7 @@ impl CoduxApp {
         let drained = self
             .runtime_service
             .drain_ai_runtime_events_and_enqueue_memory();
-        let terminal_status_changed =
-            self.drain_and_apply_terminal_lifecycle_events(&drained.events);
-        if terminal_status_changed {
-            self.ensure_agent_pulse(cx);
-        }
+        let (terminal_status_changed, agent_turn_finished) = self.sync_agent_activity();
         self.dispatch_ai_completion_notifications(&drained.events);
         self.refresh_dock_badge_for_ai_runtime_events(&drained.events, cx);
         self.ai_runtime_state_save_tick = self.ai_runtime_state_save_tick.wrapping_add(1);
@@ -1376,7 +1372,7 @@ impl CoduxApp {
                 self.pet_snapshot = snapshot;
             }
         }
-        self.maybe_refresh_git_for_agent_activity(terminal_status_changed, cx);
+        self.maybe_refresh_git_for_agent_activity(agent_turn_finished, cx);
         let remote_ai_stats_changed = self.apply_pushed_remote_ai_stats();
         let memory_event = current_memory_update_event();
         let memory_update_event = memory_event.revision > self.memory_seen_revision;
@@ -1520,14 +1516,10 @@ impl CoduxApp {
 
     fn maybe_refresh_git_for_agent_activity(
         &mut self,
-        pane_lifecycle_changed: bool,
+        agent_turn_finished: bool,
         cx: &mut Context<Self>,
     ) {
-        let completed_now = pane_lifecycle_changed
-            && self
-                .pane_agent_lifecycle
-                .values()
-                .any(|lifecycle| lifecycle.state == AgentLifecycleState::Completed);
+        let completed_now = agent_turn_finished;
         let working_now = self
             .pane_agent_lifecycle
             .values()
@@ -1552,12 +1544,8 @@ impl CoduxApp {
         let drained = self
             .runtime_service
             .drain_ai_runtime_events_and_enqueue_memory();
-        let terminal_status_changed =
-            self.drain_and_apply_terminal_lifecycle_events(&drained.events);
-        if terminal_status_changed {
-            self.ensure_agent_pulse(cx);
-        }
-        self.maybe_refresh_git_for_agent_activity(terminal_status_changed, cx);
+        let (terminal_status_changed, agent_turn_finished) = self.sync_agent_activity();
+        self.maybe_refresh_git_for_agent_activity(agent_turn_finished, cx);
         let memory_event = current_memory_update_event();
         let memory_update_event = memory_event.revision > self.memory_seen_revision;
         if memory_update_event {

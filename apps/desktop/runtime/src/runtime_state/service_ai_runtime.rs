@@ -17,6 +17,10 @@ impl RuntimeService {
         self.ai_runtime.runtime_state_snapshot()
     }
 
+    pub fn agent_activity_snapshot(&self) -> Result<codux_protocol::AgentActivitySnapshot, String> {
+        self.ai_runtime.agent_activity_snapshot()
+    }
+
     pub fn summarize_ai_runtime_state_snapshot(
         &self,
         snapshot: &AIRuntimeStateSnapshot,
@@ -46,6 +50,7 @@ impl RuntimeService {
     }
 
     pub fn drain_ai_runtime_events_and_enqueue_memory(&self) -> AIRuntimeDrainResult {
+        self.remote_host.broadcast_agent_activity();
         let events = self.ai_runtime.drain_supervisor_events();
         // Mirror terminal status to connected controllers so a viewer of this
         // host renders the same loading/waiting/completed dots.

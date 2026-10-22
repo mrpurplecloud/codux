@@ -139,6 +139,7 @@ impl CoduxApp {
                             app.apply_ai_runtime_activity_tick(cx)
                         };
                         if include_slow_tick {
+                            app.publish_session_overview(cx);
                             app.enqueue_automatic_memory_extraction_async(cx);
                             app.refresh_remote_link_states(cx);
                             app.reconcile_hosted_terminal_bindings(cx);
@@ -165,6 +166,7 @@ impl CoduxApp {
                         if result.changed {
                             app.invalidate_for_runtime_activity(&result, cx);
                         }
+                        app.schedule_session_navigation(cx);
                     })
                     .is_err()
                 {

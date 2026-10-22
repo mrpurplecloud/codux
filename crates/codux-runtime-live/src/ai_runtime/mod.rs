@@ -27,6 +27,7 @@ pub use bridge::{
     AIRuntimeBridge, AIRuntimeBridgeSnapshot, AIRuntimeHookConfigStatus,
     AIRuntimeToolHookConfigStatus,
 };
+pub use codux_protocol::{AgentActivityRecord, AgentActivitySnapshot, AgentActivityState};
 pub use constants::{
     CODEX_INTERVAL_POLL_MINIMUM_SECONDS, CODEX_LIVE_TRANSCRIPT_TAIL_BYTES,
     CODEX_LIVE_TRANSCRIPT_TAIL_LINES, POLL_INTERVAL_SECONDS, RUNNING_STALE_SECONDS,

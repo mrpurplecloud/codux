@@ -127,6 +127,9 @@ pub struct CoduxApp {
     pub(in crate::app) toast_revision: u64,
     pub(in crate::app) pending_restart_language: Option<String>,
     pub(in crate::app) desktop_pet_window: Option<AnyWindowHandle>,
+    pub(in crate::app) session_overview_window:
+        Option<gpui::WindowHandle<super::session_overview::SessionOverview>>,
+    pub(in crate::app) session_navigation: Option<super::session_overview::SessionNavigation>,
     pub(in crate::app) settings_window: Option<AnyWindowHandle>,
     pub(in crate::app) about_window: Option<AnyWindowHandle>,
     pub(in crate::app) update_dialog_window: Option<AnyWindowHandle>,
@@ -289,9 +292,8 @@ pub struct CoduxApp {
     pub(in crate::app) runtime_queue_busy: bool,
     pub(in crate::app) pending_runtime_refresh: Option<RuntimeScheduledRefresh>,
     pub(in crate::app) ai_runtime_state_save_tick: u64,
-    pub(in crate::app) pane_agent_lifecycle:
-        HashMap<String, super::agent_lifecycle::PaneAgentLifecycle>,
-    pub(in crate::app) agent_pulse_active: bool,
+    pub(in crate::app) pane_agent_lifecycle: super::agent_lifecycle::AgentLifecycleMap,
+    pub(in crate::app) agent_activity_known_sources: HashSet<Option<String>>,
     pub(in crate::app) agent_git_refresh_after: Option<std::time::Instant>,
     pub(in crate::app) ai_index_progress_visible_until: f64,
     pub(in crate::app) ai_index_progress_generation: u64,
@@ -300,6 +302,7 @@ pub struct CoduxApp {
     pub(in crate::app) ai_global_history_refreshing: bool,
     pub(in crate::app) ai_global_history_refresh_pending: bool,
     pub(in crate::app) project_switch_generation: u64,
+    pub(in crate::app) project_session_load: Option<ProjectSessionLoad>,
     pub(in crate::app) terminal_restore_epoch: u64,
     pub(in crate::app) terminal_restored_generation: Option<(u64, WorktreeScopeKey)>,
     pub(in crate::app) scheduled_work_in_flight: HashSet<String>,
@@ -583,6 +586,13 @@ pub(in crate::app) struct ProjectSwitchTaskLoad {
     pub(in crate::app) project_id: String,
     pub(in crate::app) generation: u64,
     pub(in crate::app) worktrees: WorktreeSummary,
+}
+
+/// Coordination only: the project loader releases navigation after publishing
+/// both its directory and layout, or preserves the failure for the caller.
+pub(in crate::app) struct ProjectSessionLoad {
+    pub(in crate::app) generation: u64,
+    pub(in crate::app) result: Option<Result<(), String>>,
 }
 
 pub(in crate::app) struct ProjectSwitchTerminalLoad {

@@ -328,7 +328,8 @@ impl CoduxApp {
         self.terminal_pane_registry.remove(terminal_id);
         self.terminal_osc_titles.remove(terminal_id);
         self.terminal_search_open.remove(terminal_id);
-        self.clear_pane_agent_lifecycle(terminal_id)
+        // A detached view does not end its Agent session, particularly remotely.
+        false
     }
 
     pub(in crate::app) fn register_terminal_pane(

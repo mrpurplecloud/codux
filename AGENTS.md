@@ -24,6 +24,15 @@ These rules supplement global agent instructions for this repository.
 - Apply the product versioning rules before building. Delivery scripts read
   source versions; they do not increment versions on every rebuild.
 
+## Agent Session Activity
+
+- Before changing Agent process activity, remote activity snapshots, project
+  badges, or the session overview, read [CONTEXT.md](CONTEXT.md) and
+  [the developer handoff](docs/agent-session-overview-development.md).
+- The shared runtime owns activity facts. Desktop UI mirrors and summarizes
+  snapshots; recent terminal text does not prove user input is required or work
+  is complete.
+
 ## State-Machine Convergence
 
 Apply this section only when reproduced evidence or an accepted contract shows

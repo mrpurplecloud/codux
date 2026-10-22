@@ -334,6 +334,54 @@ fn make_handler(
         let request_id = envelope.get("requestId").and_then(Value::as_str);
         let payload = envelope.get("payload").cloned().unwrap_or(Value::Null);
 
+        if matches!(
+            kind,
+            codux_protocol::REMOTE_RESOURCE_SUBSCRIBE | codux_protocol::REMOTE_RESOURCE_UNSUBSCRIBE
+        ) && payload.get("resource").and_then(Value::as_str)
+            == Some(codux_protocol::REMOTE_RESOURCE_AGENT_ACTIVITY)
+        {
+            let Some(device) = device_id.filter(|id| !id.trim().is_empty()) else {
+                return;
+            };
+            let resource = codux_protocol::REMOTE_RESOURCE_AGENT_ACTIVITY;
+            let (reply_kind, reply_payload) =
+                if payload.get("projectId").is_some() || payload.get("sessionId").is_some() {
+                    (
+                        REMOTE_ERROR,
+                        json!({"message": "Agent activity subscriptions must use global scope."}),
+                    )
+                } else if kind == codux_protocol::REMOTE_RESOURCE_UNSUBSCRIBE {
+                    ai_current_sessions
+                        .activity_subscriptions
+                        .unsubscribe(resource, None, None, device);
+                    return;
+                } else {
+                    ai_current_sessions
+                        .activity_subscriptions
+                        .subscribe(resource, None, None, device);
+                    (
+                        resource,
+                        ai_current_sessions
+                            .ai_runtime
+                            .agent_activity_snapshot()
+                            .map(|snapshot| json!(snapshot))
+                            .unwrap_or(Value::Null),
+                    )
+                };
+            let mut reply =
+                json!({"type": reply_kind, "payload": reply_payload, "deviceId": device});
+            if let Some(id) = request_id {
+                reply["requestId"] = json!(id);
+            }
+            if let Ok(bytes) = serde_json::to_vec(&reply)
+                && let Ok(guard) = slot.lock()
+                && let Some(transport) = guard.as_ref()
+            {
+                transport.send(bytes, Some(device));
+            }
+            return;
+        }
+
         // The shared project catalog owns project CRUD and the `projects`
         // resource subscription: one committed mutation answers its source and
         // pushes the same authoritative snapshot to every subscriber, so it
@@ -554,6 +602,9 @@ fn make_handler(
                     device_id.or_else(|| (!source.is_empty()).then_some(source))
                 {
                     remove_device_state(device_id, &fanout, &ai_stats_watchers, &projects);
+                    ai_current_sessions
+                        .activity_subscriptions
+                        .remove_device(device_id);
                 }
                 None
             }
@@ -1072,6 +1123,7 @@ async fn connect_serving_host(
     }
     let ai_current_sessions = Arc::new(AgentAICurrentSessionProvider {
         ai_runtime: Arc::clone(&ai_runtime),
+        activity_subscriptions: Default::default(),
     });
     let ai_stats_watchers: AIStatsWatchers = Arc::new(Mutex::new(HashMap::new()));
     // One catalog per host process: its mutation lock only serializes writers
@@ -1118,9 +1170,11 @@ async fn connect_serving_host(
                 let fanout = fanout.clone();
                 let ai_stats_watchers = Arc::clone(&ai_stats_watchers);
                 let projects = Arc::clone(&projects);
+                let activity = Arc::clone(&ai_current_sessions);
                 Arc::new(move |device_id, state| {
                     if matches!(state.as_str(), "closed" | "failed" | "disconnected") {
                         remove_device_state(&device_id, &fanout, &ai_stats_watchers, &projects);
+                        activity.activity_subscriptions.remove_device(&device_id);
                     }
                 })
             },
@@ -1163,10 +1217,10 @@ async fn connect_serving_host(
     spawn_ai_stats_poller(
         Arc::clone(&slot),
         indexer,
-        ai_current_sessions,
+        Arc::clone(&ai_current_sessions),
         ai_stats_watchers,
     );
-    spawn_terminal_status_poller(Arc::clone(&slot), ai_runtime);
+    spawn_terminal_status_poller(Arc::clone(&slot), ai_current_sessions);
     Ok((
         host,
         slot,
@@ -1267,13 +1321,13 @@ fn spawn_ai_stats_poller(
 /// Forward live terminal status events (loading/waiting/completed dots) to
 /// connected controllers; this is also the headless host's only supervisor
 /// drain, so the event queue stays empty instead of riding its cap.
-fn spawn_terminal_status_poller(slot: TransportSlot, ai_runtime: Arc<AIRuntimeBridge>) {
+fn spawn_terminal_status_poller(slot: TransportSlot, activity: Arc<AgentAICurrentSessionProvider>) {
     tokio::spawn(async move {
         use codux_runtime_live::ai_runtime::AIRuntimeSupervisorEvent;
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(1000));
         loop {
             ticker.tick().await;
-            for event in ai_runtime.drain_supervisor_events() {
+            for event in activity.ai_runtime.drain_supervisor_events() {
                 let AIRuntimeSupervisorEvent::TerminalStatus { status } = event else {
                     continue;
                 };
@@ -1290,17 +1344,42 @@ fn spawn_terminal_status_poller(slot: TransportSlot, ai_runtime: Arc<AIRuntimeBr
                     transport.send(bytes, None);
                 }
             }
+            let resource = codux_protocol::REMOTE_RESOURCE_AGENT_ACTIVITY;
+            let devices = activity
+                .activity_subscriptions
+                .devices_for_exact(resource, None, None);
+            if !devices.is_empty() {
+                let payload = activity
+                    .ai_runtime
+                    .agent_activity_snapshot()
+                    .map(|snapshot| json!(snapshot))
+                    .unwrap_or(Value::Null);
+                for device in devices {
+                    let envelope =
+                        json!({"type": resource, "payload": payload, "deviceId": device});
+                    if let Ok(bytes) = serde_json::to_vec(&envelope)
+                        && let Ok(guard) = slot.lock()
+                        && let Some(transport) = guard.as_ref()
+                    {
+                        transport.send(bytes, Some(&device));
+                    }
+                }
+            }
         }
     });
 }
 
 struct AgentAICurrentSessionProvider {
     ai_runtime: Arc<AIRuntimeBridge>,
+    activity_subscriptions: codux_runtime_core::subscription::RuntimeSubscriptionRouter,
 }
 
 impl codux_runtime_core::ai_stats::RemoteAICurrentSessionProvider
     for AgentAICurrentSessionProvider
 {
+    fn agent_activity(&self) -> Result<codux_protocol::AgentActivitySnapshot, String> {
+        self.ai_runtime.agent_activity_snapshot()
+    }
     fn current_sessions(&self, project_id: &str) -> Vec<codux_protocol::RemoteAICurrentSession> {
         let snapshot = self.ai_runtime.runtime_state_snapshot();
         let summary = AIRuntimeStateService::new(&crate::projects::agent_data_dir())
@@ -2296,5 +2375,47 @@ mod tests {
             .expect("a relay-less host must still produce a usable pairing payload");
         assert!(payload["transports"][0].get("relayUrl").is_none());
         assert_eq!(payload["transports"][0]["ticket"], "endpoint-ticket-bytes");
+    }
+}
+
+#[cfg(test)]
+mod agent_activity_tests {
+    use super::*;
+    use codux_runtime_core::ai_stats::RemoteAICurrentSessionProvider;
+
+    #[test]
+    fn agent_activity_headless_provider_uses_full_shared_snapshot() {
+        let base = std::env::temp_dir().join(format!("agent-activity-{}", uuid::Uuid::new_v4()));
+        let bridge = Arc::new(AIRuntimeBridge::with_runtime_paths(
+            base.join("root"),
+            base.join("temp"),
+            base.join("home"),
+        ));
+        let provider = AgentAICurrentSessionProvider {
+            ai_runtime: Arc::clone(&bridge),
+            activity_subscriptions: Default::default(),
+        };
+        assert!(provider.agent_activity().unwrap().terminals.is_empty());
+        bridge.registry().upsert(
+            codux_runtime_live::ai_runtime::registry::AIRuntimeTerminalBinding {
+                terminal_id: "terminal".into(),
+                root_project_id: Some("root".into()),
+                worktree_id: Some("worktree".into()),
+                project_id: "scope".into(),
+                terminal_instance_id: Some("instance".into()),
+                ..Default::default()
+            },
+        );
+        let snapshot = provider.agent_activity().unwrap();
+        assert_eq!(snapshot.terminals.len(), 1);
+        assert_eq!(snapshot.terminals[0].project_id, "root");
+        assert_eq!(
+            snapshot.terminals[0].state,
+            codux_protocol::AgentActivityState::Unknown
+        );
+        bridge.registry().remove("terminal");
+        let removed = provider.agent_activity().unwrap();
+        assert!(removed.terminals.is_empty());
+        assert!(removed.version > snapshot.version);
     }
 }
