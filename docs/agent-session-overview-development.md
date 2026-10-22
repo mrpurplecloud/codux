@@ -88,7 +88,11 @@ activity results are recorded in
 the latest navigation revision.
 
 Source targets Desktop `2.0.3-beta.27` and headless agent `2.0.3-beta.23`.
-Mobile remains `2.0.3-beta.18+67`. The source has not been packaged or installed.
+Mobile remains `2.0.3-beta.18+67`.
+Source commit: `16cc092abfe46cea5e0e257e51c6896effcd25bf`.
+Tags `desktop-v2.0.3-beta.27` and `headless-v2.0.3-beta.23` point to this
+commit and are pushed to the configured LAN remote. No product artifact has
+been packaged, installed, or deployed.
 Real remote first-open navigation, mouse navigation across projects/worktrees,
 and color e-ink readability still need device acceptance. The static color and
 grayscale sample is

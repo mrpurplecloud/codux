@@ -209,13 +209,13 @@ verification_artifact：docs/agent-session-overview-preview.svg 为已声明静�
 
 ## Checkpoint
 
-latest_verified：用户已批准 revision 4；已完成目录/布局一次发布及导航等待，失败保留、旧 generation 隔离、过时缓存让位。浮窗、通用片段、统一状态及此前回退结论保留。生产代码冻结，没有提交、安装、部署，也未动其他任务和用户文件。
+latest_verified：用户已批准 revision 4；已完成目录/布局一次发布及导航等待，失败保留、旧 generation 隔离、过时缓存让位。浮窗、通用片段、统一状态及此前回退结论保留。功能提交 16cc092abfe46cea5e0e257e51c6896effcd25bf 已推送至 lan/main；desktop-v2.0.3-beta.27 与 headless-v2.0.3-beta.23 均指向该提交。未打包、安装或部署，其他任务和用户文件未动。
 current_contract：有效契约为基础角标加 revision 3/4 的独立浮窗、最近三个非空终端行/240 字符、精确当前目标导航。原生待办优先，不从自然语言推断或恢复逐 Agent 收尾解析。实机远端/CLI 和彩墨屏效果尚未证明；不新增功能或继续生产修改。
 verification：本轮 session_overview 9、terminal_restore 4、active_terminal 2、desktop agent_activity 3 passed；桌面编译、rustfmt 和 git diff --check 通过。此前未改的 store 73、supervisor 11、protocol 2、runtime activity 5、headless activity 1 等结果保留，不声称本轮重跑。静态 SVG 已保存并检查 XML/对比度数值；浏览器工具 inventory 为空，未做截图视觉或设备验收。
 self_review：已有加载 owner 一次读取并发布目录/布局后才释放导航；generation/result 仅为协调。挂载状态与实际实例继续保护其不同前提；缺少已确认目标的 scope 缓存不阻断正确恢复，其他缓存保留。没有第二套发现、传输、状态判断、加载器、定时器或模型调用。自动化反驳检查通过，实际远端与彩墨设备继续单列待验收。
 contract_state：frozen；proposed_contract_1：approved and implemented；proposed_contract_2：withdrawn and rolled back；proposed_contract_3：approved and implemented；proposed_contract_4：approved and implemented
 active_capability：none
-next_action：按 2026-10-22 用户授权提交本任务、创建 desktop/headless 版本标签并推送 lan；不打包、安装或部署。之后继续等待真实远端导航和彩墨设备验收，不恢复收尾状态行实验；实机验收未完成，不标 done。
+next_action：等待真实远端导航和彩墨设备验收；不打包、安装或部署，不恢复收尾状态行实验。实机验收未完成，不标 done。
 
 ## 交付授权（2026-10-22）
 
@@ -224,3 +224,5 @@ next_action：按 2026-10-22 用户授权提交本任务、创建 desktop/headle
 协作文档入口：AGENTS.md 指向 CONTEXT.md 和 docs/agent-session-overview-development.md；后者记录状态契约、代码 owner、协作不变量、验证命令和未完成设备验收。
 
 交付后本任务继续保持 active，直到真实远端导航与彩墨屏验收完成；提交和推送不代表设备验收通过。
+
+交付结果：功能提交 `16cc092abfe46cea5e0e257e51c6896effcd25bf` 已包含在 lan/main；标签 `desktop-v2.0.3-beta.27`、`headless-v2.0.3-beta.23` 均已推送，两个 peeled tag 指向该功能提交。只推送 lan；未触碰 origin/upstream，也未纳入 mobile-resume-scrollback、viewport-spurious-takeover、.scratch、private 或 hyhome_diag.sh。
