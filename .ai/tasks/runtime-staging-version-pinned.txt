@@ -1,0 +1,49 @@
+# 运行时资产按版本落盘（staging 随发布自动更新）
+
+status：draft
+类型：bug
+grade：Guarded
+phase：design
+state：ready
+
+## 现场
+2026-11-24 从 Codux `2.0.3-beta.72` 升到 `beta.73` 后，新功能（`tool-wrapper.sh` 的 `load_launch_overrides`）在部分会话完全无效；手工把新 wrapper 复制进 staged 目录后才生效。根因不是打包缺失——bundle 里新脚本齐全——而是**两套 staged root 各自的刷新时机不同，且旧进程会长期占住旧资产**。
+
+## 证据
+- GUI 终端 root：`$TMPDIR/codux/runtime-root`，升级后为 `feat=2`（含 `load_launch_overrides`）。
+- 宿主/无头 root：`~/Library/Application Support/Codux/runtime-root`，升级后仍是 `11-13` 的旧 `tool-wrapper.sh`（`feat=0`）。
+- 两者刷新路径不同：
+  - GUI：`RuntimeInventory::load()` → `stage_runtime_assets()` → `copy_dir_recursive()` 每次启动无条件 `fs::copy`（`apps/desktop/runtime/src/runtime_bridge.rs:24,115,202`）。
+  - 宿主/容器：`AIRuntimeBridge::stage_assets()` 写**内嵌**资产，`stage_runtime_asset()` 内容不同才写（`crates/codux-runtime-live/src/ai_runtime/bridge/assets.rs:11,67`、`ai_runtime/assets.rs:135`），**只在进程启动时**执行。
+- 旧宿主进程长期存活：`PID 11645` 起于 `11-18`，用的是 `codux-agent-4d4157…`（内有旧 wrapper，`strings` 计数 0）；新进程 `e2fdaadc…`（计数 2）起的会话才拿到新脚本。
+- 会话在启动时把 root 固化进环境（`DMUX_WRAPPER_BIN`、`DMUX_TOOL_PERMISSION_SETTINGS_FILE` 等），所以一个旧 owner 可以让**之后新建的**终端/会话继续用旧脚本，直到它退出。
+- 后果示例：`tool-launch-overrides` 的 UI 已能保存，但该 root 上的 `codux-wrapper-helper` 不认识 `launch-overrides`，覆盖被静默忽略。
+
+## 目标
+升级后无需人工干预：任何**新**会话（GUI、宿主、远程 host）拿到的 staged 资产都等于当前发布版本；旧会话不受影响。
+
+## 设计（版本化 root + 原子切换）
+1. staged root 改为 `runtime-root/<version>-<assets_hash>/`（`version` 取 app/agent 版本，`hash` 取内嵌资产集合摘要）。
+2. 写入流程：先写临时目录 → 校验（每个资产内容比对）→ `rename` 成最终目录；`runtime-root/current` 符号链接原子指向最新版本。
+3. 会话启动时解析 `current` 得到具体路径并写入会话环境（保持现有 `DMUX_WRAPPER_BIN` 语义，不传 `current`）。
+4. 启动时若 `current` 指向的目录内容与内嵌资产不一致，重新写出新版本目录并切链；旧目录保留 ≥ 一个宽限期（例如 7 天且无会话引用）后清理。
+5. GUI 与宿主共用同一实现（`stage_runtime_assets` / `stage_assets` 收敛为一个入口），避免两条路径再次分叉。
+6. 观测：`RuntimeInventory` 暴露 `assets_hash` 与 `current` 目标；日志各打一行 `staged root version=… hash=… prev=…`。
+
+## 非目标
+- 不改 `tool-drivers.json` 的生成、不改 wrapper 注入语义。
+- 不要求强杀旧 owner；版本化 root 下旧 owner 只污染它自己的旧目录。
+- 不做按会话回收（先按时间+引用启发式清理即可）。
+
+## 验收
+1. **升级复现**：保留一个旧 owner 进程，安装含新 wrapper 的构建后新开终端/会话，其 `DMUX_WRAPPER_BIN` 指向的 `tool-wrapper.sh` 含新代码（`grep -c load_launch_overrides` = 2），且 `codux-wrapper-helper --codux-wrapper-helper launch-overrides` 有输出。
+2. **旧会话不受影响**：升级前已开的会话继续用旧目录，不报错。
+3. **幂等**：同版本重复启动不产生新目录、不改 `current` 的 mtime。
+4. **并发**：两个进程同时 stage 同一版本时结果一致（仅一个 rename 成功，另一个复用）。
+5. **清理**：超过宽限期的旧目录被删；仍被会话引用的目录不删（用一次模拟引用验证）。
+6. 既有 runtime/staging 测试全绿；`CHANGELOG.md` / `CHANGELOG.zh-CN.md` 记录。
+
+## 风险
+- 会话环境里出现带 hash 的具体路径 → 依赖 `current` 解析的实现必须只在启动时解析一次，避免升级中途切链导致半新半旧。
+- 清理误删正在使用的目录 → 宽限期 + 引用检查双保险，宁可留下不删。
+- Windows 路径/符号链接差异：`current` 用 junction 或复制清单文件，测试覆盖。
