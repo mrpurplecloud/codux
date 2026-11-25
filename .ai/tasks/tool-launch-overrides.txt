@@ -1,0 +1,93 @@
+# 每工具启动参数与环境变量（per-tool launch overrides）
+
+status：draft
+type：feature
+grade：Guarded
+phase：design
+state：ready
+
+## 原始需求
+Codux 里启动的 Agent 需要能带**本机专属**的附加参数与环境变量，且不必改共享配置、不必依赖 PATH shim。
+首个现场用例（2026-11-24，本机 MacBook 10.10.10.16）：
+
+- 本机开 Clash TUN（utun1024=198.18.0.1）时，omp 内置的 bun 到 on-link 内网目的（10.10.10.0/24）立刻失败
+  （EHOSTUNREACH/ECONNREFUSED，SYN 不出 en0），curl/nc/python/node/ssh 正常。
+- 已在本机建好 loopback 中继（`com.user.litellm-relay`，autossh）：`127.0.0.1:14000→.18:4000`、
+  `127.0.0.1:19330→.18:1933`、`127.0.0.1:19340→.18:1934`。
+- 覆盖文件在 `~/.omp/machine-overlay.yml`（不在 Syncthing 的 omp-agent 目录内）。
+- 终端里已用 `omp()` 包装函数注入 `--config ~/.omp/machine-overlay.yml`；**Codux 启动的 omp 拿不到这层**，
+  因此 Codux 会话仍依赖 Clash 才能连本地模型。
+- 需要 Codux 支持给 `omp`（以及其它工具）配置附加参数/环境变量，使该机器不依赖 Clash。
+
+## 现状证据
+- 每工具设置的存储与派生：用户在**应用设置**存 `["ai","runtimeTools"]`
+  （`apps/desktop/runtime/src/tool_permissions.rs:135-146` `ConfigStore::for_file(...).get_path(&["ai","runtimeTools"])`），
+  经 `AIRuntimeToolSettings`（同文件 `:6-101`，`serde(rename_all="camelCase")`，字段形如 `omp`、`ompModel`、`codexEffort`）
+  解析、`sanitize_runtime_tool_settings`（`:199-235`）校验后，由 `write_settings`（`:150-158`）
+  序列化**整份结构**写到派生的 `<runtime_temp>/tool-permissions.json`；宿主把该派生文件路径经
+  `DMUX_TOOL_PERMISSION_SETTINGS_FILE` 传给 wrapper（`apps/desktop/src/app/terminal_state.rs:1117` 起）。
+  → 新字段必须同时进入：结构体、sanitize、派生文件、UI 摘要，否则 wrapper 读不到。
+- wrapper 读取链路：`apps/desktop/runtime-assets/scripts/wrappers/tool-wrapper.sh:566-568`（路径）、
+  `:543`（`json-string-key` 读顶层字符串键）、`:676-700`（`apply_configured_model_arg` 之类的前置注入）。
+  最终执行：`:1465` `run_wrapped_command … env PATH=… "$real_bin" "${launch_args[@]}"`。
+  Windows 对等实现：`tool-wrapper.ps1:619-668`、`:90`。
+- 读设置的 helper 说明见 `crates/codux-runtime-live/src/wrapper_helper.rs`，子命令经
+  `codux-wrapper-helper --codux-wrapper-helper <cmd>` 调用（`json-string-key`、`tool-memory-injection`、
+  `codex-effort`、`opencode-session-state` 等）。
+- 工具驱动表（**不要**把用户参数写进这里）：`crates/codux-runtime-live/src/ai_runtime/tool_driver.rs:12-31`，
+  JSON 投影与断言 `crates/codux-runtime-live/src/ai_runtime/bridge/assets.rs:205`、
+  `bridge/tests/assets.rs:148-178`。该 JSON 是随包发布的资产，跨机器一致。
+- 设置 UI 入口：`apps/desktop/src/app/settings/panes/ai.rs:45+`（`settings_runtime_tool_block`，
+  `RuntimeToolBlockInput{ tool_key: "codex" | "claude" | … }`）。
+
+## 设计
+1. 数据：在应用设置 `ai.runtimeTools` 增加**一个**通用字段，避免 9 工具 × 2 字段膨胀：
+   ```json
+   "launchOverrides": {
+     "omp":  { "args": ["--config", "/Users/mac/.omp/machine-overlay.yml"],
+               "env":  { "OPENVIKING_URL": "http://127.0.0.1:19330" } }
+   }
+   ```
+   Rust：`AIRuntimeToolSettings` 加 `#[serde(default)] launch_overrides: BTreeMap<String, ToolLaunchOverride>`，
+   `ToolLaunchOverride { #[serde(default)] args: Vec<String>, #[serde(default)] env: BTreeMap<String, String> }`；
+   未知 tool key 原样保留（不删用户数据）。`sanitize_runtime_tool_settings` 负责校验：
+   每工具 `args` ≤ 32 项、单值 ≤ 4096 字节、禁止 NUL/换行；`env` 键名须匹配 `^[A-Za-z_][A-Za-z0-9_]*$`，
+   值禁止 NUL；非法项丢弃并保持其余项可用（不整份失败）。`write_settings` 原样带上该字段。
+   `ToolPermissionsSummary` 增加该字段的只读投影（给 UI 回显）。
+2. helper：`wrapper_helper.rs` 新增 `launch-overrides`，输入 `CONFIG_PATH` + `TOOL_NAME`，
+   输出**NUL 分隔**的两段：`ARG\0ARG\0…\0\0K=V\0K=V\0`（以空串分隔两段）。取不到就输出空、退出 0。
+3. wrapper（sh）：新增 `apply_launch_overrides`，插在 `extract_model_target`/`extract_resume_target`
+   **之后**、`run_wrapped_command`（`:1465`，opencode 分支为 `:1445`）**之前**：args **前置**插入
+   （用户显式 CLI 参数在后，天然优先；omp 的 `--config` 可重复），env 段合并进同一条 `env …` 调用。
+   顺序的理由：解析逻辑只看用户参数，不受本机注入影响。全程数组展开，**禁止 eval**；
+   helper 缺失时静默跳过（保持现有降级风格）。
+4. wrapper（ps1）：等价实现，保持字段名、插入位置、以及“无该字段时行为逐字节不变”。
+5. UI：`settings_ai_pane` 的每工具块下加折叠区「附加参数 / 环境变量」，写回应用设置
+   `ai.runtimeTools.launchOverrides`，再由现有 `ToolPermissionsService::sync()` 派生 `tool-permissions.json`；
+   不新增文件、不复用 runtime 临时文件当输入。
+6. 日志：既有 `log_line` 不得打印 env 值（避免密钥入日志），只打印键名与 args 的个数。
+
+## 硬边界 / allowed_files
+- `apps/desktop/runtime/src/tool_permissions.rs`
+- `apps/desktop/src/app/settings/panes/ai.rs`、`apps/desktop/src/app/settings/panes/options.rs`（如需要）
+- `apps/desktop/runtime-assets/scripts/wrappers/tool-wrapper.sh`、`tool-wrapper.ps1`
+- `crates/codux-runtime-live/src/wrapper_helper.rs`（+ 其单元测试）
+- 对应测试文件；`CHANGELOG.md` / `CHANGELOG.zh-CN.md`
+- 非目标：不改 `ai_runtime/tool_driver.rs` 与 `tool-drivers.json` 资产；不引入 PATH shim；不改 host/手机端协议。
+
+## 验收
+1. **无字段时零变化**：`launchOverrides` 缺失或该工具无条目，wrapper 传给二进制的 argv/env 与改动前逐一相同
+   （用假二进制 dump `argv` 与 `env` 比对）。
+2. **现场用例**：设置 `omp.launchOverrides.args=["--config","<家目录>/.omp/machine-overlay.yml"]` 后，
+   在 Codux 内置终端启动 omp，`HTTP(S)_PROXY` 指向死端口（模拟 Clash 未运行）时
+   `omp -p --no-tools --model litellm/fastest "ok"` 仍返回 `ok`（走 loopback 中继）。
+3. **引号/空白/非 ASCII**：`args` 含空格、单双引号、`$`、中文，落盘与到达 argv 完全一致；不产生分词。
+4. **env 生效且不泄漏**：子进程 `env` 中出现键值；日志不含值。
+5. **幂等**：重复启动不累积参数；`--config` 重复出现时以最后一个为准（由工具自身语义决定，测试仅断言未被 wrapper 去重破坏）。
+6. **跨平台**：ps1 与 sh 对同一 JSON 产生等效 argv。
+7. 既有测试全绿；`cargo test -p codux-runtime-live`（wrapper_helper 部分）。
+
+## 风险与回滚
+- 参数注入是双刃剑：只允许用户在本机设置里显式填写，默认空；不读环境变量表以外的来源。
+- 与 `extract_model_target`/`extract_resume_target` 的解析顺序耦合：插入点必须在解析之后、执行之前；用测试固定。
+- 回滚：删字段即恢复原行为；代码侧保持 `#[serde(default)]`，旧版本读到未知字段不得报错（serde 默认忽略）。
